@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+dist_helper32/
+*.spec
+*.sqlite3
+*.sqlite3-*
+# 試験の生成物・レポートはリポジトリに入れない（個人情報の検体を含むため）
+corpus/
+個人情報チェック_*.xlsx
+個人情報チェッカー_*.xlsx
+検出明細_*.csv
+全項目_*.csv
+commit_msg.txt
+vendor/
+# build.py が作る検査器の版（exe 用）
+pii_checker/_buildsig.py
+# 手元の作業メモ（作業環境の固有の情報を含むため公開しない）
+NOW.md
+NOW-archive-*.md
+# 公開前の履歴の控え（git bundle）
+private/

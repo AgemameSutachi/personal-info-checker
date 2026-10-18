@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>個人情報チェッカー</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>個人情報チェッカー</h1>
+  <div id="env" class="env" aria-label="この PC で使える機能"></div>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <button id="btn-new" class="primary wide">＋ 新しい検査</button>
+    <h2 class="side-title">これまでの検査</h2>
+    <ul id="job-list" class="job-list"><li class="muted empty">まだありません</li></ul>
+  </aside>
+
+  <section class="content">
+    <!-- 新しい検査 -->
+    <div id="view-new" class="view">
+      <h2>新しい検査</h2>
+      <p class="lead">指定した場所の下にあるすべてのファイルを、zip などの中身や埋め込みまで開いて調べます。調べられなかったものは必ず一覧に残すので、「個人情報は無い」と言い切れるかどうかが分かります。</p>
+      <form id="form-new" autocomplete="off">
+        <fieldset class="mode-pick" id="mode-pick">
+          <legend>検査する場所の指定方法</legend>
+          <div class="seg">
+            <label class="seg-opt"><input type="radio" name="target-mode" id="mode-folder" value="folder" checked aria-controls="pane-folder"> フォルダを指定</label>
+            <label class="seg-opt"><input type="radio" name="target-mode" id="mode-conn" value="connection" aria-controls="pane-conn"> 接続方式を選ぶ <small>（SMB・FTP など）</small></label>
+          </div>
+        </fieldset>
+
+        <div id="pane-folder">
+          <label class="field">
+            <span>検査するフォルダ <small>（1行に1つ。NAS は <code>\\NAS名\共有名\フォルダ</code> の形で）</small></span>
+            <textarea id="roots" rows="3" placeholder="例: \\nas01\総務\2024年度" required></textarea>
+          </label>
+          <p id="root-help-web" class="help">エクスプローラーで対象のフォルダを開き、上のアドレス欄をクリックして表示される場所をコピーし、ここに貼り付けてください。</p>
+          <div class="row">
+            <button type="button" id="btn-pick" class="hidden">フォルダを選ぶ…</button>
+          </div>
+        </div>
+
+        <div id="pane-conn" class="conn-pane hidden">
+          <label class="field" for="conn-kind"><span>接続方式</span>
+            <select id="conn-kind"></select>
+          </label>
+          <div class="grid2" id="conn-host-row">
+            <label class="field" for="conn-host"><span>サーバー <small>（名前か IP アドレス）</small></span>
+              <input type="text" id="conn-host" placeholder="例: nas01 または 192.168.0.5" spellcheck="false" autocapitalize="off">
+            </label>
+            <label class="field" id="conn-port-field" for="conn-port"><span>ポート <small>（任意・空なら既定）</small></span>
+              <input type="number" id="conn-port" min="1" max="65535" inputmode="numeric">
+            </label>
+          </div>
+          <label class="field" id="conn-share-field" for="conn-share"><span>共有名</span>
+            <input type="text" id="conn-share" placeholder="例: 総務" spellcheck="false" autocapitalize="off">
+          </label>
+          <label class="field" for="conn-path"><span>フォルダ <small id="conn-path-note">（任意・共有の中のフォルダ。空なら全体）</small></span>
+            <input type="text" id="conn-path" placeholder="例: 総務/2024年度" spellcheck="false" autocapitalize="off">
+          </label>
+          <div class="grid2">
+            <label class="field" for="conn-user"><span>ユーザー名 <small>（任意）</small></span>
+              <input type="text" id="conn-user" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="conn-user-help">
+            </label>
+            <label class="field" for="conn-pass"><span>パスワード</span>
+              <input type="password" id="conn-pass" autocomplete="off" data-lpignore="true" aria-describedby="conn-pass-help">
+            </label>
+          </div>
+          <p id="conn-user-help" class="help"></p>
+          <p id="conn-pass-help" class="help">パスワードは接続に使うだけで、保存しません。</p>
+          <label class="field" id="conn-enc-field" for="conn-enc"><span>ファイル名の文字コード</span>
+            <select id="conn-enc"></select>
+          </label>
+          <div id="conn-verify-field">
+            <label class="check"><input type="checkbox" id="conn-verify" aria-describedby="conn-verify-help"> サーバーの証明書を確かめる</label>
+            <p id="conn-verify-help" class="help">NAS の自己署名の証明書では外したまま使います。確かめないと、途中で成りすまされても気づけません。</p>
+          </div>
+          <div class="row">
+            <button type="button" id="btn-conn-test">接続を確かめる</button>
+            <span id="conn-msg" class="msg" role="status" aria-live="polite"></span>
+          </div>
+          <p class="help">元のファイルは読むだけで、サーバーには何も書きません。FTP は1件ずつ手元の一時フォルダへ写してから調べます（写しは調べ終わったら消します）。
+            ファイルの「最終アクセス日時」は、変えないようサーバーに指示しますが、守るかはサーバー次第です（Windows のサーバーは守ります。ただし読み取り専用の共有と、Samba・FTP では読むと更新されます）。</p>
+        </div>
+        <label class="field">
+          <span>暗号化された zip・Office ファイル等のパスワード <small>（分かっていれば・1行に1つ。サーバーへ接続するパスワードではありません）</small></span>
+          <textarea id="passwords" rows="2" class="secret" spellcheck="false"></textarea>
+        </label>
+        <p class="help">暗号化された zip や Office ファイルなど、すべてに試します。ここが空でも、検査のあとでパスワードを聞きます。パスワードは保存しません。
+          <label class="inline-check"><input type="checkbox" id="show-secret"> 入力内容を表示</label></p>
+        <details class="advanced">
+          <summary>詳しい設定</summary>
+          <label class="check"><input type="checkbox" id="opt-ocr" checked> 画像とスキャンした PDF の文字を OCR で読む</label>
+          <p id="ocr-warn" class="help warn hidden">OCR を使わないと、画像やスキャンした PDF は「検査できなかった」扱いになり、「個人情報は無い」と言い切れなくなります。</p>
+          <label class="check"><input type="checkbox" id="opt-reuse" checked> 前回から変わっていないファイルは前回の結果を使う <small>（速い。外すと全部読み直す）</small></label>
+          <label class="check"><input type="checkbox" id="opt-deep"> ディスクイメージの空き領域（削除されたファイル）も調べる <small>（時間がかかる）</small></label>
+          <div class="grid2">
+            <label class="field"><span>同時に調べるファイルの数</span><input type="number" id="opt-workers" min="1" max="32" placeholder="自動"></label>
+            <label class="field"><span>1ファイルの時間制限（分）</span><input type="number" id="opt-timeout" min="1" value="30"></label>
+          </div>
+          <label class="field"><span>展開に使う一時フォルダ <small>（大きなディスクイメージを調べるときは空きの多いドライブを）</small></span><input type="text" id="opt-temp" placeholder="既定（Windows の一時フォルダ）"></label>
+        </details>
+        <div class="row">
+          <button type="submit" id="btn-start" class="primary">検査を始める</button>
+          <span id="new-msg" class="msg" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </div>
+
+    <!-- 検査の詳細 -->
+    <div id="view-job" class="view hidden">
+      <div class="job-head">
+        <div>
+          <h2 id="job-title"></h2>
+          <div id="job-roots" class="muted small mono"></div>
+          <div id="job-sub" class="muted"></div>
+        </div>
+        <div class="actions">
+          <button id="btn-open-report" class="primary">レポートを見る</button>
+          <button id="btn-report">Excel に書き出す</button>
+          <button id="btn-csv">検出明細（CSV）</button>
+          <button id="btn-cancel" class="hidden">中止</button>
+          <button id="btn-resume" class="hidden">再開</button>
+          <form id="resume-pw" class="row resume-pw hidden" autocomplete="off">
+            <label for="resume-pw-input" class="small">接続のパスワード</label>
+            <input type="password" id="resume-pw-input" autocomplete="off" data-lpignore="true">
+            <button type="submit" class="primary">接続して再開</button>
+            <button type="button" id="resume-pw-cancel">やめる</button>
+          </form>
+          <button id="btn-delete" class="danger-outline">結果を削除</button>
+          <span id="act-msg" class="msg small" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+
+      <div id="verdict" class="verdict" role="status" aria-live="polite">
+        <div class="verdict-title"></div>
+        <ul class="verdict-detail"></ul>
+        <p class="verdict-next"></p>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress" role="progressbar" aria-label="進み具合"><div id="progress-bar" class="progress-bar"></div></div>
+        <div id="progress-text" class="muted small"></div>
+        <div id="current" class="muted small"></div>
+      </div>
+
+      <p id="tiles-caption" class="muted small"></p>
+      <div id="tiles" class="tiles"></div>
+
+      <div id="pw-panel" class="pw-panel hidden">
+        <h3><span id="pw-heading">パスワードが必要なファイル</span> <span id="pw-count" class="pill needs_password"></span></h3>
+        <p id="pw-msg" class="msg" role="status" aria-live="polite"></p>
+        <div id="pw-form-area">
+          <p>パスワードを1回入れると、<strong>パスワードが必要なすべてのファイル</strong>と、これから見つかる暗号化ファイルに試します。1件ずつ入れる必要はありません。パスワードは保存しません。</p>
+          <p id="pw-conn-help" class="help hidden"></p>
+          <form id="form-pw" class="row" autocomplete="off">
+            <span class="pw-item">
+              <label class="pw-label sr-only" for="pw-input" id="pw-input-label">パスワード</label>
+              <input type="password" id="pw-input" placeholder="パスワード" autocomplete="off" data-lpignore="true">
+            </span>
+            <span id="pw-conn-field" class="pw-item hidden">
+              <label class="pw-label" for="pw-conn-input" id="pw-conn-label">サーバーのパスワード</label>
+              <input type="password" id="pw-conn-input" placeholder="サーバーのパスワード" autocomplete="off" data-lpignore="true" aria-describedby="pw-conn-help">
+            </span>
+            <button type="submit" class="primary">全部に試す</button>
+          </form>
+          <ul id="pw-list" class="pw-list"></ul>
+        </div>
+      </div>
+
+      <nav class="tabs" role="tablist" aria-label="結果の表">
+        <button class="tab" data-tab="attention" role="tab" aria-selected="false">要対応</button>
+        <button class="tab" data-tab="hits" role="tab" aria-selected="false">個人情報の可能性があるファイル</button>
+        <button class="tab" data-tab="findings" role="tab" aria-selected="false">検出明細</button>
+        <button class="tab" data-tab="all" role="tab" aria-selected="false">全ファイル</button>
+        <button class="tab" data-tab="items" role="tab" aria-selected="false">全項目（中身を含む）</button>
+      </nav>
+      <div class="table-tools">
+        <label class="sr-only" for="q">パスで絞り込み</label>
+        <input type="search" id="q" placeholder="ファイル名・パスで絞り込み">
+        <select id="f-type" class="hidden" aria-label="種類で絞り込み"><option value="">種類: すべて</option></select>
+        <select id="f-conf" class="hidden" aria-label="確度で絞り込み">
+          <option value="">確度: すべて</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option>
+        </select>
+        <span id="table-count" class="muted small"></span>
+      </div>
+      <p id="sample-note" class="muted small hidden"></p>
+      <div class="table-wrap"><table id="table"><thead></thead><tbody></tbody></table></div>
+      <div class="pager">
+        <button id="prev">前へ</button><span id="page-info" class="muted small"></span><button id="next">次へ</button>
+      </div>
+    </div>
+
+    <!-- レポート（結果をまとめたページ。Excel と同じ中身。印刷・PDF にもできる） -->
+    <div id="view-report" class="view hidden">
+      <div class="report-bar no-print">
+        <button type="button" id="rep-back">← 検査の画面に戻る</button>
+        <button type="button" id="rep-print">印刷・PDF に保存</button>
+        <button type="button" id="rep-xlsx">Excel に書き出す</button>
+        <span id="rep-msg" class="msg small" role="status" aria-live="polite"></span>
+      </div>
+      <article id="report-body" class="report"></article>
+    </div>
+  </section>
+</main>
+
+<dialog id="detail-dialog" aria-labelledby="detail-title">
+  <form method="dialog" class="dialog-head"><h3 id="detail-title"></h3><button class="close" aria-label="閉じる">閉じる ×</button></form>
+  <div id="detail-body"></div>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

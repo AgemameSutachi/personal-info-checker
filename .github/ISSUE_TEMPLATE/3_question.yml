@@ -1,0 +1,20 @@
+name: 質問
+description: 使い方・結果の読み方が分からない
+labels: ["質問"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先に README の「困ったとき」「何を個人情報とみなすか（判定の基準）」も見てください。
+        **実在する個人情報や、社内のファイルそのものは貼らないでください。** このページは誰でも読めます。
+  - type: textarea
+    id: question
+    attributes:
+      label: 知りたいこと
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版
+      description: "`pii-checker.exe --version` の出力"

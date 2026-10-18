@@ -1,0 +1,19 @@
+name: 要望
+description: 対応してほしい形式・欲しい機能・使いにくいところ
+labels: ["要望"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **実在する個人情報や、社内のファイルそのものは貼らないでください。** このページは誰でも読めます。
+  - type: textarea
+    id: want
+    attributes:
+      label: してほしいこと
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 困っていること・使う場面
+      description: いまどう困っているか、どんな場面で使いたいか

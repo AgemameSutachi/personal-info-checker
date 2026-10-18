@@ -1,0 +1,5 @@
+# 試験だけに使うもの（配布の exe には入れない）
+pytest
+pyftpdlib  # tests/test_remote.py で手元に FTP サーバーを立てる
+pyopenssl  # pyftpdlib で FTPS（TLS）を試す
+black==26.*  # 書式の確認（CI と同じ版にそろえる）

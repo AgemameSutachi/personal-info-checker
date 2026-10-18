@@ -1,0 +1,896 @@
+"""個人情報らしき値の検出規則。
+
+- 本文の文字列からは正規表現＋検査数字（マイナンバー・Luhn）＋前後の手がかり語で検出する。
+- 表形式（Excel・Access・CSV・Word の表）では、列見出しから列の意味を推定し、
+  その列の値も検出に数える（「氏名」列の値は、辞書に無い名前でも拾える）。
+- 返す値はマスク済み。生の値は呼び出し元へ返さない。
+"""
+
+from __future__ import annotations
+
+import functools
+import re
+import unicodedata
+from dataclasses import dataclass
+
+from .models import Confidence
+
+# 種類のキー → 表示名。レポートの列順もこの順にする。
+PII_TYPES: dict[str, str] = {
+    "my_number": "マイナンバー",
+    "credit_card": "クレジットカード番号",
+    "bank_account": "銀行口座番号",
+    "drivers_license": "運転免許証番号",
+    "passport": "旅券番号",
+    "pension": "基礎年金番号",
+    "health_insurance": "保険証の記号番号",
+    "sensitive": "要配慮個人情報",
+    "name": "氏名",
+    "address": "住所",
+    "postal_code": "郵便番号",
+    "phone": "電話番号",
+    "email": "メールアドレス",
+    "birthdate": "生年月日",
+    "gender": "性別",
+    "age": "年齢",
+}
+
+# これらは単独で漏れると被害が大きい（リスクの重み付けに使う）
+CRITICAL_TYPES = {
+    "my_number",
+    "credit_card",
+    "bank_account",
+    "drivers_license",
+    "passport",
+    "pension",
+    "health_insurance",
+    "sensitive",
+}
+
+H = r"[\-‐‑‒–—―ー−]"  # NFKC 後に残りうるハイフンの仲間
+SEP = rf"(?:\s?{H}\s?|\s|\.)?"
+NOT_DIGIT_BEFORE = rf"(?<![0-9])"
+NOT_DIGIT_AFTER = r"(?![0-9])"
+
+PREFECTURES = (
+    "北海道|青森県|岩手県|宮城県|秋田県|山形県|福島県|茨城県|栃木県|群馬県|埼玉県|千葉県|東京都|"
+    "神奈川県|新潟県|富山県|石川県|福井県|山梨県|長野県|岐阜県|静岡県|愛知県|三重県|滋賀県|京都府|"
+    "大阪府|兵庫県|奈良県|和歌山県|鳥取県|島根県|岡山県|広島県|山口県|徳島県|香川県|愛媛県|高知県|"
+    "福岡県|佐賀県|長崎県|熊本県|大分県|宮崎県|鹿児島県|沖縄県"
+)
+
+# よくある姓（敬称つき・空白区切りの氏名を拾う手がかり。網羅ではない）
+SURNAMES = (
+    "佐藤|鈴木|高橋|田中|伊藤|渡辺|渡邊|山本|中村|小林|加藤|吉田|山田|佐々木|山口|松本|井上|木村|林|"
+    "斎藤|斉藤|清水|山崎|森|池田|橋本|阿部|石川|山下|中島|石井|小川|前田|岡田|長谷川|藤田|後藤|近藤|"
+    "村上|遠藤|青木|坂本|斉木|福田|太田|西村|藤井|金子|岡本|藤原|中野|三浦|原田|中川|松田|竹内|小野|"
+    "田村|中山|和田|石田|森田|上田|原|柴田|酒井|工藤|横山|宮崎|宮本|内田|高木|安藤|谷口|大野|丸山|"
+    "今井|河野|藤本|村田|武田|上野|杉山|増田|平野|大塚|千葉|久保|松井|小島|岩崎|桜井|野口|松尾|野村|"
+    "木下|菊地|菊池|佐野|大西|杉本|新井|浜田|菅原|市川|水野|小松|島田|古川|小山|高野|西田|菊田|山内|"
+    "西川|五十嵐|北村|安田|中田|川口|平田|川崎|飯田|吉川|本田|久保田|沢田|辻|関|吉村|渡部|岩田|中西|"
+    "服部|樋口|福島|川上|永井|松岡|田口|山中|森本|土屋|矢野|広瀬|秋山|石原|松下|大橋|松浦|吉岡|小池|"
+    "馬場|浅野|荒木|大久保|野田|小沢|田辺|川村|星野|黒田|堀|尾崎|望月|永田|熊谷|内藤|松村|西山|大谷|"
+    "平井|大島|岩本|片山|本間|早川|横田|岡崎|荒井|大石|鎌田|成田|宮田|小田|石橋|篠原|須藤|河合|大川"
+)
+
+MY_NUMBER_KW = re.compile(r"(個人番号|マイナンバー|my\s?number|my\s?ナンバー|通知カード)", re.I)
+CARD_KW = re.compile(r"(カード|card|クレジット|クレカ|visa|master|jcb|amex)", re.I)
+PHONE_KW = re.compile(r"(電話|tel|携帯|連絡先|自宅|phone|mobile|fax)", re.I)
+BIRTH_KW = re.compile(r"(生年月日|誕生日|生まれ|dob|birth)", re.I)
+LICENSE_KW = re.compile(r"(免許)")
+
+RE_MY_NUMBER = re.compile(
+    rf"(?<![0-9])(?<![0-9][ \-])([0-9]{{4}}){SEP}([0-9]{{4}}){SEP}([0-9]{{4}})(?![0-9])(?![ \-][0-9])"
+)
+RE_CARD = re.compile(rf"{NOT_DIGIT_BEFORE}(?:[0-9][ \-]?){{12,18}}[0-9]{NOT_DIGIT_AFTER}")
+RE_MOBILE = re.compile(rf"(?<![0-9{H[1:-1]}])0[5789]0{SEP}[0-9]{{4}}{SEP}[0-9]{{4}}{NOT_DIGIT_AFTER}")
+RE_MOBILE_INTL = re.compile(r"\+81[\s\-]?\(?0?\)?[5789]0[\s\-]?[0-9]{4}[\s\-]?[0-9]{4}(?![0-9])")
+# 「+81-3-1234-5678」の固定電話（市外局番の頭の0を除いて9桁）。携帯（[5789]0）は RE_MOBILE_INTL で拾う
+RE_LANDLINE_INTL = re.compile(
+    # 区切りの無い「+81312345678」（vCard・連絡先の書き出し）も拾う。桁数（国内で9桁）は拾った後に確かめる
+    # 数式・長い数字の中の「+81…」（「1e+81234567890」）は拾わない。区切りは国内の形と同じく「.」も許す
+    r"(?<![0-9A-Za-z])\+81[\s\-.]?\(?0?\)?(?![5789]0)\(?[1-9][0-9]{0,3}\)?[\s\-.]?[0-9]{1,4}[\s\-.]?[0-9]{4}(?![0-9])"
+)
+HC = H[1:-1]  # 文字クラスの中身だけ
+LAND_SEP = rf"(?:\s?{H}\s?|\.)"
+RE_LANDLINE = re.compile(
+    rf"(?<![0-9{HC}])(?:\(0[0-9]{{1,4}}\)\s?[0-9]{{1,4}}{LAND_SEP}"
+    rf"|0[1-9][0-9]{{0,3}}(?:{LAND_SEP}|\s?\(\s?)[0-9]{{1,4}}(?:{LAND_SEP}|\s?\)\s?))"
+    rf"[0-9]{{4}}(?![0-9{HC}])"
+)
+# 個人に結びつかない番号（フリーダイヤル・ナビダイヤル・ダイヤル Q2）。電話のどの書き方でも同じに外す
+NON_PERSONAL_PHONE_PREFIXES = ("0120", "0800", "0570", "0990")
+RE_LANDLINE_SPACE = re.compile(r"(?<![0-9])0[1-9][0-9]{0,3} [0-9]{1,4} [0-9]{4}(?![0-9])")
+COMPANY_KW = re.compile(
+    # FAX は個人の連絡先にも並ぶ（「山田太郎 TEL … FAX …」）ので会社の語にしない。施設の一覧の電話は、人の手がかりが
+    # 無ければ 低 に落ちる（_classify_addresses の needs_person）
+    r"(代表|本社|株式会社|有限会社|合同会社|\(株\)|\(有\)|支店|営業所|事業所|受付時間|"
+    # 英文のレターヘッド・署名（「ABC Co., Ltd. Head Office +81-3-…」）
+    # 語の途中（「zinc.」）に当たらないよう、英語の語は語の頭から
+    r"\bco\.,?\s?ltd|\binc\.|\bcorporation|\bhead\s?office|\bheadquarters)",
+    re.I,
+)
+# 横持ちの表の項目名（名前ではない語）。「UENO」「春日」のような実在の名前を落とさないよう、
+# 完全一致か「2文字以上＋日」の形に限る
+RE_LABEL_WORD = re.compile(
+    r"^(?:.{0,6}(?:日付|年月日|番号|区分|コード|備考|所属|部署|部門|役職|時刻|金額|数量|単価|合計|状態|種別|分類|メモ|内容|件名|期限|会社名?|社名|項目)"
+    r"|[一-龥]{2,3}日|ID|No\.?|NO|日)$"
+)
+RE_ANNOTATION = re.compile(r"[（(【\[〔<＜][^）)】\]〕>＞]{0,20}[）)】\]〕>＞]")
+PERSONAL_PHONE_KW = re.compile(r"(自宅|携帯|個人|緊急連絡|本人|実家)")
+ORDER_KW = re.compile(
+    r"(注文|受注|発注|伝票|管理番号|品番|型番|製造番号|シリアル|serial|order|商品コード|jan|s/?n\b)", re.I
+)
+MONEY_AFTER = re.compile(r"^\s*(円|,|万|千|百|ドル|\.[0-9])")
+MONEY_BEFORE = re.compile(r"(残高|金額|額|振替|手数料|入金|出金|支払|請求)")
+RE_PHONE_BARE = re.compile(rf"{NOT_DIGIT_BEFORE}0[1-9][0-9]{{8,9}}{NOT_DIGIT_AFTER}")
+RE_EMAIL = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})*\.[A-Za-z]{2,24}(?![A-Za-z])"
+)
+RE_POSTAL_MARK = re.compile(rf"〒\s?[0-9]{{3}}{H}?[0-9]{{4}}{NOT_DIGIT_AFTER}")
+RE_POSTAL_BEFORE_PREF = re.compile(
+    rf"(?<![0-9{H[1:-1]}])[0-9]{{3}}{H}[0-9]{{4}}(?![0-9{H[1:-1]}])(?=\s{{0,3}}(?:{PREFECTURES}))"
+)
+NUM = r"(?:[0-9]+|[一二三四五六七八九十〇]+)"
+ADDR_TAIL = rf"{NUM}(?:丁目|番地|番|号|{H}[0-9]+)"
+RE_ADDRESS = re.compile(
+    # 市区町村の後の空白1つも許す（「東京都千代田区 丸の内1-1-1」と書く人がいる）。ただし空白の後が町名の文字で
+    # 始まるときだけ（「東京都港区 03-1234-5678」「横浜市 10-15名」の数字を番地と取り違えない）。漢数字は外さない
+    # （六本木・三田・九段・五反田など、漢数字で始まる町名が多い）。英字・「第」で始まるもの（「港区 Room3-1」
+    # 「港区 第3会議室1番」）は部屋の名前で町名ではないので続けない
+    rf"(?:{PREFECTURES})\s?[^\s、。,，「」()（）]{{1,20}}?[市区町村郡](?:\s(?=(?!第)[一-龥々ぁ-んァ-ヶー]))?"
+    rf"[^\s、。,，「」()（）]{{0,25}}?{ADDR_TAIL}(?:{H}?[0-9]+)*"
+)
+RE_ADDRESS_NO_PREF = re.compile(
+    rf"(?<![一-龥])[一-龥]{{1,5}}[市区][一-龥ぁ-んァ-ヶー]{{1,10}}(?:[0-9]+{H}[0-9]+(?:{H}[0-9]+)?|{NUM}丁目(?:{NUM}番地?)?(?:{NUM}号)?[0-9\-]*|{NUM}番地)"
+)
+DATE_WEST = r"(?:19|20)[0-9]{2}\s?[年/.\-]\s?[0-9]{1,2}\s?[月/.\-]\s?[0-9]{1,2}日?"
+DATE_ERA = (
+    r"(?:明治|大正|昭和|平成|令和|[MTSHR])\s?(?:[0-9]{1,2}|元)\s?[年.\-/]\s?[0-9]{1,2}\s?[月.\-/]\s?[0-9]{1,2}日?"
+)
+RE_DATE = re.compile(rf"(?:{DATE_WEST}|{DATE_ERA})")
+RE_DATE_ERA = re.compile(DATE_ERA)
+RE_BANK = re.compile(
+    r"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座)[^0-9\n]{0,12}?([0-9]{7})(?![0-9])",
+    re.I,
+)
+# 「運転免許 123…」（証・番号を付けない書き方）も免許証番号として拾う。免許の語があるとマイナンバーからは外すので、
+# ここで拾わないとどちらにも数えられずに落ちていた（不具合の修正）
+RE_LICENSE = re.compile(r"(?:免許証番号|免許番号|免許証|運転免許)[^0-9\n]{0,12}?([0-9]{12})(?![0-9])")
+RE_PASSPORT = re.compile(
+    r"(?:旅券番号|旅券|パスポート番号|パスポート|passport\s?no\.?)[^A-Za-z0-9\n]{0,12}?([A-Z]{2}[0-9]{7})(?![0-9])",
+    re.I,
+)
+RE_PENSION = re.compile(rf"(?:基礎年金番号|年金番号)[^0-9\n]{{0,12}}?([0-9]{{4}}{H}?[0-9]{{6}})(?![0-9])")
+RE_INSURANCE = re.compile(
+    r"(?:被保険者番号|保険者番号|記号番号|保険証番号)[^0-9A-Za-z\n]{0,8}?([0-9A-Za-z][0-9A-Za-z\-]{3,19})"
+)
+NAME_CHARS = r"[一-龥々ぁ-んァ-ヶー]"
+RE_NAME_LABEL = re.compile(
+    rf"(?:氏名|お名前|名前|患者名|顧客名|利用者名|契約者名|申込者名|保護者名|受取人|宛名|宛先|担当者?|ふりがな|フリガナ)"
+    rf"(?:\s*[:：]\s*|[ 　]+)({NAME_CHARS}{{2,8}}(?:[ 　]{NAME_CHARS}{{1,8}})?)"
+)
+RE_NAME_LABEL_TIGHT = re.compile(
+    rf"(?:^|(?<=[\s　:：、,|]))(?:氏名|お名前|名前|患者名|顧客名|契約者名)((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])"
+)
+RE_NAME_HONORIFIC = re.compile(rf"(?<![一-龥])(?:{SURNAMES})[ 　]?[一-龥々]{{0,3}}(?:様|殿|さん|君|くん|ちゃん)")
+HONORIFIC_STOP = re.compile(
+    r"(お客|皆|各位|関係者|担当者|会員|利用者|取引先|貴|御|責任者|代表者|社長|部長|課長|先生|保護者|ご家族|応募者|参加者|受講者|入居者|契約者)$"
+)
+RE_NAME_HONORIFIC_ANY = re.compile(r"(?<![一-龥々])([一-龥々]{3,5})(?:様|殿)(?![方])")
+RE_NAME_SPACED = re.compile(rf"(?<![一-龥])(?:{SURNAMES})[ 　][一-龥々]{{1,3}}(?![一-龥々])")
+RE_SENSITIVE = re.compile(
+    r"(?:病名|病歴|既往歴|診断名|傷病名|障害等級|障害者手帳|犯罪歴|前科|信仰|宗教|信条|本籍)\s*[:：]\s*([^\s、。,]{1,30})"
+)
+ROLE_EMAIL = re.compile(
+    r"^(info|support|noreply|no-reply|admin|sales|contact|webmaster|postmaster|help|service)@",
+    re.I,
+)
+
+# 列見出し → 種類。完全一致（短い語）と部分一致（長い語）に分ける。
+HEADER_EXACT = {
+    "姓": "name",
+    "名": "name",
+    "氏": "name",
+    "氏名": "name",
+    "名前": "name",
+    "お名前": "name",
+    "name": "name",
+    "fullname": "name",
+    "firstname": "name",
+    "lastname": "name",
+    "カナ": "name",
+    "かな": "name",
+    "セイ": "name",
+    "メイ": "name",
+    "age": "age",
+    "年齢": "age",
+    "性別": "gender",
+    "gender": "gender",
+    "sex": "gender",
+    "〒": "postal_code",
+    "zip": "postal_code",
+    "tel": "phone",
+    "fax": "phone",
+    "mail": "email",
+    "email": "email",
+    "e-mail": "email",
+    "住所": "address",
+    "担当者": "name",
+    "担当": "name",
+    "宛先": "name",
+    "宛名": "name",
+    "受取人": "name",
+    "address": "address",
+}
+HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(マイナンバー|個人番号|mynumber)", re.I), "my_number"),
+    (re.compile(r"(カード番号|クレジット|cardno|cardnumber)", re.I), "credit_card"),
+    (re.compile(r"(口座番号|口座no|口座)", re.I), "bank_account"),
+    (re.compile(r"(免許証番号|免許番号|免許証)"), "drivers_license"),
+    (re.compile(r"(旅券|パスポート|passport)", re.I), "passport"),
+    (re.compile(r"(年金番号)"), "pension"),
+    (re.compile(r"(被保険者番号|保険者番号|保険証|記号番号)"), "health_insurance"),
+    (
+        re.compile(r"(病名|病歴|既往歴|診断|傷病|障害|犯罪|前科|宗教|信条|本籍|信仰)"),
+        "sensitive",
+    ),
+    (re.compile(r"(生年月日|誕生日|birthday|birthdate|dateofbirth|dob)", re.I), "birthdate"),
+    (re.compile(r"(郵便番号|postal|zipcode|postcode)", re.I), "postal_code"),
+    (re.compile(r"(メール|mail)", re.I), "email"),
+    (re.compile(r"(住所|番地|address|居所)", re.I), "address"),
+    (re.compile(r"(電話|携帯|連絡先|phone|mobile|tel)", re.I), "phone"),
+    (re.compile(r"(メール|mail)", re.I), "email"),
+    (re.compile(r"(氏名|名前|フリガナ|ふりがな|ﾌﾘｶﾞﾅ|カナ氏名|姓名)", re.I), "name"),
+    # 顧客表・申込の控えでよく見る、人を指す見出し（2026-10-18 評価で、これらの列が氏名にならず住所・電話が 低 に落ちた）
+    (
+        re.compile(
+            r"(お客様名|お客様氏名|契約者|申込者|送り主|依頼主|届け?先名|加入者|customername|clientname|ご?芳名)"
+        ),
+        "name",
+    ),
+    (
+        re.compile(
+            r"(顧客|会員|患者|社員|従業員|職員|生徒|学生|児童|園児|利用者|申込者|契約者|担当者|"
+            r"保護者|入居者|受講者|参加者|応募者|受取人|被保険者|世帯主|代表者|本人|家族)(名|氏名|の名前)"
+        ),
+        "name",
+    ),
+    (re.compile(r"(性別)"), "gender"),
+    (re.compile(r"(年齢)"), "age"),
+]
+# 「〜名」でも個人名でないもの（誤検出を防ぐ）
+HEADER_NOT_PII = re.compile(
+    r"((mac|ip|url|web)\s*(address|アドレス)|本社|所在地|会社名|社名|法人名|団体名|商品名|品名|製品名|店舗名|店名|部署名|部門名|課名|ファイル名|シート名|"
+    r"項目名|件名|地名|駅名|施設名|学校名|銀行名|支店名|機種名|型名|品目|メールサーバ|作成者|更新者)"
+)
+
+
+@dataclass
+class Hit:
+    """検出1件（内部用。値は生のまま。外へ出す前に mask する）。"""
+
+    pii_type: str
+    confidence: Confidence
+    value: str
+    start: int
+    end: int
+    rule: str
+    # 住所だけ: 人と結びつく手がかり（同じファイルの氏名など）があって初めて確度 中にするもの。
+    # 集める側（engine.Collector）が、手がかりが無ければ 低 にする
+    needs_person: bool = False
+
+
+# 住所を「個人の住所」とみなす手がかりの語（近くにあれば、人の手がかりを待たずに確度 中）
+PERSONAL_ADDRESS_KW = re.compile(
+    # 「勤務先 〇〇高校 …」は施設の所在地でも、その人の勤め先として人と結びつく
+    r"(自宅|現住所|本人|実家|居所|住民票|本籍|転居|引越|引っ越し|お届け先|届け先|送付先|配送先|送り先|宛先|宛名|緊急連絡|勤務先)"
+)
+# 公共施設・会社などの所在地を示す語（住所の前にあれば確度 低。公共施設の所在地や市区町村の番地の一覧を
+# 「個人情報の可能性あり」にしないため。拾わないと言い切りに反するので、消さずに 低＝要確認にする）
+FACILITY_KW = re.compile(
+    r"(所在地|市役所|区役所|町役場|村役場|役場|役所|庁舎|出張所|支所|図書館|図書室|公民館|体育館|美術館|博物館|資料館|"
+    # 「大学生」「高校生」「専門学校生」のように人を指す言い方は除く
+    r"会館|ホール|センター|プラザ|小学校(?!生)|中学校(?!生)|高等学校(?!生)|高校(?!生)|大学(?!生|院生)|学校(?!生)|"
+    r"幼稚園|保育園|保育所|こども園|病院|医院|"
+    # 「駅」は「駅前」「最寄駅」を除く（個人の住所の欄の前によく出る）
+    r"クリニック|診療所|薬局|郵便局|警察署|交番|消防署|(?<!最寄)(?<!最寄り)駅(?!前|から|まで|徒歩)|公園|ホテル|会場|施設|株式会社|有限会社|合同会社|\(株\)|"
+    r"本社|支店|営業所|事業所|工場|店舗)"
+)
+# 人と結びつける手がかりになる種類（同じファイルにあれば住所を確度 中にする）。電話・メール・郵便番号は施設の一覧にも
+# 普通に載るので手がかりにしない
+PERSON_CUE_TYPES = frozenset({"name", "birthdate"}) | frozenset(CRITICAL_TYPES)
+# 人の情報を集めた書類の題（ファイル名か本文の先頭にあれば、そのファイルの住所・固定電話を人と結びつける）。
+# 見出し語の無い名前（「山田 太郎」）しか無い連絡網・履歴書で、住所・電話が 低 に落ちないようにする
+PERSON_DOC_TITLE = re.compile(
+    r"(履歴書|職務経歴書|名簿|連絡網|緊急連絡|申込書|申込み書|申し込み書|住所録|顧客|会員|社員|職員|従業員|生徒|児童|園児|"
+    r"患者|入居者|利用者|受講者|参加者|応募者|宛名|年賀状|カルテ|身上書)"
+)
+
+
+RE_MOBILE_PREFIX = re.compile(r"^(?:\+81[\s\-]?\(?0?\)?)?0?[5789]0")
+
+
+def _classify_addresses(hits: list[Hit], context_text: str, offset: int) -> None:
+    """確度 中の住所を、近くの語で「個人の住所（中のまま）」「施設の所在地（低）」「人の手がかり待ち」に分ける。
+
+    確度 中の固定電話も「人の手がかり待ち」にする（施設の一覧の電話の列を「可能性あり」にしない・2026-10-18 評価）。
+    携帯と、近くに「自宅」「緊急連絡」などがある番号は待たない。
+    """
+    for h in hits:
+        if h.confidence != Confidence.MEDIUM:
+            continue
+        if h.pii_type == "phone":
+            s, e = h.start + offset, h.end + offset
+            near = context_text[max(0, s - 12) : s] + " " + context_text[e : e + 6]
+            if not RE_MOBILE_PREFIX.match(h.value.strip()) and not PERSONAL_PHONE_KW.search(near):
+                h.needs_person = True
+            continue
+        if h.pii_type != "address":
+            continue
+        s, e = h.start + offset, h.end + offset
+        # 前の30文字。ただし前の行・前のセル（改行・タブ・カンマ・| の前）は見ない（前の行の建物名で施設扱いにしない）
+        before = re.split(r"[\n\t,|]", context_text[max(0, s - 30) : s])[-1]
+        after = re.split(r"[\n\t,|]", context_text[e : e + 12])[0]
+        if h.start == 0 and h.end == len(h.value) and h.rule.startswith("列見出し"):
+            # 「住所」列の値は丸ごと1件なので、値の中で住所の形より前（「港区役所 東京都港区…」の施設名）も前の語として見る。
+            # 都道府県の位置で切らないのは、「大阪府立病院 大阪府…」のように施設名が都道府県で始まることがあるため
+            addr = RE_ADDRESS.search(h.value)
+            if addr:
+                before += " " + h.value[: addr.start()]
+        personal = PERSONAL_ADDRESS_KW.search(before + " " + after)
+        if personal:
+            h.rule += f"（近くに「{personal.group(0)}」の語）"
+            continue
+        facility = None
+        for m in FACILITY_KW.finditer(before):
+            facility = m
+        # 「住所」の語が施設の語より住所に近ければ、施設の名前の後に個人の住所の欄が続く形（「〇〇病院 患者 住所 …」）
+        if facility and "住所" not in before[facility.end() :]:
+            h.confidence = Confidence.LOW
+            h.rule += f"（前に「{facility.group(0)}」があり、施設・会社の所在地とみなした）"
+        else:
+            h.needs_person = True
+
+
+def normalize(text: str) -> str:
+    """全角英数・全角記号を半角へ寄せる（NFKC）。"""
+    return unicodedata.normalize("NFKC", text)
+
+
+def my_number_is_valid(digits: str) -> bool:
+    """マイナンバー（個人番号）12桁の検査数字を確かめる。"""
+    if len(digits) != 12 or not digits.isdigit():
+        return False
+    if len(set(digits)) == 1:
+        return False
+    body = digits[:11]
+    total = 0
+    for n in range(1, 12):
+        p = int(body[11 - n])
+        q = n + 1 if n <= 6 else n - 5
+        total += p * q
+    remainder = total % 11
+    check = 0 if remainder <= 1 else 11 - remainder
+    return check == int(digits[11])
+
+
+def luhn_is_valid(digits: str) -> bool:
+    """クレジットカード番号の Luhn 検査。"""
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def card_prefix_is_plausible(digits: str) -> bool:
+    """国際ブランドの番号体系（IIN）に合うか。"""
+    n = len(digits)
+    if digits[0] == "4" and n in (16, 19):
+        return True  # VISA
+    if n == 16 and (51 <= int(digits[:2]) <= 55 or 2221 <= int(digits[:4]) <= 2720):
+        return True  # Mastercard
+    if n == 15 and digits[:2] in ("34", "37"):
+        return True  # AMEX
+    if n in (16, 17, 18, 19) and 3528 <= int(digits[:4]) <= 3589:
+        return True  # JCB
+    if n == 14 and (digits[:2] in ("36", "38") or 300 <= int(digits[:3]) <= 305):
+        return True  # Diners
+    if n == 16 and (digits[:4] == "6011" or digits[:2] == "65"):
+        return True  # Discover
+    return False
+
+
+def _context_find(text: str, start: int, end: int, pattern: re.Pattern[str], width: int = 20) -> str | None:
+    """検出箇所の前（width 文字）と後ろ（6文字）で pattern に当たった語。無ければ None。"""
+    m = pattern.search(text[max(0, start - width) : start]) or pattern.search(text[end : end + 6])
+    return m.group(0) if m else None
+
+
+def _context_has(text: str, start: int, end: int, pattern: re.Pattern[str], width: int = 20) -> bool:
+    return _context_find(text, start, end, pattern, width) is not None
+
+
+def _landline_context(context_text: str, start: int, end: int) -> tuple[str | None, str | None]:
+    """固定電話の近くの (会社の語, 個人の語)。会社の語があり個人の語が無ければ、会社の代表番号とみなす。"""
+    return (
+        _context_find(context_text, start, end, COMPANY_KW, width=30),
+        _context_find(context_text, start, end, PERSONAL_PHONE_KW, width=12),
+    )
+
+
+@functools.lru_cache(maxsize=65536)
+def header_category(header: str | None) -> str | None:
+    """列見出しから、その列が何の個人情報かを推定する。当てはまらなければ None。"""
+    if not header:
+        return None
+    h = normalize(str(header)).strip()
+    if not h or len(h) > 40:
+        return None
+    # 「姓（漢字）」「〒（7桁）」の括弧書きは丸ごと除いてから照合する（中身が残ると「姓漢字」になり当たらない）
+    core = RE_ANNOTATION.sub("", h).strip()
+    if core:
+        h = core
+    key = re.sub(r"[\s_\-・()（）\[\]【】:：]", "", h).lower()
+    if key in HEADER_EXACT:
+        return HEADER_EXACT[key]
+    if HEADER_NOT_PII.search(h.lower()):
+        return None
+    for pattern, category in HEADER_CONTAINS:
+        if pattern.search(key):
+            return category
+    return None
+
+
+def _header_value_hit(category: str, value: str) -> Hit | None:
+    """見出しが個人情報の列の値を、検出として扱うかを決める。"""
+    v = value.strip()
+    if not v or len(v) > 300:
+        return None
+    if v.lower() in ("null", "none", "nan", "-", "ー", "なし", "無し", "n/a", "na", "0"):
+        return None
+    if len(v) <= 12 and header_category(v) is not None:
+        return None  # 「住所」「電話」などの見出し語そのもの（横持ちの表の項目名）は値ではない
+    conf = Confidence.MEDIUM
+    digits = re.sub(r"[^0-9]", "", v)
+    if category == "name":
+        # 数字だけ・記号だけの値は名前ではない
+        if not re.search(r"[A-Za-z一-龥ぁ-んァ-ヶ]", v):
+            return None
+        # 横持ちの表の項目名（入社日・所属・備考など）は名前ではない
+        if len(v) <= 8 and RE_LABEL_WORD.fullmatch(v):
+            return None
+    elif category == "my_number":
+        if my_number_is_valid(digits):
+            conf = Confidence.HIGH
+        elif len(digits) < 8:
+            return None
+    elif category == "birthdate":
+        if RE_DATE.search(v) or re.fullmatch(r"(19|20)[0-9]{6}", digits) or re.match(r"^\d{4}-\d{2}-\d{2}", v):
+            conf = Confidence.HIGH
+        elif re.fullmatch(r"[0-9]{4,5}(\.0+)?", v) and 1000 < float(v) < 60000:
+            conf = Confidence.HIGH  # Excel の日付シリアル値（xlsb・書式の無いセル）
+        else:
+            return None
+    elif category in ("phone", "postal_code", "bank_account", "credit_card", "pension"):
+        if len(digits) < 5:
+            return None
+        if category == "postal_code" and len(digits) not in (6, 7):
+            return None  # 6桁は数値として先頭の0が落ちたもの
+        if category == "credit_card" and luhn_is_valid(digits):
+            conf = Confidence.HIGH
+        if category == "bank_account":
+            conf = Confidence.HIGH
+    elif category in ("drivers_license", "passport", "health_insurance"):
+        if len(re.sub(r"[^0-9A-Za-z]", "", v)) < 4:
+            return None
+        conf = Confidence.HIGH if category != "health_insurance" else Confidence.MEDIUM
+    elif category in ("gender", "age"):
+        conf = Confidence.LOW
+    elif category == "sensitive":
+        conf = Confidence.MEDIUM
+    elif category == "address":
+        if not re.search(r"[一-龥ぁ-んァ-ヶA-Za-z]", v):
+            return None
+    return Hit(category, conf, v, 0, len(v), f"列見出しが「{PII_TYPES[category]}」の列の値")
+
+
+def detect(text: str, header: str | None = None) -> list[Hit]:
+    """文字列から個人情報らしきものを探す。header は表の列見出し（無ければ None）。
+
+    text は呼び出し側で normalize 済みであること（位置がずれないように）。
+    """
+    hits: list[Hit] = []
+    category = header_category(header)
+    if category:
+        hv = _header_value_hit(category, text)
+        if hv:
+            hits.append(hv)
+    if not text or len(text) < 3:
+        return hits
+    context_text = (normalize(header) + " " if header else "") + text
+    offset = len(context_text) - len(text)
+
+    def ctx(start: int, end: int, pattern: re.Pattern[str]) -> bool:
+        return _context_has(context_text, start + offset, end + offset, pattern)
+
+    has_digit = any(c.isdigit() for c in text)
+
+    if has_digit:
+        # 運転免許証（12桁）はマイナンバーより先に判定する
+        license_spans: list[tuple[int, int]] = []
+        for m in RE_LICENSE.finditer(text):
+            if MY_NUMBER_KW.search(text[m.start() : m.start(1)]) and my_number_is_valid(m.group(1)):
+                # 「運転免許：有 個人番号：…」の数字は個人番号（マイナンバーの判定に回す）。検査数字が合わなければ
+                # マイナンバーにもならないので、免許証番号として拾う（「免許証番号（個人番号ではない）…」）
+                continue
+            hits.append(Hit("drivers_license", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "免許証の語＋12桁"))
+            license_spans.append((m.start(1), m.end(1)))
+        for m in RE_MY_NUMBER.finditer(text):
+            digits = m.group(1) + m.group(2) + m.group(3)
+            if any(s <= m.start() < e for s, e in license_spans):
+                continue
+            if not my_number_is_valid(digits):
+                continue
+            if ctx(m.start(), m.end(), MY_NUMBER_KW) or category == "my_number":
+                conf, rule = Confidence.HIGH, "12桁・検査数字一致・個人番号の語"
+            elif ctx(m.start(), m.end(), LICENSE_KW):
+                continue
+            elif digits.startswith(NON_PERSONAL_PHONE_PREFIXES):
+                # 語の無い「0800 1234 5678」はフリーダイヤルの書き方にも見える。拾わないことはせず、低 のまま理由を添える
+                conf, rule = (
+                    Confidence.LOW,
+                    "12桁・検査数字一致（手がかり語なし。フリーダイヤル等の番号の形にも見える）",
+                )
+            else:
+                conf, rule = Confidence.LOW, "12桁・検査数字一致（手がかり語なし）"
+            hits.append(Hit("my_number", conf, m.group(0), m.start(), m.end(), rule))
+        for m in RE_CARD.finditer(text):
+            raw = m.group(0)
+            digits = re.sub(r"[^0-9]", "", raw)
+            if not (13 <= len(digits) <= 19) or len(set(digits)) == 1:
+                continue
+            if not (luhn_is_valid(digits) and card_prefix_is_plausible(digits)):
+                continue
+            grouped = bool(re.fullmatch(r"[0-9]{4}([ \-])[0-9]{4}\1[0-9]{4}\1[0-9]{1,7}", raw))
+            if ctx(m.start(), m.end(), CARD_KW) or category == "credit_card" or grouped:
+                conf = Confidence.HIGH  # 4桁ずつの区切りは注文番号などではまず見ない書き方
+            elif ctx(m.start(), m.end(), ORDER_KW):
+                conf = Confidence.LOW  # 注文番号・品番などの偶然の一致
+            else:
+                conf = Confidence.MEDIUM
+            hits.append(Hit("credit_card", conf, raw, m.start(), m.end(), "Luhn一致・ブランド番号体系一致"))
+        for m in RE_MOBILE.finditer(text):
+            separated = not m.group(0).isdigit()
+            if separated or ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
+                conf = Confidence.MEDIUM
+            elif ctx(m.start(), m.end(), ORDER_KW):
+                continue
+            else:
+                conf = Confidence.LOW  # 区切りの無い11桁は製造番号などと区別できない
+            hits.append(Hit("phone", conf, m.group(0), m.start(), m.end(), "携帯電話番号の形"))
+        for m in RE_MOBILE_INTL.finditer(text):
+            hits.append(Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "携帯電話番号（+81）"))
+        for m in RE_LANDLINE_INTL.finditer(text):
+            # 国番号 81 と、国内の頭の0（「+81(0)3-…」の「(0)」）を除いた残りが9桁
+            national = re.sub(r"^0", "", re.sub(r"[^0-9]", "", m.group(0))[2:])
+            if len(national) != 9 or ("0" + national).startswith(NON_PERSONAL_PHONE_PREFIXES):
+                continue
+            rule = "固定電話番号・+81 の形"
+            company, personal = _landline_context(context_text, m.start() + offset, m.end() + offset)
+            if company and not personal:
+                conf = Confidence.LOW  # 会社の代表番号（英文のレターヘッド等）
+                rule += f"（近くに「{company}」の語があり、会社の番号とみなした）"
+            else:
+                conf = Confidence.MEDIUM  # +81 で書く数字の並びは電話のほかにまず無い
+                if personal:
+                    rule += f"（近くに「{personal}」の語）"
+            hits.append(Hit("phone", conf, m.group(0), m.start(), m.end(), rule))
+        for m in RE_LANDLINE.finditer(text):
+            digits = re.sub(r"[^0-9]", "", m.group(0))
+            if len(digits) != 10 or digits.startswith(NON_PERSONAL_PHONE_PREFIXES):
+                continue
+            company, personal = _landline_context(context_text, m.start() + offset, m.end() + offset)
+            rule = "固定電話番号の形"
+            if company and not personal:
+                conf = Confidence.LOW  # 会社の代表番号（レターヘッド等）
+                rule += f"（近くに「{company}」の語があり、会社の番号とみなした）"
+            elif ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
+                conf = Confidence.MEDIUM
+                if personal:
+                    rule += f"（近くに「{personal}」の語）"
+            else:
+                conf = Confidence.LOW
+            hits.append(Hit("phone", conf, m.group(0), m.start(), m.end(), rule))
+        for m in RE_LANDLINE_SPACE.finditer(text):
+            if re.sub(r"[^0-9]", "", m.group(0)).startswith(NON_PERSONAL_PHONE_PREFIXES):
+                continue
+            if (ctx(m.start(), m.end(), PHONE_KW) or category == "phone") and not _context_has(
+                context_text, m.start() + offset, m.end() + offset, COMPANY_KW, width=30
+            ):
+                hits.append(
+                    Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "電話の語＋空白区切りの番号")
+                )
+        for m in RE_PHONE_BARE.finditer(text):
+            if ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
+                if m.group(0).startswith(NON_PERSONAL_PHONE_PREFIXES):
+                    continue
+                hits.append(Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "電話の語＋区切りなし番号"))
+        for m in RE_POSTAL_MARK.finditer(text):
+            hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "〒＋7桁"))
+        for m in RE_POSTAL_BEFORE_PREF.finditer(text):
+            if ctx(m.start(), m.end(), ORDER_KW):
+                continue
+            hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "7桁＋都道府県"))
+        for m in RE_DATE.finditer(text):
+            if ctx(m.start(), m.end(), BIRTH_KW) or category == "birthdate":
+                hits.append(Hit("birthdate", Confidence.HIGH, m.group(0), m.start(), m.end(), "生年月日の語＋日付"))
+            elif RE_DATE_ERA.fullmatch(m.group(0)) and re.match(r"(昭和|平成|大正|[STH])", m.group(0)):
+                hits.append(
+                    Hit("birthdate", Confidence.LOW, m.group(0), m.start(), m.end(), "和暦の日付（生年月日の可能性）")
+                )
+        for m in RE_BANK.finditer(text):
+            if MONEY_AFTER.match(text[m.end(1) : m.end(1) + 3]) or MONEY_BEFORE.search(text[m.start() : m.start(1)]):
+                continue  # 「口座残高 1234567円」など金額
+            hits.append(Hit("bank_account", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "口座の語＋7桁"))
+        for m in RE_PENSION.finditer(text):
+            hits.append(Hit("pension", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "年金番号の語＋10桁"))
+        for m in RE_PASSPORT.finditer(text):
+            hits.append(Hit("passport", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "旅券の語＋番号"))
+        for m in RE_INSURANCE.finditer(text):
+            if any(c.isdigit() for c in m.group(1)):
+                hits.append(
+                    Hit("health_insurance", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "保険証の語＋番号")
+                )
+
+    # 住所は漢数字だけの番地（六丁目十番一号）もあるので、算用数字の有無に関係なく調べる
+    if has_digit or any(c in text for c in "丁番号"):
+        for m in RE_ADDRESS.finditer(text):
+            hits.append(Hit("address", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "都道府県＋市区町村＋番地"))
+        for m in RE_ADDRESS_NO_PREF.finditer(text):
+            hits.append(Hit("address", Confidence.LOW, m.group(0), m.start(), m.end(), "市区＋町名＋番地"))
+
+    if "@" in text:
+        for m in RE_EMAIL.finditer(text):
+            conf = Confidence.LOW if ROLE_EMAIL.match(m.group(0)) else Confidence.MEDIUM
+            hits.append(Hit("email", conf, m.group(0), m.start(), m.end(), "メールアドレスの形"))
+
+    for m in RE_NAME_LABEL.finditer(text):
+        hits.append(Hit("name", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "氏名の見出し語＋名前"))
+    for m in RE_NAME_LABEL_TIGHT.finditer(text):
+        hits.append(
+            Hit("name", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "氏名の見出し語＋よくある姓の名前")
+        )
+    for m in RE_NAME_HONORIFIC.finditer(text):
+        conf = Confidence.MEDIUM if len(m.group(0)) >= 4 else Confidence.LOW
+        hits.append(Hit("name", conf, m.group(0), m.start(), m.end(), "よくある姓＋敬称"))
+    for m in RE_NAME_HONORIFIC_ANY.finditer(text):
+        if not HONORIFIC_STOP.search(m.group(1)):
+            hits.append(Hit("name", Confidence.LOW, m.group(0), m.start(), m.end(), "漢字の名前＋様・殿"))
+    for m in RE_NAME_SPACED.finditer(text):
+        hits.append(Hit("name", Confidence.LOW, m.group(0), m.start(), m.end(), "よくある姓＋空白＋名"))
+    for m in RE_SENSITIVE.finditer(text):
+        hits.append(Hit("sensitive", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "要配慮の見出し語＋記載"))
+
+    hits = _dedupe(hits)
+    _classify_addresses(hits, context_text, offset)
+    return hits
+
+
+def _dedupe(hits: list[Hit]) -> list[Hit]:
+    """同じ種類で範囲が重なるものは、確からしさの高い1件にまとめる。"""
+    hits.sort(key=lambda h: (-h.confidence.rank, h.start))
+    kept: list[Hit] = []
+    for h in hits:
+        if any(k.pii_type == h.pii_type and h.start < k.end and k.start < h.end for k in kept):
+            continue
+        kept.append(h)
+    kept.sort(key=lambda h: h.start)
+    return kept
+
+
+# ---------------------------------------------------------------- マスク
+
+
+def _mask_digits_keep_last(value: str, keep: int = 4) -> str:
+    total = sum(c.isalnum() for c in value)
+    shown = 0
+    out = []
+    for c in value:
+        if c.isalnum():
+            if total - shown <= keep:
+                out.append(c)
+            else:
+                out.append("*")
+            shown += 1
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def mask_value(pii_type: str, value: str) -> str:
+    """レポートに載せる形へマスクする（元の値に戻せない程度に隠す）。"""
+    v = value.strip()
+    if not v:
+        return v
+    if pii_type == "email":
+        local, _, domain = v.partition("@")
+        return (local[:1] + "***@" + domain) if domain else v[:1] + "***"
+    if pii_type == "postal_code":
+        return re.sub(r"[0-9]", "*", v[::-1], count=4)[::-1]
+    if pii_type in (
+        "my_number",
+        "credit_card",
+        "bank_account",
+        "drivers_license",
+        "passport",
+        "pension",
+        "health_insurance",
+        "phone",
+    ):
+        return _mask_digits_keep_last(v, 4 if len(re.sub(r"[^0-9A-Za-z]", "", v)) > 6 else 2)
+    if pii_type == "name":
+        return v[:1] + "＊" * max(1, min(len(v) - 1, 6))
+    if pii_type == "address":
+        # 都道府県と市区町村までは残し、町名・番地は伏せる
+        m = re.match(rf"((?:{PREFECTURES})?[^0-9０-９\s]{{0,10}}?[市区町村郡])", v)
+        head = m.group(1) if m else v[:3]
+        return head + "＊＊＊"
+    if pii_type == "birthdate":
+        m = re.match(r"(.*?(?:年|[/.\-]))", v)
+        head = m.group(1) if m else v[:4]
+        return head + re.sub(r"[0-9]", "*", v[len(head) :])
+    if pii_type in ("gender", "age"):
+        return "＊"
+    return v[:2] + "＊" * max(1, min(len(v) - 2, 8))
+
+
+RE_CONTEXT_DIGITS = re.compile(r"[0-9]")
+RE_CONTEXT_WORD = re.compile(r"[一-龥々ぁ-んァ-ヶーｦ-ﾟA-Za-z]+")
+# 文脈に残してよい語（見出し語・敬称・助詞など、個人を特定しない語）。これ以外の文字は伏せる
+CONTEXT_KEEP = {
+    "様",
+    "殿",
+    "御中",
+    "さん",
+    "の",
+    "は",
+    "が",
+    "を",
+    "に",
+    "へ",
+    "と",
+    "で",
+    "も",
+    "や",
+    "から",
+    "まで",
+    "TEL",
+    "Tel",
+    "tel",
+    "FAX",
+    "Fax",
+    "fax",
+    "Mail",
+    "mail",
+    "E",
+    "No",
+    "NO",
+    "電話",
+    "電話番号",
+    "携帯",
+    "携帯電話",
+    "自宅",
+    "勤務先",
+    "連絡先",
+    "住所",
+    "現住所",
+    "氏名",
+    "名前",
+    "お名前",
+    "フリガナ",
+    "ふりがな",
+    "カナ",
+    "番号",
+    "メール",
+    "メールアドレス",
+    "生年月日",
+    "誕生日",
+    "年齢",
+    "性別",
+    "郵便番号",
+    "口座",
+    "口座番号",
+    "普通",
+    "当座",
+    "預金",
+    "銀行",
+    "支店",
+    "カード",
+    "カード番号",
+    "有効期限",
+    "個人番号",
+    "マイナンバー",
+    "免許証",
+    "免許証番号",
+    "旅券",
+    "パスポート",
+    "年金",
+    "基礎年金番号",
+    "保険証",
+    "被保険者番号",
+    "記号",
+    "病名",
+    "本籍",
+    "担当",
+    "担当者",
+    "宛先",
+    "宛名",
+    "契約者",
+    "申込者",
+    "保護者",
+    "年",
+    "月",
+    "日",
+    "丁目",
+    "番地",
+    "号",
+    "都",
+    "道",
+    "府",
+    "県",
+    "市",
+    "区",
+    "町",
+    "村",
+    "郡",
+}
+
+
+def _mask_window(seg: str) -> str:
+    """文脈の窓を伏せる。決まった語（見出し語・敬称など）だけを残し、それ以外の文字と数字はすべて伏せる。
+
+    名前・カナ・町名は辞書で見分けきれないので、「伏せる語」ではなく「残す語」を決める方式にしている。
+    """
+    if not seg:
+        return seg
+    out = RE_EMAIL.sub("***@***", seg)
+
+    def keep_or_mask(m: re.Match) -> str:
+        # 漢字・かなの続いた並び（「東海林一郎さんの連絡先は」）から、残してよい語（2文字以上）だけを切り出し、
+        # それ以外は伏せる。見出し語を含むだけの語を丸ごと残さない
+        w = m.group(0)
+        if w in CONTEXT_KEEP:
+            return w
+        parts = []
+        pos = 0
+        for k in RE_CONTEXT_KEEP_IN_WORD.finditer(w):
+            if k.start() > pos:
+                parts.append("＊" * min(k.start() - pos, 4))
+            parts.append(k.group(0))
+            pos = k.end()
+        if pos < len(w):
+            parts.append("＊" * min(len(w) - pos, 4))
+        return "".join(parts)
+
+    out = RE_CONTEXT_WORD.sub(keep_or_mask, out)
+    return RE_CONTEXT_DIGITS.sub("*", out)
+
+
+# 語の中から切り出してよい「残す語」（1文字の語は名前の一部と区別できないので切り出さない）
+RE_CONTEXT_KEEP_IN_WORD = re.compile(
+    "|".join(sorted((re.escape(w) for w in CONTEXT_KEEP if len(w) >= 2), key=len, reverse=True))
+)
+
+
+def masked_context(text: str, start: int, end: int, masked: str, width: int = 20) -> str:
+    """検出箇所の前後の文脈。検出値はマスクに置き換え、窓の中の他の個人情報・数字・見出しの後の値も伏せる。"""
+    before = _mask_window(text[max(0, start - width) : start])
+    after = _mask_window(text[end : end + width])
+    s = f"{before}【{masked}】{after}"
+    return re.sub(r"\s+", " ", s).strip()

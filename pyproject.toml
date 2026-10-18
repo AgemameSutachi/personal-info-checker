@@ -1,0 +1,8 @@
+# 道具の設定だけを置く（依存は requirements.txt / requirements-dev.txt、配布版は build.py で作る）
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

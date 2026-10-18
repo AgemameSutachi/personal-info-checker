@@ -1,0 +1,51 @@
+name: 不具合の報告
+description: 動かない・結果がおかしい・エラーが出る
+labels: ["不具合"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **実在する個人情報や、検査したファイルそのものは貼らないでください。** このページは誰でも読めます。
+        必要なら、架空の値（例: 山田太郎・090-1234-5678）で同じことが起きる例を書いてください。
+        セキュリティの問題は、ここではなく [SECURITY.md](https://github.com/AgemameSutachi/personal-info-checker/blob/main/SECURITY.md) の方法で知らせてください。
+  - type: textarea
+    id: what
+    attributes:
+      label: 起きたこと
+      description: 何をしたら、どうなったか。画面に出たメッセージはそのまま貼ってください
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待したこと
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 起こし方
+      description: "調べたファイルの種類（例: パスワード付きの xlsx、Access 97 の mdb）、場所の指定のしかた（フォルダ／接続方式）など"
+  - type: input
+    id: version
+    attributes:
+      label: 版
+      description: "`pii-checker.exe --version` の出力（Excel のレポートの「判定」シートの「ツール」にも載っています）"
+    validations:
+      required: true
+  - type: dropdown
+    id: way
+    attributes:
+      label: 使い方
+      options:
+        - デスクトップアプリ（PiiChecker.exe）
+        - Web 版（serve）
+        - コマンド版（scan）
+        - Python で動かしている
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows の版
+      description: "例: Windows 11 24H2"

@@ -125,7 +125,7 @@ def test_plain_word_rule_and_confidence():
     item, col = _collector(rules_text="機密")
     col.add_text("社外秘・機密資料", "本文")
     assert item.finding_counts == {"custom": 1}
-    assert mask_value("custom", "機密") == "機＊"
+    assert mask_value("custom", "機密") == "＊＊"  # 2文字以下の値は、先頭1文字を残すと半分見えるので全部伏せる
 
 
 def test_custom_rule_alternation_in_parentheses():
@@ -596,3 +596,29 @@ def test_rules_fold_crlf_positions_after_many_lines():
     hits = m.find(text)
     assert len(hits) == 300
     assert all(text[h.start : h.end] == h.value for h in hits)
+
+
+def test_busy_pc_does_not_let_a_slow_pattern_through(monkeypatch):
+    """PC が混んで、どの試し文字列も時間の線を超えて見えるときも、遅い規則を通さず普通の規則は通す。
+
+    線を超えて測り直し「遅くない」と出ても、そこで受け付けずに残りの試し文字列（本当に遅い並び）まで調べる。
+    """
+    monkeypatch.setattr(userrules, "_SPEED_ABORT", 0.0)
+    assert check_pattern("\w+\w?\d+x"), "遅い規則を通した"
+    for p in ("EMP-\d{6}", "\w+@\w+", "C\d{3}$"):
+        assert check_pattern(p) is None, p
+
+
+@pytest.mark.parametrize(
+    "value, masked",
+    [
+        ("K-7", "*-*"),  # 短い値は全部伏せる（残す分で値が全部見えてしまうため）
+        ("C123", "****"),
+        ("EMP-123456", "***-**3456"),
+        ("C12345678", "*****5678"),
+        ("機密", "＊＊"),
+        ("取扱注意", "取＊＊＊"),
+    ],
+)
+def test_custom_values_are_masked_even_when_short(value, masked):
+    assert mask_value("custom", value) == masked

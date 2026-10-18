@@ -1000,9 +1000,13 @@ def mask_value(pii_type: str, value: str) -> str:
     if pii_type == "id_document":
         return v  # 書類の名前（「運転免許証」など）で、個人の値ではない
     if pii_type == "custom":
-        # 利用者の規則に当たった値: 数字を含めば番号として末尾だけ残し、ほかは先頭1文字だけ残す
+        # 利用者の規則に当たった値: 数字を含めば番号として末尾だけ残し、ほかは先頭1文字だけ残す。
+        # 短い値は、残す分で値の大半（全部）が見えてしまうので、残さずに全部伏せる
         if any(c.isdigit() for c in v):
-            return _mask_digits_keep_last(v, 4 if len(re.sub(r"[^0-9A-Za-z]", "", v)) > 6 else 2)
+            n = sum(c.isalnum() for c in v)
+            return _mask_digits_keep_last(v, 0 if n <= 4 else (2 if n <= 8 else 4))
+        if len(v) <= 2:
+            return "＊" * len(v)
         return v[:1] + "＊" * max(1, min(len(v) - 1, 8))
     return v[:2] + "＊" * max(1, min(len(v) - 2, 8))
 

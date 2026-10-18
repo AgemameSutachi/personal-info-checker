@@ -599,9 +599,15 @@ def _check_speed(compiled: re.Pattern, tree) -> str | None:
             if took > _SPEED_ABORT:
                 # 明らかに遅い（_SPEED_ABORT の10倍超）ものは測り直さずに断る（遅い規則ほど測り直しも遅く、待たせるため）。
                 # 境目のものは、PC の混み具合の揺れかもしれないので、同じ長さの基準と交互に測り直して決める
+                # 遅くないと分かっても、ここでは受け付けない。残りの試し文字列（本当に遅い文字の並び）と
+                # 長い文字列を調べ終えてから受け付ける（混んでいて速い並びが一瞬遅く見えただけのことがあるため）
                 if took > 10 * _SPEED_ABORT:
-                    return _MSG_SLOW if took > _SPEED_RATIO * _reference_time_now(len(text)) else None
-                return _MSG_SLOW if _slower_than_reference(compiled, text) else None
+                    if took > _SPEED_RATIO * _reference_time_now(len(text)):
+                        return _MSG_SLOW
+                    continue
+                if _slower_than_reference(compiled, text):
+                    return _MSG_SLOW
+                continue
             if n == WINDOW and took > _SPEED_FLOOR and _slower_than_reference(compiled, text):
                 return _MSG_SLOW
     return None

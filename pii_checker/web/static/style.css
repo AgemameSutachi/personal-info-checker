@@ -173,7 +173,7 @@ td.path { word-break: break-all; min-width: 280px; }
 #table td.flags { min-width: 120px; }
 #table td.note { min-width: 160px; }
 #table .note-inline { display: none; }  /* 狭い幅でだけ「違い」の札の下に出す理由 */
-#table td.loc { word-break: keep-all; overflow-wrap: anywhere; min-width: 5em; }  /* 「5行目」を「5行 目」に割らない */
+td.loc { word-break: keep-all; overflow-wrap: anywhere; min-width: 5em; }  /* 「5行目」を「5行 目」に割らない */
 #diff-note .diff-settings { color: var(--text); font-weight: 600; }
 #table td.path { min-width: 220px; }  /* 1280px の窓で、札の列まで枠に収める */
 .scroll-hint { margin: 0 0 4px; text-align: right; }

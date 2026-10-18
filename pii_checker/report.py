@@ -386,7 +386,16 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         )
         _row(
             ws,
-            [d["kind_label"], d["top_path"], d["n_now"], d["n_prev"], d["risk_now"], d["risk_prev"], d["note"]],
+            [
+                d["kind_label"],
+                d["top_path"],
+                d["n_now"],
+                d["n_prev"],
+                # 検出の無い側の危険度「なし」は空欄にそろえる（今回は無いファイルの行と同じ見え方にする）
+                "" if d["risk_now"] == "なし" else d["risk_now"],
+                "" if d["risk_prev"] == "なし" else d["risk_prev"],
+                d["note"],
+            ],
             fill={
                 "new": "F8CBAD",
                 "increased": "FCE4D6",

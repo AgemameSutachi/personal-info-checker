@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import reportflags
+
 
 @dataclass
 class Verdict:
@@ -74,6 +76,9 @@ def _decide(summary: dict, job_state: str) -> Verdict:
         detail.append(
             f"許可リストで外した検出 {summary.get('allowed', 0):,} 件（許可リストの値と一致したため、件数・判定に数えていない）"
         )
+
+    # 報告の目安の印・広く読めるフォルダにあるファイル（どちらも目安。判定の段階は変えない）
+    detail += reportflags.verdict_lines(summary)
 
     if job_state in ("running", "created"):
         return Verdict("running", "検査中", detail)

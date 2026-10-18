@@ -22,7 +22,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__
+from .. import __version__, folderacl, jobdiff, reportflags
 from ..detectors import PII_TYPES
 from ..models import STATUS_LABELS, Confidence, PasswordBook, ScanOptions, Status
 from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
@@ -532,28 +532,22 @@ def create_app(
     @app.get("/api/jobs/{job_id}/files")
     def files(job_id: str, offset: int = 0, limit: int = 100, q: str = "", only_findings: bool = False):
         _job_or_404(job_id)
-        sql = (
-            "SELECT top_path, state, worst_status, risk, n_findings, size, mtime, elapsed, reused_from"
-            " FROM files WHERE job_id=? AND top_path LIKE ?"
-        )
+        sql = f"SELECT {FILE_COLUMNS} FROM files WHERE job_id=? AND top_path LIKE ?"
         if only_findings:
             sql += " AND n_findings > 0"
         sql += " ORDER BY CASE risk WHEN '高' THEN 0 WHEN '中' THEN 1 WHEN '低' THEN 2 ELSE 3 END, top_path"
         total, rows = _page(sql, (job_id, f"%{q}%"), offset, limit)
         counts = _type_counts(job_id, [r["top_path"] for r in rows])
-        return {
-            "total": total,
-            "rows": [
-                {
-                    **dict(r),
-                    "status_label": (
-                        STATUS_JA.get(r["worst_status"] or "pending", "未検査") if r["state"] == "done" else "未検査"
-                    ),
-                    "types": {PII_TYPES.get(k, k): n for k, n in counts.get(r["top_path"], {}).items()},
-                }
-                for r in rows
-            ],
-        }
+        return {"total": total, "rows": [_file_view(r, counts.get(r["top_path"], {})) for r in rows]}
+
+    @app.get("/api/jobs/{job_id}/file")
+    def file_detail(job_id: str, top_path: str):
+        """ファイル1件の行（詳細の窓の上に出す、報告の目安・異なる値・誰が読めるか）。"""
+        _job_or_404(job_id)
+        rows = store.query(f"SELECT {FILE_COLUMNS} FROM files WHERE job_id=? AND top_path=?", (job_id, top_path))
+        if not rows:
+            raise HTTPException(404, "そのファイルは見つかりません")
+        return _file_view(rows[0], _type_counts(job_id, [top_path]).get(top_path, {}))
 
     @app.get("/api/jobs/{job_id}/all_items")
     def all_items(job_id: str, offset: int = 0, limit: int = 100, q: str = ""):
@@ -590,11 +584,31 @@ def create_app(
         job = _job_or_404(job_id)
         summary = store.summary(job_id)
         v = decide(summary, job["state"])
+        diff = jobdiff.compute(store, job_id)
         return {
             "verdict": {"level": v.level, "title": v.title, "detail": v.detail, "next_step": v.next_step},
-            "overview": [[k, "" if val is None else val] for k, val in overview_rows(job, summary)],
+            "overview": [[k, "" if val is None else val] for k, val in overview_rows(job, summary, diff)],
             "notes": reading_notes(job),
             "types": [[PII_TYPES.get(k, k), n] for k, n in sorted(summary["types"].items(), key=lambda x: -x[1])],
+        }
+
+    @app.get("/api/jobs/{job_id}/diff")
+    def diff(job_id: str, offset: int = 0, limit: int = 100, q: str = "", kind: str = ""):
+        """前回の検査との違い（同じ検査先を最後まで終えた前回と比べる。比べるのは保存した件数と状態だけ）。"""
+        job = _job_or_404(job_id)
+        d = jobdiff.compute(store, job_id)
+        rows = [r for r in d["rows"] if (not kind or r["kind"] == kind) and q.lower() in r["top_path"].lower()]
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        return {
+            "previous": d["previous"],
+            "previous_text": jobdiff.previous_text(d["previous"]),
+            "summary_text": jobdiff.summary_text(d),
+            "partial": job["state"] != "done",
+            "counts": d["counts"],
+            "kinds": jobdiff.KIND_LABELS,
+            "total": len(rows),
+            "rows": rows[offset : offset + limit],
         }
 
     @app.get("/api/jobs/{job_id}/items")
@@ -612,6 +626,12 @@ def create_app(
                 "depth": r["depth"],
                 "counts": json.loads(r["counts"]),
                 "notes": json.loads(r["notes"]),
+                # 種類 → 異なる値の数（確度 中以上）。None は数えていない古い版の検査
+                "distinct": (
+                    None
+                    if r["distinct_counts"] is None
+                    else reportflags.distinct_medium(json.loads(r["distinct_counts"] or "{}"))
+                ),
             }
             for r in rows
         ]
@@ -696,6 +716,40 @@ def create_app(
         )
 
     return app
+
+
+FILE_COLUMNS = (
+    "top_path, state, worst_status, risk, n_findings, size, mtime, elapsed, reused_from, flags, people_n, people_type,"
+    " distinct_counts, access, access_who, access_owner"
+)
+
+
+def _file_view(r, counts: dict[str, int]) -> dict:
+    """files の1行を画面に渡す形にする（報告の目安・異なる値・誰が読めるかの表示用の文字も付ける）。"""
+    d = dict(r)
+    distinct_json = d.pop("distinct_counts")
+    has = bool(d["n_findings"])
+    distinct = json.loads(distinct_json) if distinct_json else ({} if distinct_json is not None else None)
+    d.update(
+        {
+            "status_label": (
+                STATUS_JA.get(d["worst_status"] or "pending", "未検査") if d["state"] == "done" else "未検査"
+            ),
+            "types": {PII_TYPES.get(k, k): n for k, n in counts.items()},
+            "flag_codes": reportflags.decode(d.pop("flags")),
+            "flag_labels": reportflags.labels(r["flags"]) if has else [],
+            "flag_short": reportflags.labels(r["flags"], short=True) if has else [],
+            "people_text": reportflags.people_text(d["people_n"], d["people_type"]) if has else "",
+            # 種類の日本語名 → 異なる値の数（確度 中以上）。None は数えていない古い版の検査
+            "distinct": (
+                None
+                if distinct is None
+                else {PII_TYPES.get(k, k): n for k, n in reportflags.distinct_medium(distinct).items()}
+            ),
+            "access_label": folderacl.LABELS.get(d["access"], "") if d["access"] else "",
+        }
+    )
+    return d
 
 
 def _disposition(filename: str) -> str:

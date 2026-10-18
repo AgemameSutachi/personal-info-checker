@@ -3,9 +3,10 @@
 Excel のシート:
   1. 判定 … 総合判定・言い切れない理由・数字・設定・読み方
   2. 要対応 … 要パスワード・検査不能・簡易検査・読めなかったフォルダ（言い切るために潰すべきもの）
-  3. ファイル別 … 実ファイル1件ずつの最終状態・危険度・種類ごとの件数（監査の証跡）
-  4. 検出明細 … 検出1件ずつ（値はマスク済み）
-  5. 全項目 … アーカイブの中身・埋め込みまで含めた全項目の状態と読み方
+  3. ファイル別 … 実ファイル1件ずつの最終状態・危険度・報告の目安・異なる値・誰が読めるか・種類ごとの件数（監査の証跡）
+  4. 前回との違い … 同じ検査先の前回の検査と比べて、新しく見つかった・無くなった・件数が増えた／減ったファイル
+  5. 検出明細 … 検出1件ずつ（値はマスク済み）
+  6. 全項目 … アーカイブの中身・埋め込みまで含めた全項目の状態と読み方
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from . import __version__
+from . import __version__, folderacl, jobdiff, reportflags
 from .detectors import PII_TYPES
 from .models import STATUS_LABELS, Confidence, Status
 from .store import Store
@@ -125,8 +126,14 @@ def _ts(t):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
 
 
-def overview_rows(job: dict, summary: dict) -> list[tuple[str, object]]:
-    """「判定」の概要の表（Excel の判定シートと Web のレポートで同じものを出す）。"""
+DIFF_WHERE = "「前回との違い」（Excel はシート、画面は結果の表のタブ・レポートの頁は下の節）"
+
+
+def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tuple[str, object]]:
+    """「判定」の概要の表（Excel の判定シートと Web のレポートで同じものを出す）。
+
+    diff は jobdiff.compute の結果（渡せば「前回との違い」の要約を、一覧へのたどり方つきで載せる）。
+    """
     rows: list[tuple[str, object]] = [
         ("ジョブ", job["id"]),
         ("検査対象", "\n".join(job["roots"])),
@@ -155,6 +162,21 @@ def overview_rows(job: dict, summary: dict) -> list[tuple[str, object]]:
     for k, label in PII_TYPES.items():
         if summary["types"].get(k):
             rows.append((f"検出件数: {label}", summary["types"][k]))
+    # 漏えい時の報告の目安（印ごとのファイル数。目安であり法的な判断ではない＝読み方に出典と一緒に書く）
+    flags = summary.get("flags") or {}
+    for f in reportflags.FLAG_ORDER:
+        rows.append((f"報告の目安: {reportflags.FLAG_LABELS[f]}", f"{flags.get(f, 0):,} ファイル"))
+    access = summary.get("access") or {}
+    rows.append(("広く読めるフォルダにある、個人情報の可能性があるファイル", access.get(folderacl.BROAD, 0)))
+    if access.get(folderacl.UNKNOWN) or access.get(folderacl.FTP):
+        rows.append(
+            (
+                "誰が読めるかを取れなかった、個人情報の可能性があるファイル",
+                access.get(folderacl.UNKNOWN, 0) + access.get(folderacl.FTP, 0),
+            )
+        )
+    if diff is not None:
+        rows.append(("前回との違い", jobdiff.summary_text(diff, DIFF_WHERE)))
     opts = job["options"]
     rows += [
         ("設定: OCR", "する" if opts.get("ocr") else "しない"),
@@ -185,6 +207,33 @@ def reading_notes(job: dict) -> list[str]:
         "「簡易検査」は形式を解釈できず文字として読める部分だけを見たもの。「対象外」は文字情報を持たない形式。",
         f"検出明細は、1つの項目につき種類と確度ごとに最大 {n} 件の見本。件数（検出件数）は全数を数えて判定している。",
         "このレポート自体もファイルの場所や検出の有無という機密を含むため、取り扱いに注意すること。",
+        "「報告の目安」は" + reportflags.NOTE + "。根拠: " + "／".join(reportflags.SOURCES) + "。",
+        "「異なる値」は、同じ値（全角半角・空白・ハイフンの違い、氏名の敬称は無視）を1つと数えた数（確度 中以上）。"
+        "値そのものは残していない。" + reportflags.PEOPLE_NOTE + "。",
+        "「誰が読めるか」は、検出のあったファイルの親フォルダのアクセス権で、Everyone・Authenticated Users・"
+        "BUILTIN\\Users・Domain Users などに読み取りが許されていれば「広く読める」とした（目安。共有のアクセス許可・"
+        "ファイル個別の設定・グループの入れ子までは見ていない）。危険度は変えていない。",
+    ]
+
+
+def file_mark_cells(r) -> list:
+    """ファイル別の表の「報告の目安・異なる値・誰が読めるか」の列（files の行から）。検出が無いファイルは空。"""
+    if not r["n_findings"]:
+        return ["", "", "", "", "", "", "", ""]
+    distinct_json = r["distinct_counts"]
+    mine = ""
+    if distinct_json is not None:
+        mine = reportflags.distinct_medium(json.loads(distinct_json or "{}")).get("my_number", 0)
+    access = r["access"]
+    return [
+        "・".join(reportflags.labels(r["flags"])),
+        r["people_n"] if r["people_n"] is not None and r["people_type"] else "",
+        reportflags.type_label(r["people_type"]) if r["people_type"] else "",
+        mine,
+        reportflags.distinct_text(distinct_json),
+        folderacl.LABELS.get(access, "") if access else "",
+        r["access_who"] or "",
+        r["access_owner"] or "",
     ]
 
 
@@ -214,7 +263,8 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         ws.append(["", nxt])
     ws.append([])
     _row(ws, ["項目", "値"], bold=True)
-    for k, val in overview_rows(job, summary):
+    diff = jobdiff.compute(store, job_id)
+    for k, val in overview_rows(job, summary, diff):
         ws.append([_safe(k), _safe(val)])
     ws.append([])
     for i, note in enumerate(reading_notes(job)):
@@ -245,10 +295,20 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
 
     # 3. ファイル別
     type_keys = list(PII_TYPES)
-    ws = _sheet(wb, "ファイル別", [80, 12, 8, 10] + [9] * len(type_keys) + [11, 19, 10])
+    ws = _sheet(wb, "ファイル別", [80, 12, 8, 10, 40, 12, 14, 12, 40, 22, 30, 24] + [9] * len(type_keys) + [11, 19, 10])
     _row(
         ws,
         ["パス", "最終状態", "危険度", "検出件数"]
+        + [
+            "報告の目安（目安・法的な判断ではない）",
+            "人数の目安",
+            "人数の目安の種類",
+            "異なるマイナンバー",
+            "異なる値（確度 中以上）",
+            "誰が読めるか",
+            "読める人・読めなかった理由",
+            "フォルダの所有者",
+        ]
         + [PII_TYPES[k] for k in type_keys]
         + ["大きさ(KB)", "更新日時", "検査時間(秒)"],
         bold=True,
@@ -264,13 +324,33 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         _row(
             ws,
             [r["top_path"], STATUS_JA.get(r["worst_status"] or "pending", "未検査"), r["risk"] or "", r["n_findings"]]
+            + file_mark_cells(r)
             + [c.get(k, "") for k in type_keys]
             + [_size(r["size"]), _ts(r["mtime"]), round(r["elapsed"] or 0, 2)],
             fill=fill,
         )
     _finish(ws)
 
-    # 4. 検出明細
+    # 4. 前回との違い（同じ検査先を最後まで終えた前回の検査と比べる）
+    ws = _sheet(wb, "前回との違い", [16, 80, 12, 12, 10, 10, 50])
+    _row(
+        ws,
+        ["違い", "パス", "今回の検出件数", "前回の検出件数", "今回の危険度", "前回の危険度", "理由・補足"],
+        bold=True,
+    )
+    head_note = jobdiff.summary_text(diff)
+    if job["state"] != "done":
+        head_note += "（この検査は最後まで終わっていないため、違いは途中までの結果によるもの）"
+    _row(ws, ["要約", head_note, "", "", "", "", ""], fill="EDEDED")
+    for d in diff["rows"]:
+        _row(
+            ws,
+            [d["kind_label"], d["top_path"], d["n_now"], d["n_prev"], d["risk_now"], d["risk_prev"], d["note"]],
+            fill={"new": "F8CBAD", "increased": "FCE4D6", "gone": "C6EFCE", "decreased": "E2EFDA"}.get(d["kind"]),
+        )
+    _finish(ws)
+
+    # 5. 検出明細
     ws = _sheet(wb, "検出明細", [70, 16, 6, 24, 30, 50, 30, 24])
     _row(
         ws,
@@ -286,7 +366,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         _row(ws, [r[0], PII_TYPES.get(r[1], r[1]), CONF_LABELS.get(r[2], r[2]), r[3], r[4], r[5], r[6], r[7]])
     _finish(ws)
 
-    # 5. 全項目
+    # 6. 全項目
     ws = _sheet(wb, "全項目", [80, 24, 10, 50, 40, 40, 11, 19, 8, 9])
     _row(
         ws,

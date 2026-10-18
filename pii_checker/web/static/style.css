@@ -177,6 +177,13 @@ td.num { text-align: right; white-space: nowrap; }
 .pill.high, .pill.r-高 { background: var(--found); }
 .pill.medium, .pill.r-中 { background: var(--undetermined); }
 .pill.low, .pill.r-低 { background: var(--low); }
+.pill.flag { background: var(--undetermined); margin: 1px 0; }
+.pill.acc-broad { background: var(--found); font-weight: 600; }
+.pill.acc-limited { background: var(--clean); }
+.pill.acc-unknown, .pill.acc-ftp { background: var(--partial); }
+.file-marks { border-left: 4px solid var(--line); }
+.diff-box { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.diff-box .diff-links button { margin: 4px 6px 0 0; }
 .pager { display: flex; gap: 10px; align-items: center; justify-content: flex-end; margin-top: 8px; }
 
 dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(1000px, 92vw); max-height: 86vh; background: var(--panel); color: var(--text); }

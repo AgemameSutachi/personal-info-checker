@@ -49,6 +49,8 @@ EPILOG = r"""使用例:
   pii-checker scan --resume <ジョブID>                中断した検査の続き
   pii-checker scan D:\共有 --allow-file 許可.txt --rules-file 規則.txt
                                                      拾わない値・自分で足す規則を使う
+  pii-checker scan \\nas01\総務 --no-ask --exit-by-verdict
+                                                     定期検査（判定を終了コード 0/1/4 で返す）
   pii-checker serve                                  ブラウザで操作する（Web 版）
   pii-checker app                                    窓で操作する（アプリ版。引数なしでも起動）
 （開発環境では pii-checker の代わりに python -m pii_checker）
@@ -395,11 +397,32 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
     if store.job(job_id)["state"] in ("interrupted", "cancelled", "error"):
         # 無人で回すとき（タスクスケジューラ等）に、最後まで終わらなかったことを終了コードで分かるようにする
         return EXIT_INTERRUPTED
+    if getattr(args, "exit_by_verdict", False):
+        code = exit_code_for(v.level)
+        print(f"\n終了コード {code}（{EXIT_MEANINGS[code]}。--exit-by-verdict）")
+        return code
     return 0
 
 
 # 検査を最後まで終えられなかった（NAS への接続が切れた・ドライブの満杯・中止）。続きは --resume で再開できる
 EXIT_INTERRUPTED = 3
+# --exit-by-verdict を付けたとき、最後まで検査できた場合の終了コード（2 と 3 はこれより優先）
+EXIT_FOUND = 1  # 個人情報の可能性あり
+EXIT_UNSURE = 4  # 要確認（確度の低い候補のみ）・言い切れない（調べられなかったものがある・ファイルが見つからない）
+EXIT_MEANINGS = {
+    0: "検出なし",
+    EXIT_FOUND: "個人情報の可能性あり",
+    EXIT_UNSURE: "要確認・言い切れない",
+}
+
+
+def exit_code_for(level: str) -> int:
+    """総合判定の段階（verdict.Verdict.level）から、--exit-by-verdict の終了コードを決める。"""
+    if level in ("clean", "clean_partial"):
+        return 0
+    if level == "found":
+        return EXIT_FOUND
+    return EXIT_UNSURE
 
 
 def cmd_report(args) -> int:
@@ -514,6 +537,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--temp-dir", help="展開に使う一時フォルダ（空きの多いドライブを指定）")
     s.add_argument("--sevenzip", help="7z.exe の場所")
     s.add_argument("--resume", metavar="ジョブID", help="中断したジョブを続きから再開する")
+    s.add_argument(
+        "--exit-by-verdict",
+        action="store_true",
+        help="最後まで検査できたときの終了コードを総合判定で変える（0=検出なし、1=個人情報の可能性あり、"
+        "4=要確認・言い切れない。2=指定の誤り・3=途中で止めた は付けなくても同じ）",
+    )
     s.add_argument(
         "--allow-file",
         metavar="ファイル",

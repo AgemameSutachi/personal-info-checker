@@ -461,6 +461,31 @@ function setTab(name) {
   $("#f-type").classList.toggle("hidden", name !== "findings");
   $("#f-conf").classList.toggle("hidden", name !== "findings");
   $("#sample-note").classList.toggle("hidden", name !== "findings");
+  $("#f-diff").classList.toggle("hidden", name !== "diff");
+  $("#diff-note").classList.toggle("hidden", name !== "diff");
+}
+
+// 前回との違いの要約（検査が終わっているときだけ。押すと「前回との違い」タブのその種類へ）
+async function loadDiffBox(j) {
+  const box = $("#diff-box");
+  if (j.running) { box.classList.add("hidden"); return; }
+  let d;
+  try {
+    d = await api(`/api/jobs/${encodeURIComponent(j.id)}/diff?limit=1`);
+  } catch (_) { box.classList.add("hidden"); return; }
+  if (state.jobId !== j.id) return;
+  box.classList.remove("hidden");
+  $("#diff-text").textContent = d.summary_text + (d.partial ? "（この検査は最後まで終わっていないため、途中までの結果で比べています）" : "");
+  $("#diff-links").innerHTML = Object.entries(d.counts || {})
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `<button type="button" data-kind="${esc(k)}">${esc(d.kinds[k])} ${fmtNum(n)} 件を見る</button>`)
+    .join("");
+  $("#diff-links").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    $("#f-diff").value = b.dataset.kind;
+    setTab("diff");
+    state.offset = 0;
+    loadTable();
+  }));
 }
 
 async function refreshJob(reloadTable = false) {
@@ -531,6 +556,7 @@ async function refreshJob(reloadTable = false) {
     setTab("hits"); // パスワードで全部開いて要対応が無くなったら、検出のあるファイルへ
   }
   EMPTY_TEXT.attention = v.level === "empty" ? "ファイルが1件も見つかりませんでした（場所とアクセス権を確かめてください）。" : "対応が必要な項目はありません。";
+  if (reloadTable || justFinished || j.running) loadDiffBox(j);
   if (reloadTable || j.running || justFinished) await loadTable();
   if (justFinished) loadJobs();
   clearTimeout(state.timer);
@@ -756,16 +782,24 @@ let qTimer = null;
 $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.offset = 0; loadTable(); }, 300); });
 $("#f-type").addEventListener("change", () => { state.offset = 0; loadTable(); });
 $("#f-conf").addEventListener("change", () => { state.offset = 0; loadTable(); });
+$("#f-diff").addEventListener("change", () => { state.offset = 0; loadTable(); });
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadTable(); });
 $("#next").addEventListener("click", () => { state.offset += state.limit; loadTable(); });
 
 const pill = (cls, text) => `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
+// 報告の目安の印（短い名前の札。押さなくても読めるよう、長い名前は title に）
+const FLAG_TIP = "漏えい時の報告の目安（法的な判断ではありません。判断は専門家・所管部署へ）";
+const flagPills = (x) => (x.flag_short || []).map((s, i) => `<span class="pill flag" title="${esc((x.flag_labels || [])[i] || s)}／${esc(FLAG_TIP)}">${esc(s)}</span>`).join(" ");
+// 誰が読めるか（親フォルダのアクセス権）。広く読めるときは誰に許されているかを title に
+const accessCell = (x) => (x.access ? `<span class="pill acc-${esc(x.access)}" title="${esc([x.access_who, x.access_owner ? "所有者: " + x.access_owner : ""].filter(Boolean).join("／"))}">${esc(x.access_label)}</span>` : "");
+const distinctText = (d) => (d == null ? "（数えていない・古い版の検査）" : typesText(d));
 const EMPTY_TEXT = {
   attention: "対応が必要な項目はありません。",
   hits: "個人情報の可能性があるファイルはありません。",
   findings: "該当する検出はありません。",
   all: "ファイルがありません。",
   items: "項目がありません。",
+  diff: "該当する違いはありません。",
 };
 
 async function loadTable() {
@@ -781,9 +815,17 @@ async function loadTable() {
     click = r.rows.map((x) => x.top_path);
   } else if (state.tab === "hits" || state.tab === "all") {
     r = await api(`/api/jobs/${id}/files?${base}&only_findings=${state.tab === "hits"}`);
-    head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "大きさ", "更新日時"];
-    rows = r.rows.map((x) => [pathCell(x.top_path), pill(x.worst_status || "pending", x.status_label), x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, `<span class="small">${esc(typesText(x.types))}</span>`, `<td class="num">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`]);
+    head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "誰が読めるか", "大きさ", "更新日時"];
+    rows = r.rows.map((x) => [pathCell(x.top_path), pill(x.worst_status || "pending", x.status_label), x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, `<span class="small">${esc(typesText(x.types))}</span>`, flagPills(x), accessCell(x), `<td class="num">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`]);
     click = r.rows.map((x) => x.top_path);
+  } else if (state.tab === "diff") {
+    r = await api(`/api/jobs/${id}/diff?${base}&kind=${encodeURIComponent($("#f-diff").value)}`);
+    head = ["違い", "ファイル", "今回の検出件数", "前回の検出件数", "今回の危険度", "前回の危険度", "理由・補足"];
+    const cls = { new: "high", increased: "medium", gone: "scanned", decreased: "scanned" };
+    rows = r.rows.map((x) => [pill(cls[x.kind] || "", x.kind_label), pathCell(x.top_path), `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, x.risk_now && x.risk_now !== "なし" ? pill("r-" + x.risk_now, x.risk_now) : "", x.risk_prev && x.risk_prev !== "なし" ? pill("r-" + x.risk_prev, x.risk_prev) : "", esc(x.note)]);
+    click = r.rows.map((x) => x.top_path);
+    $("#diff-note").textContent = r.summary_text + (r.partial ? "（この検査は最後まで終わっていないため、途中までの結果で比べています）" : "") + (r.previous ? "　※「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。" : "");
+    EMPTY_TEXT.diff = r.previous ? "該当する違いはありません。" : r.summary_text;
   } else if (state.tab === "items") {
     r = await api(`/api/jobs/${id}/all_items?${base}`);
     head = ["パス", "形式", "状態", "理由・読み方", "大きさ", "検出件数"];
@@ -824,8 +866,18 @@ async function openDetail(topPath) {
   const id = encodeURIComponent(state.jobId);
   const items = await api(`/api/jobs/${id}/items?top_path=${encodeURIComponent(topPath)}`);
   const f = await api(`/api/jobs/${id}/findings?limit=200&top_path=${encodeURIComponent(topPath)}`);
+  let fileRow = null;
+  try { fileRow = await api(`/api/jobs/${id}/file?top_path=${encodeURIComponent(topPath)}`); } catch (_) { /* 古いサーバー等: 出さないだけ */ }
   $("#detail-title").textContent = leafName(topPath);
   const types = state.info.pii_types || {};
+  const marks = fileRow && fileRow.n_findings ? `
+    <div class="item-card file-marks">
+      <div><strong>報告の目安:</strong> ${fileRow.flag_labels.length ? fileRow.flag_labels.map((l) => `<span class="pill flag">${esc(l)}</span>`).join(" ") : "当たるものなし"}</div>
+      <div class="small muted">${esc(FLAG_TIP)}</div>
+      ${fileRow.people_text ? `<div><strong>人数の目安:</strong> ${esc(fileRow.people_text)}<span class="small muted">（異なる値が最も多い種類の数で代えたもの）</span></div>` : ""}
+      <div><strong>異なる値（確度 中以上）:</strong> ${esc(distinctText(fileRow.distinct)) || "なし"}</div>
+      ${fileRow.access ? `<div><strong>誰が読めるか:</strong> ${accessCell(fileRow)} ${esc(fileRow.access_who || "")}${fileRow.access_owner ? `<span class="small muted">（フォルダの所有者: ${esc(fileRow.access_owner)}）</span>` : ""}</div>` : ""}
+    </div>` : "";
   const actions = `
     <div class="detail-actions">
       <div class="mono small detail-path">${esc(topPath)}</div>
@@ -835,6 +887,7 @@ async function openDetail(topPath) {
     </div>`;
   $("#detail-body").innerHTML =
     actions +
+    marks +
     items.map((it, idx) => `
       <div class="item-card" style="margin-left:${Math.min(it.depth, 6) * 16}px">
         ${idx > 0 ? `<div class="ipath">${esc(it.path.slice(topPath.length) || it.path)}</div>` : ""}
@@ -843,6 +896,7 @@ async function openDetail(topPath) {
         ${it.method ? `<div class="small muted">読み方: ${esc(it.method)}</div>` : ""}
         ${it.notes.length ? `<div class="small muted">補足: ${it.notes.map(esc).join("／")}</div>` : ""}
         ${Object.keys(it.counts).length ? `<div class="small">検出: ${Object.entries(it.counts).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
+        ${it.distinct && Object.keys(it.distinct).length ? `<div class="small">異なる値（確度 中以上）: ${Object.entries(it.distinct).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
       </div>`).join("") +
     (f.rows.length
       ? `<h4>検出明細（${f.total > f.rows.length ? `${fmtNum(f.total)} 件のうち ${fmtNum(f.rows.length)} 件を表示` : `全 ${fmtNum(f.total)} 件`}）</h4>
@@ -875,7 +929,7 @@ $("#show-secret").addEventListener("change", (e) => {
 
 
 // ---------------------------------------------------------------- レポート（結果をまとめたページ）
-// Excel の5シート（判定・要対応・ファイル別・検出明細・全項目）と同じ中身を1つのページで見せる。
+// Excel の6シート（判定・要対応・ファイル別・前回との違い・検出明細・全項目）と同じ中身を1つのページで見せる。
 // 表は先頭から少しずつ読み、「さらに表示」で続きを足す（大きな検査でも重くならない）。印刷すると見えている分が紙・PDF になる。
 const REPORT_PAGE = 200;
 
@@ -893,9 +947,15 @@ const REPORT_SECTIONS = [
   },
   {
     id: "files", title: "ファイル別", url: "files",
-    head: ["パス", "状態", "危険度", "検出件数", "検出の内訳", "大きさ", "更新日時", "検査時間", "前回の結果"],
-    row: (x) => [`<td class="path">${esc(x.top_path)}</td>`, `<td class="nowrap">${pill(x.worst_status || "pending", x.status_label)}</td>`, x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, esc(typesText(x.types)), `<td class="nowrap">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`, `<td class="num">${x.elapsed != null ? esc(x.elapsed.toFixed(2)) + " 秒" : ""}</td>`, x.reused_from ? `使い回し（${esc(x.reused_from)}）` : ""],
+    head: ["パス", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "人数の目安", "異なる値（確度 中以上）", "誰が読めるか", "大きさ", "更新日時", "検査時間", "前回の結果"],
+    row: (x) => [`<td class="path">${esc(x.top_path)}</td>`, `<td class="nowrap">${pill(x.worst_status || "pending", x.status_label)}</td>`, x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, esc(typesText(x.types)), esc((x.flag_labels || []).join("・")), esc(x.people_text || ""), x.n_findings ? esc(distinctText(x.distinct)) : "", x.access ? `${esc(x.access_label)}${x.access_who ? `<div class="small muted">${esc(x.access_who)}</div>` : ""}` : "", `<td class="nowrap">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`, `<td class="num">${x.elapsed != null ? esc(x.elapsed.toFixed(2)) + " 秒" : ""}</td>`, x.reused_from ? `使い回し（${esc(x.reused_from)}）` : ""],
     empty: "ファイルがありません。",
+  },
+  {
+    id: "diff", title: "前回との違い", url: "diff",
+    head: ["違い", "パス", "今回の検出件数", "前回の検出件数", "今回の危険度", "前回の危険度", "理由・補足"],
+    row: (x) => [`<td class="nowrap">${esc(x.kind_label)}</td>`, `<td class="path">${esc(x.top_path)}</td>`, `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, esc(x.risk_now), esc(x.risk_prev), esc(x.note)],
+    empty: "検出のあったファイルに違いはありません。",
   },
   {
     id: "findings", title: "検出明細（値はマスク済み）", url: "findings",
@@ -980,7 +1040,14 @@ async function loadReportRows(s, sec) {
   const offset = +sec.dataset.offset;
   const r = await api(`/api/jobs/${id}/${s.url}?offset=${offset}&limit=${REPORT_PAGE}&q=`);
   const tbody = sec.querySelector("tbody");
-  if (!r.total) tbody.innerHTML = `<tr><td colspan="${s.head.length}" class="muted">${esc(s.empty)}</td></tr>`;
+  // 前回との違いは、比べる前回が無いときにその旨（サーバーの要約の文）を出す
+  const empty = s.id === "diff" && r.summary_text && !r.previous ? r.summary_text : s.empty;
+  if (s.id === "diff" && r.summary_text && offset === 0) {
+    const old = sec.querySelector(".rep-note");
+    if (old) old.remove();
+    sec.querySelector("h3").insertAdjacentHTML("afterend", `<p class="rep-note small">${esc(r.summary_text)}</p>`);
+  }
+  if (!r.total) tbody.innerHTML = `<tr><td colspan="${s.head.length}" class="muted">${esc(empty)}</td></tr>`;
   else {
     // スマホ幅では行をカードの形に並べるので、各セルに列の名前を持たせる（CSS の ::before で出す）
     const cell = (c, i) => {

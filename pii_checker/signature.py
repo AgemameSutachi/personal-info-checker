@@ -21,6 +21,9 @@ _EXCLUDE = {
     "report.py",
     "store.py",
     "verdict.py",
+    "reportflags.py",  # 報告の目安の印（保存した件数から決め直す）
+    "folderacl.py",  # 親フォルダのアクセス権（毎回読み直す）
+    "jobdiff.py",  # 前回の検査との違い（保存した結果どうしを比べる）
     "runner.py",
     "procguard.py",
     "signature.py",

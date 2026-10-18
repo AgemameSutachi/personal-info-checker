@@ -163,6 +163,10 @@
 
       <p id="tiles-caption" class="muted small"></p>
       <div id="tiles" class="tiles"></div>
+      <div id="diff-box" class="diff-box hidden" role="status">
+        <strong>前回との違い</strong> <span id="diff-text" class="small"></span>
+        <div id="diff-links" class="diff-links"></div>
+      </div>
 
       <div id="pw-panel" class="pw-panel hidden">
         <h3><span id="pw-heading">パスワードが必要なファイル</span> <span id="pw-count" class="pill needs_password"></span></h3>
@@ -191,6 +195,7 @@
         <button class="tab" data-tab="findings" role="tab" aria-selected="false">検出明細</button>
         <button class="tab" data-tab="all" role="tab" aria-selected="false">全ファイル</button>
         <button class="tab" data-tab="items" role="tab" aria-selected="false">全項目（中身を含む）</button>
+        <button class="tab" data-tab="diff" role="tab" aria-selected="false">前回との違い</button>
       </nav>
       <div class="table-tools">
         <label class="sr-only" for="q">パスで絞り込み</label>
@@ -199,8 +204,13 @@
         <select id="f-conf" class="hidden" aria-label="確度で絞り込み">
           <option value="">確度: すべて</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option>
         </select>
+        <select id="f-diff" class="hidden" aria-label="違いの種類で絞り込み">
+          <option value="">違い: すべて</option><option value="new">新しく見つかった</option><option value="gone">無くなった</option>
+          <option value="increased">件数が増えた</option><option value="decreased">件数が減った</option>
+        </select>
         <span id="table-count" class="muted small"></span>
       </div>
+      <p id="diff-note" class="muted small hidden"></p>
       <p id="sample-note" class="muted small hidden"></p>
       <div class="table-wrap"><table id="table"><thead></thead><tbody></tbody></table></div>
       <div class="pager">

@@ -30,6 +30,7 @@ from .models import (
     ScanOptions,
     Status,
 )
+from .userrules import normalize_allow
 
 IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは一時ファイルに書き出して扱う
 # これより大きいものはメモリへ丸ごと読まない（形式の読み方をあきらめ、文字として読める部分だけを少しずつ検査する）。
@@ -126,6 +127,19 @@ class Blob:
 # 人の手がかりがあって確度 中にした住所・固定電話の明細に添える注記（手がかりが氏名などの値か、書類の題か）
 PERSON_CUE_NOTE = "（同じファイルに氏名などの人の手がかりあり）"
 TITLE_CUE_NOTE = "（ファイル名・本文の先頭に「{}」の書類の題があり、人の手がかりとみなした）"
+RANK_CONF = {c.rank: c for c in Confidence}
+_RE_HONORIFIC_TAIL = re.compile(r"(様|殿|さん|君|くん|ちゃん)$")
+
+
+def distinct_key(pii_type: str, value: str) -> str:
+    """異なる値を数えるときの、値の同一性の形（全角→半角・空白とハイフンと括弧を除く・英字は小文字・氏名は敬称を外す）。
+
+    「090-1234-5678」と「09012345678」、「山田 太郎様」と「山田太郎」を同じ1つと数える。許可リストの照合と同じ寄せ方。
+    """
+    key = normalize_allow(value)
+    if pii_type == "name":
+        key = _RE_HONORIFIC_TAIL.sub("", key) or key
+    return key
 
 
 @dataclass
@@ -146,6 +160,10 @@ class Collector:
     # 許可リストと利用者の規則（userrules.Matcher。どちらも無ければ None）
     matcher: object | None = None
     allowed_seen: set = field(default_factory=set)  # 許可リストで外した (種類, 値) の hash（読み直しで二重に数えない）
+    # 異なる値の数を数えるための対応（seen の鍵 → (種類, 正規化した値の hash)）。メモリの中だけで使い、保存しない
+    distinct_keys: dict[int, tuple] = field(default_factory=dict)
+    # ファイル全体の異なる値を集める先（(種類, 正規化した値の hash) → 見た最も高い確度の順位）。ScanContext が渡す
+    distinct_sink: dict | None = None
 
     def add_text(
         self,
@@ -248,9 +266,39 @@ class Collector:
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, hits)
             if len(self.seen) < 3_000_000:
                 self.seen[key] = (idx, confidence)
+                self.distinct_keys[key] = (hit.pii_type, hash(distinct_key(hit.pii_type, hit.value)))
 
     def finish(self) -> None:
-        """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。"""
+        """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
+
+        最後に、種類ごとの異なる値の数を数えて項目に残す（値・hash は捨てる）。
+        """
+        self._finish_cues()
+        self._count_distinct()
+
+    def _count_distinct(self) -> None:
+        """種類×確度ごとの異なる値の数を item.distinct_counts に入れ、ファイル全体の集計先にも足す。
+
+        確度は、同じ値（正規化して同じもの）を見たうちで最も高いもの。住所の引き上げ（_finish_cues）の後に数える。
+        """
+        best: dict[tuple, int] = {}
+        for key, dk in self.distinct_keys.items():
+            conf = self.seen.get(key, (-1, Confidence.LOW))[1]
+            if best.get(dk, 0) < conf.rank:
+                best[dk] = conf.rank
+        counts: dict[str, int] = {}
+        for (pii_type, _), rank in best.items():
+            k = f"{pii_type}:{RANK_CONF[rank].value}"
+            counts[k] = counts.get(k, 0) + 1
+        self.item.distinct_counts = counts
+        if self.distinct_sink is not None:
+            sink = self.distinct_sink
+            for dk, rank in best.items():
+                if sink.get(dk, 0) < rank and (dk in sink or len(sink) < 3_000_000):
+                    sink[dk] = rank
+
+    def _finish_cues(self) -> None:
+        """人の手がかりがあれば、待たせていた住所・固定電話を確度 中に引き上げる（無ければ明細に理由を添える）。"""
         if self.person_cue:
             for key in list(self.deferred):
                 self._resolve_deferred(key)
@@ -577,6 +625,16 @@ class ScanContext:
         from .userrules import matcher_for
 
         self.matcher = matcher_for(options)  # 許可リストと利用者の規則（無ければ None）
+        # ファイル全体の異なる値（(種類, 正規化した値の hash) → 確度の順位）。数え終えたら数だけを結果に残す
+        self.distinct: dict[tuple, int] = {}
+
+    def distinct_counts(self) -> dict[str, int]:
+        """ファイル全体（内側の項目を含む）での「種類:確度」→異なる値の数。"""
+        counts: dict[str, int] = {}
+        for (pii_type, _), rank in self.distinct.items():
+            k = f"{pii_type}:{RANK_CONF[rank].value}"
+            counts[k] = counts.get(k, 0) + 1
+        return counts
 
     @property
     def tmpdir(self) -> str:
@@ -630,7 +688,9 @@ class ScanContext:
         item = ItemResult(path=blob.display, kind="", status=Status.PENDING, depth=depth)
         item.mtime = blob.mtime
         self.items.append(item)
-        collector = Collector(item, self.options.max_samples_per_type, matcher=self.matcher)
+        collector = Collector(
+            item, self.options.max_samples_per_type, matcher=self.matcher, distinct_sink=self.distinct
+        )
         try:
             item.size = blob.size
             if depth > self.options.max_depth:
@@ -995,7 +1055,12 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     finally:
         ctx.cleanup()
     return FileResult(
-        top_path=path, items=ctx.items, elapsed=time.time() - started, source=source, network_lost=network_lost
+        top_path=path,
+        items=ctx.items,
+        elapsed=time.time() - started,
+        source=source,
+        network_lost=network_lost,
+        distinct_counts=ctx.distinct_counts(),
     )
 
 

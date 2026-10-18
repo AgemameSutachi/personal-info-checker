@@ -17,6 +17,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import fields
 
 from .engine import scan_file, split_siblings
+from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
 from .remote import LOGIN_LOST_MARK, Connection, LoginLost, ftp_stat, is_ftp_path, reset_login_failures
@@ -111,6 +112,7 @@ class JobRunner:
         self._net_streak_paths: set[str] = set()  # 続けて「接続が切れた」になった（別々の）ファイル
         self._net_retries: dict[str, int] = {}  # ファイルごとの「接続が切れた」の回数
         self._ftp_stat_off = False  # FTP の使い回しの問い合わせに失敗したら、その回はもう問い合わせない
+        self._acl = AccessCache()  # 検出のあったファイルの親フォルダのアクセス権（同じフォルダは1回だけ読む）
 
     # ------------------------------------------------------------ 前回の結果の使い回し
 
@@ -161,7 +163,20 @@ class JobRunner:
         ):
             return False
         self.store.copy_result(prev, self.job_id)
+        if prev.get("n_findings"):
+            self._record_access(path)  # アクセス権は変わりうるので、使い回したファイルでも読み直す
         return True
+
+    def _record_access(self, path: str) -> None:
+        """検出のあったファイルの親フォルダのアクセス権を読んで記録する（同じフォルダは1回だけ読む）。
+
+        読むだけで何も書き換えない（folderacl）。失敗しても検査は止めない（「読めなかった」として残る）。
+        """
+        try:
+            acc = self._acl.for_file(path)
+            self.store.set_access(self.job_id, path, acc.state, acc.who, acc.owner)
+        except Exception:  # noqa: BLE001  アクセス権の記録は補足。検査の本体を止めない
+            pass
 
     # ------------------------------------------------------------ 制御
 
@@ -228,6 +243,7 @@ class JobRunner:
         cleanup_stale_temp([self.options.temp_dir])
         self.halt_reason = ""
         self.error = ""  # 前回止めた理由を、再開して最後まで終わったあとに残さない（実測）
+        self._acl = AccessCache()  # 前の回に読んだアクセス権は使わない（その後で変わっていることがある）
         try:
             job = self.store.job(self.job_id)
             self.store.set_job(self.job_id, state="running", started=job.get("started") or time.time(), message="")
@@ -437,6 +453,8 @@ class JobRunner:
                 if it.path != path and it.depth == 0:
                     it.path = path
             self.store.save_result(self.job_id, result, self.engine_sig)
+            if any(i.finding_counts for i in result.items):
+                self._record_access(path)
             if version != self.password_version and any(i.status == Status.NEEDS_PASSWORD for i in result.items):
                 # 検査中にパスワードを受け取っていたら、新しいパスワードでもう一度試す
                 self.store.mark_pending(self.job_id, [path])

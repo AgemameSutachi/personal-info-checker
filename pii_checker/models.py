@@ -87,6 +87,9 @@ class ItemResult:
     conf_counts: dict[str, int] = field(default_factory=dict)  # 「種類:確度」→件数（判定はこれで決める）
     notes: list[str] = field(default_factory=list)  # 補足（例: 画像PDFのためOCRした）
     allowed: int = 0  # 許可リストの値と一致したため数えなかった検出の件数（黙って消さず、件数は残す）
+    # 「種類:確度」→異なる値の数（正規化した値で同じものを1つと数える。確度は同じ値で見た最も高いもの）。
+    # 値もハッシュも持たない（数え終えたら捨てる）
+    distinct_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -99,6 +102,8 @@ class FileResult:
     source: dict | None = None  # 元のファイルの識別情報と SHA-256（safeio.SourceInfo）。写せなかったときは None
     # NAS への接続が切れて元のファイルを読めなかった（ファイルの問題ではない）。実行器は済みにせず、つながってから読み直す
     network_lost: bool = False
+    # ファイル全体（zip の中身・埋め込みを含む）での「種類:確度」→異なる値の数。同じ値が2つの項目にあれば1つと数える
+    distinct_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

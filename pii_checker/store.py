@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
+from . import reportflags
 from .models import FileResult, ItemResult, ScanOptions, Status
 
 SCHEMA = """
@@ -102,8 +103,24 @@ FILE_EXTRA_COLUMNS = {
     "reused_from": "TEXT",  # 使い回した元のジョブ
     "scanned_at": "REAL",  # 実際に中身を検査した時刻（使い回しても元の時刻を残す）
     "atime_kept": "INTEGER",  # 最終アクセス日時を保てたか
+    # 異なる値の数（「種類:確度」→数の JSON。値もハッシュも持たない）。NULL は数えていない古い版の検査
+    "distinct_counts": "TEXT",
+    "flags": "TEXT",  # 漏えい時の報告の目安の印（reportflags.encode の形）
+    "people_n": "INTEGER",  # 人の数の目安（異なる値が最も多い種類の数）。NULL は数えていない
+    "people_type": "TEXT",  # 人の数の目安をどの種類で判断したか
+    # 親フォルダのアクセス権（folderacl。broad / limited / unknown / ftp）。検出のあったファイルにだけ付ける
+    "access": "TEXT",
+    "access_who": "TEXT",  # 読み取りを許された「広く誰でも」の名前、または読めなかった理由
+    "access_owner": "TEXT",  # 親フォルダの所有者の名前（取れたときだけ）
 }
 REUSABLE_STATUSES = (Status.SCANNED, Status.PARTIAL, Status.OUT_OF_SCOPE)
+
+
+def _add_counts(acc: dict[str, int], text: str | dict | None) -> None:
+    """「種類:確度」→件数（JSON の文字列か dict）を acc に足す。"""
+    d = json.loads(text) if isinstance(text, str) else (text or {})
+    for k, v in (d or {}).items():
+        acc[k] = acc.get(k, 0) + int(v or 0)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -210,10 +227,13 @@ class Store:
             self._conn.execute("ALTER TABLE items ADD COLUMN conf_counts TEXT DEFAULT '{}'")
         if "allowed" not in cols:  # 許可リストで外した件数（古い版の DB に列を足す）
             self._conn.execute("ALTER TABLE items ADD COLUMN allowed INTEGER DEFAULT 0")
+        if "distinct_counts" not in cols:  # 異なる値の数（古い版の DB では NULL のまま＝数えていない）
+            self._conn.execute("ALTER TABLE items ADD COLUMN distinct_counts TEXT")
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         for name, decl in FILE_EXTRA_COLUMNS.items():
             if name not in fcols:
                 self._conn.execute(f"ALTER TABLE files ADD COLUMN {name} {decl}")
+        self._fill_old_flags()
         self._conn.execute("CREATE INDEX IF NOT EXISTS files_reuse ON files(top_path, engine_sig, reusable)")
         jcols = {r[1] for r in self._conn.execute("PRAGMA table_info(jobs)")}
         for name, decl in (("owner_pid", "INTEGER"), ("heartbeat", "REAL")):
@@ -228,6 +248,24 @@ class Store:
         )
         self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS folder_errors_once ON folder_errors(job_id, path, kind)")
         self._conn.commit()
+
+    def _fill_old_flags(self) -> None:
+        """古い版で検査したファイル（印の列が空）に、検出の件数から決まる印だけを付ける（異なる値は数えていないので付けない）。"""
+        c = self._conn
+        if not c.execute("SELECT 1 FROM files WHERE state='done' AND flags IS NULL LIMIT 1").fetchall():
+            return
+        agg: dict[tuple[str, str], dict[str, int]] = {}
+        for job_id, top, cc in c.execute(
+            "SELECT f.job_id, f.top_path, i.conf_counts FROM files f JOIN items i ON i.job_id=f.job_id"
+            " AND i.top_path=f.top_path WHERE f.state='done' AND f.flags IS NULL AND i.conf_counts NOT IN ('{}', '')"
+        ):
+            d = agg.setdefault((job_id, top), {})
+            _add_counts(d, cc)
+        c.executemany(
+            "UPDATE files SET flags=? WHERE job_id=? AND top_path=?",
+            [(reportflags.encode(reportflags.compute(d, None)["flags"]), j, t) for (j, t), d in agg.items()],
+        )
+        c.execute("UPDATE files SET flags='' WHERE state='done' AND flags IS NULL")
 
     @contextmanager
     def tx(self):
@@ -396,6 +434,11 @@ class Store:
         src = result.source or {}
         # 使い回してよいのは、元のファイルを写せていて（識別情報がある）、言い切りを妨げる状態を含まない結果だけ
         reusable = int(bool(src and engine_sig and worst in REUSABLE_STATUSES))
+        conf_total: dict[str, int] = {}
+        for it in result.items:
+            _add_counts(conf_total, it.conf_counts)
+        distinct = dict(result.distinct_counts or {})
+        mark = reportflags.compute(conf_total, distinct)
         with self.tx() as c:
             c.execute(
                 "DELETE FROM items WHERE job_id=? AND top_path=?",
@@ -408,7 +451,8 @@ class Store:
             for seq, it in enumerate(result.items):
                 c.execute(
                     "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                    " password_kind, counts, notes, conf_counts, allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " password_kind, counts, notes, conf_counts, allowed, distinct_counts)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id,
                         result.top_path,
@@ -426,6 +470,7 @@ class Store:
                         json.dumps(it.notes, ensure_ascii=False),
                         json.dumps(it.conf_counts, ensure_ascii=False),
                         it.allowed,
+                        json.dumps(it.distinct_counts or {}, ensure_ascii=False),
                     ),
                 )
                 c.executemany(
@@ -449,7 +494,8 @@ class Store:
             c.execute(
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
                 " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
-                " scanned_at=?, atime_kept=? WHERE job_id=? AND top_path=?",
+                " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
+                " access=NULL, access_who=NULL, access_owner=NULL WHERE job_id=? AND top_path=?",
                 (
                     worst.value,
                     risk,
@@ -463,6 +509,10 @@ class Store:
                     reusable,
                     time.time(),
                     None if not src else int(bool(src.get("atime_kept"))),
+                    json.dumps(distinct, ensure_ascii=False),
+                    reportflags.encode(mark["flags"]),
+                    mark["people_n"],
+                    mark["people_type"],
                     job_id,
                     result.top_path,
                 ),
@@ -487,11 +537,21 @@ class Store:
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
                 "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                " password_kind, counts, notes, conf_counts, allowed) SELECT ?, top_path, seq, path, kind, status,"
-                " reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts, allowed FROM items"
-                " WHERE job_id=? AND top_path=?",
+                " password_kind, counts, notes, conf_counts, allowed, distinct_counts) SELECT ?, top_path, seq, path,"
+                " kind, status, reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts, allowed,"
+                " distinct_counts FROM items WHERE job_id=? AND top_path=?",
                 (job_id, src["job_id"], top),
             )
+            # 印は写さずに決め直す（印の決め方は検査器の版に含めないので、前回の後で変わっていることがある）
+            conf_total: dict[str, int] = {}
+            for (cc,) in c.execute(
+                "SELECT conf_counts FROM items WHERE job_id=? AND top_path=? AND conf_counts NOT IN ('{}', '')",
+                (job_id, top),
+            ):
+                _add_counts(conf_total, cc)
+            distinct_text = src.get("distinct_counts")
+            distinct = json.loads(distinct_text) if distinct_text else None
+            mark = reportflags.compute(conf_total, distinct)
             c.execute(
                 "INSERT INTO findings SELECT ?, top_path, item_seq, pii_type, confidence, masked_value, location,"
                 " context, rule, method FROM findings WHERE job_id=? AND top_path=?",
@@ -501,7 +561,8 @@ class Store:
             c.execute(
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
                 " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, scanned_at=?,"
-                " atime_kept=? WHERE job_id=? AND top_path=?",
+                " atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL, access_who=NULL,"
+                " access_owner=NULL WHERE job_id=? AND top_path=?",
                 (
                     src["worst_status"],
                     src["risk"],
@@ -514,9 +575,21 @@ class Store:
                     origin,
                     src["scanned_at"],
                     src["atime_kept"],
+                    distinct_text,
+                    reportflags.encode(mark["flags"]),
+                    mark["people_n"],
+                    mark["people_type"],
                     job_id,
                     top,
                 ),
+            )
+
+    def set_access(self, job_id: str, top_path: str, access: str, who: str = "", owner: str = "") -> None:
+        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する。"""
+        with self.tx() as c:
+            c.execute(
+                "UPDATE files SET access=?, access_who=?, access_owner=? WHERE job_id=? AND top_path=?",
+                (access, who, owner, job_id, top_path),
             )
 
     def save_failure(self, job_id: str, top_path: str, reason: str, elapsed: float = 0.0) -> None:
@@ -596,7 +669,20 @@ class Store:
         )[
             0
         ][0]
+        # 報告の目安の印ごとのファイル数と、検出のあったファイルの親フォルダのアクセス権の内訳
+        flag_counts = {f: 0 for f in reportflags.FLAG_ORDER}
+        access_counts: dict[str, int] = {}
+        for r in q(
+            "SELECT flags, access FROM files WHERE job_id=? AND state='done' AND n_findings > 0",
+            (job_id,),
+        ):
+            for f in reportflags.decode(r[0]):
+                flag_counts[f] += 1
+            if r[1]:
+                access_counts[r[1]] = access_counts.get(r[1], 0) + 1
         return {
+            "flags": flag_counts,
+            "access": access_counts,
             "files_total": files_total,
             "files_done": files_done,
             "item_status": status_counts,

@@ -143,3 +143,66 @@ def test_interrupted_scan_exits_nonzero(tmp_path, monkeypatch):
         ]
     )
     assert code == 0
+
+
+def _scan(tmp_path, root, name, *extra):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    return cli.main(
+        ["--db", str(tmp_path / f"{name}.sqlite3"), "scan", str(root), "--no-ask", "-o", str(out / f"{name}.xlsx")]
+        + list(extra)
+    )
+
+
+def test_exit_code_by_verdict(tmp_path):
+    """--exit-by-verdict を付けたときだけ、判定で終了コードを変える（0=検出なし・1=可能性あり・4=要確認・言い切れない）。"""
+    cases = {
+        "clean": ("会議の議題\n", 0),
+        "found": ("顧客 携帯 090-1234-5678\n", cli.EXIT_FOUND),
+        "low": ("123456789018\n", cli.EXIT_UNSURE),  # 語の無い12桁（検査数字は合う）＝確度 低 だけ
+    }
+    for name, (text, want) in cases.items():
+        root = tmp_path / name
+        root.mkdir()
+        (root / "a.txt").write_text(text, encoding="utf-8")
+        assert _scan(tmp_path, root, name, "--exit-by-verdict") == want, name
+    # 付けないときは今までどおり 0
+    assert _scan(tmp_path, tmp_path / "found", "found_plain") == 0
+    # ファイルが1件も無い（言い切れない）
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _scan(tmp_path, empty, "empty", "--exit-by-verdict") == cli.EXIT_UNSURE
+
+
+def test_exit_by_verdict_keeps_interrupted_and_resume(tmp_path, monkeypatch):
+    """途中で止めたときは --exit-by-verdict を付けても 3。--resume でも判定の終了コードを返す。"""
+    from pii_checker import runner
+    from pii_checker.store import Store
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("顧客 携帯 090-1234-5678\n", encoding="utf-8")
+
+    def halted(self):
+        self._halt(runner.NETWORK_HALT_MESSAGE)
+
+    monkeypatch.setattr(runner.JobRunner, "_scan_pending", halted)
+    assert _scan(tmp_path, root, "j", "--exit-by-verdict") == cli.EXIT_INTERRUPTED
+    monkeypatch.undo()
+    job = Store(str(tmp_path / "j.sqlite3")).jobs()[0]["id"]
+    code = cli.main(
+        ["--db", str(tmp_path / "j.sqlite3"), "scan", "--resume", job, "--no-ask", "--exit-by-verdict"]
+        + ["-o", str(tmp_path / "out" / "resume.xlsx")]
+    )
+    assert code == cli.EXIT_FOUND
+
+
+def test_exit_code_for_levels():
+    assert [cli.exit_code_for(x) for x in ("clean", "clean_partial", "found", "low_only", "undetermined", "empty")] == [
+        0,
+        0,
+        1,
+        4,
+        4,
+        4,
+    ]

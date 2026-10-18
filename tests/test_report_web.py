@@ -1,7 +1,7 @@
 """レポートを Web のページで見る試験。
 
 - 検査して結果を出す → サーバー（アプリ）を終わらせる → 開き直すと、前の結果とレポートを取れる
-- Excel の5シート（判定・要対応・ファイル別・検出明細・全項目）の中身を、同じ数で Web の API からも取れる
+- Excel のシート（判定・要対応・ファイル別・検出明細・全項目）の中身を、同じ数で Web の API からも取れる
 """
 
 from __future__ import annotations
@@ -102,7 +102,11 @@ def test_results_survive_restart_and_match_excel(tmp_path, folder):
         out = tmp_path / "out.xlsx"
         write_xlsx(Store(db), job, str(out))
         wb = load_workbook(out, read_only=True)
-        assert wb.sheetnames == ["判定", "要対応", "ファイル別", "検出明細", "全項目"]
+        assert wb.sheetnames == ["判定", "要対応", "ファイル別", "前回との違い", "検出明細", "全項目"]
+        diff = s2.api(f"/api/jobs/{job}/diff")
+        assert diff["previous"] is None and "比べる前回の検査がありません" in diff["summary_text"]
+        assert "比べる前回の検査がありません" in overview["前回との違い"]
+        assert meibo["access"] in ("limited", "broad") and meibo["access_label"]
         rows_of = {name: list(wb[name].iter_rows(values_only=True))[1:] for name in wb.sheetnames[1:]}
         assert len(rows_of["要対応"]) == attention["total"]
         assert len(rows_of["ファイル別"]) == files["total"]

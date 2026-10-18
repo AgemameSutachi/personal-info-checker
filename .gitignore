@@ -22,3 +22,5 @@ NOW.md
 NOW-archive-*.md
 # 公開前の履歴の控え（git bundle）
 private/
+# 記事の材料など、公開しない報告
+reports/

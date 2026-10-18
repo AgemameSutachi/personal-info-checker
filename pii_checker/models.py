@@ -86,6 +86,7 @@ class ItemResult:
     finding_counts: dict[str, int] = field(default_factory=dict)  # 種類→件数（明細の上限に関係なく全数）
     conf_counts: dict[str, int] = field(default_factory=dict)  # 「種類:確度」→件数（判定はこれで決める）
     notes: list[str] = field(default_factory=list)  # 補足（例: 画像PDFのためOCRした）
+    allowed: int = 0  # 許可リストの値と一致したため数えなかった検出の件数（黙って消さず、件数は残す）
 
 
 @dataclass
@@ -122,6 +123,10 @@ class ScanOptions:
     reuse: bool = True  # 前回から変わっていないファイルは前回の結果を使い回す（False で全部読み直す）
     # 接続方式で指定したときの接続先（remote.Connection.public()。パスワードは入れない。ジョブと一緒に保存する）
     connection: dict | None = None
+    # 許可リスト（拾わない値。利用者が入れた値をそのまま持つ。照合は userrules.normalize_allow で寄せてから）
+    allow_values: list[str] = field(default_factory=list)
+    # 利用者の規則（userrules.UserRule.to_dict() の形。受け付けるときに書き方と速さを確かめてある）
+    custom_rules: list[dict] = field(default_factory=list)
 
 
 @dataclass

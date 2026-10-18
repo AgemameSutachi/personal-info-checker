@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS items (
     counts TEXT,
     notes TEXT,
     conf_counts TEXT DEFAULT '{}',
+    allowed INTEGER DEFAULT 0,
     PRIMARY KEY (job_id, top_path, seq)
 );
 CREATE INDEX IF NOT EXISTS items_status ON items(job_id, status);
@@ -82,6 +83,10 @@ CREATE TABLE IF NOT EXISTS folder_errors (
     path TEXT,
     kind TEXT,
     reason TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 """
 
@@ -203,6 +208,8 @@ class Store:
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(items)")}
         if "conf_counts" not in cols:  # 古い版の DB に列を足す
             self._conn.execute("ALTER TABLE items ADD COLUMN conf_counts TEXT DEFAULT '{}'")
+        if "allowed" not in cols:  # 許可リストで外した件数（古い版の DB に列を足す）
+            self._conn.execute("ALTER TABLE items ADD COLUMN allowed INTEGER DEFAULT 0")
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         for name, decl in FILE_EXTRA_COLUMNS.items():
             if name not in fcols:
@@ -401,7 +408,7 @@ class Store:
             for seq, it in enumerate(result.items):
                 c.execute(
                     "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                    " password_kind, counts, notes, conf_counts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " password_kind, counts, notes, conf_counts, allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id,
                         result.top_path,
@@ -418,6 +425,7 @@ class Store:
                         json.dumps(it.finding_counts, ensure_ascii=False),
                         json.dumps(it.notes, ensure_ascii=False),
                         json.dumps(it.conf_counts, ensure_ascii=False),
+                        it.allowed,
                     ),
                 )
                 c.executemany(
@@ -479,8 +487,8 @@ class Store:
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
                 "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                " password_kind, counts, notes, conf_counts) SELECT ?, top_path, seq, path, kind, status, reason,"
-                " method, size, mtime, depth, password_kind, counts, notes, conf_counts FROM items"
+                " password_kind, counts, notes, conf_counts, allowed) SELECT ?, top_path, seq, path, kind, status,"
+                " reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts, allowed FROM items"
                 " WHERE job_id=? AND top_path=?",
                 (job_id, src["job_id"], top),
             )
@@ -576,6 +584,12 @@ class Store:
             0
         ][0]
         password_files = len(self.files_with_status(job_id, [Status.NEEDS_PASSWORD.value]))
+        allowed = q("SELECT COALESCE(SUM(allowed), 0) FROM items WHERE job_id=?", (job_id,))[0][0]
+        job_opts = q("SELECT options FROM jobs WHERE id=?", (job_id,))
+        try:
+            opts = json.loads(job_opts[0][0]) if job_opts else {}
+        except (TypeError, ValueError):
+            opts = {}
         reused = q(
             "SELECT COUNT(*) FROM files WHERE job_id=? AND reused_from IS NOT NULL",
             (job_id,),
@@ -595,4 +609,21 @@ class Store:
             "links": links,
             "password_files": password_files,
             "reused": reused,
+            # 許可リストで外した検出の件数と、許可リスト・利用者の規則の数（判定の文・レポートに出す）
+            "allowed": allowed,
+            "allow_list": len(opts.get("allow_values") or []),
+            "custom_rules": len(opts.get("custom_rules") or []),
         }
+
+    # ------------------------------------------------------------ 画面の設定（前回の値を次の検査の欄に入れておく）
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        rows = self.query("SELECT value FROM settings WHERE key=?", (key,))
+        return rows[0][0] if rows and rows[0][0] is not None else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )

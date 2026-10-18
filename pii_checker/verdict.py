@@ -69,6 +69,11 @@ def _decide(summary: dict, job_state: str) -> Verdict:
         )
     if out_of_scope:
         detail.append(f"対象外 {out_of_scope:,} 件（動画・音声・実行ファイル・フォントなど、文字の情報を持たない形式）")
+    if summary.get("allowed") or summary.get("allow_list"):
+        # 外した分は黙って消さず、件数を判定の文に残す（0 件でも、許可リストを使ったことは示す）
+        detail.append(
+            f"許可リストで外した検出 {summary.get('allowed', 0):,} 件（許可リストの値と一致したため、件数・判定に数えていない）"
+        )
 
     if job_state in ("running", "created"):
         return Verdict("running", "検査中", detail)

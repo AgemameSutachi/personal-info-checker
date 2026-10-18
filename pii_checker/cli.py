@@ -47,6 +47,8 @@ EPILOG = r"""使用例:
   pii-checker scan \\nas01\総務 -o 結果.xlsx          NAS の共有フォルダを検査して Excel にまとめる
   pii-checker scan D:\共有 --password-file pw.txt     分かっているパスワードを全部の暗号化ファイルに試す
   pii-checker scan --resume <ジョブID>                中断した検査の続き
+  pii-checker scan D:\共有 --allow-file 許可.txt --rules-file 規則.txt
+                                                     拾わない値・自分で足す規則を使う
   pii-checker serve                                  ブラウザで操作する（Web 版）
   pii-checker app                                    窓で操作する（アプリ版。引数なしでも起動）
 （開発環境では pii-checker の代わりに python -m pii_checker）
@@ -122,10 +124,58 @@ def _open_connection(conn, password: str) -> bool:
     return created
 
 
+def _read_user_text(path: str, what: str) -> str:
+    """許可リスト・規則のファイル（UTF-8。メモ帳の BOM 付きも可）を読む。読めなければ UserTextError。"""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            return f.read()
+    except FileNotFoundError:
+        raise UserTextError(f"{what}のファイルが見つかりません: {path}") from None
+    except UnicodeDecodeError:
+        raise UserTextError(
+            f"{what}のファイル（{path}）を UTF-8 として読めません。メモ帳の「名前を付けて保存」で文字コードを"
+            "「UTF-8」にして保存し直してください"
+        ) from None
+    except OSError as e:
+        raise UserTextError(f"{what}のファイル（{path}）を読めません: {e}") from None
+
+
+class UserTextError(Exception):
+    """許可リスト・規則のファイルを読めない・書き方が誤っている（文面はそのまま人に見せる）。"""
+
+
+def _user_rules(args) -> tuple[list[str], list[dict]]:
+    """--allow-file・--rules-file を読み、書き方を確かめる（検査を始める前に断る）。"""
+    from .userrules import RuleError, parse_allow_list, parse_rules
+
+    allow: list[str] = []
+    rules: list[dict] = []
+    try:
+        if args.allow_file:
+            allow = parse_allow_list(_read_user_text(args.allow_file, "許可リスト"))
+        if args.rules_file:
+            rules = [r.to_dict() for r in parse_rules(_read_user_text(args.rules_file, "規則"))]
+    except RuleError as e:
+        raise UserTextError(str(e)) from None
+    return allow, rules
+
+
 def cmd_scan(args) -> int:
     conn = None
     conn_password = ""
     smb_created = False
+    if args.resume and (args.allow_file or args.rules_file):
+        print(
+            "--resume と --allow-file・--rules-file は一緒に使えません"
+            "（再開は、始めたときの許可リスト・規則をそのまま使います。変えるときは新しく検査してください）",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        args.user_allow, args.user_rules = _user_rules(args)
+    except UserTextError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if args.connect and args.resume:
         print(
             "--resume と --connect は一緒に使えません（再開は保存してある接続先を使います）",
@@ -230,6 +280,8 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
         temp_dir=args.temp_dir,
         sevenzip=args.sevenzip,
         connection=conn.public() if conn else None,
+        allow_values=getattr(args, "user_allow", None) or [],
+        custom_rules=getattr(args, "user_rules", None) or [],
     )
     roots = list(args.roots) if on_ftp else [os.path.abspath(r) for r in args.roots]
     if args.resume and store.job(args.resume):
@@ -271,6 +323,16 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
             name=conn.short_name() if conn else store.default_job_name(roots),
         )
     print(f"ジョブ {job_id} を開始します（結果の保存先: {store.path}）")
+    job_opts = store.job(job_id)["options"]
+    if job_opts.get("allow_values") or job_opts.get("custom_rules"):
+        from .userrules import rule_names
+
+        names = rule_names(job_opts.get("custom_rules"))
+        print(
+            f"許可リスト {len(job_opts.get('allow_values') or [])} 件・利用者の規則 {len(names)} 件"
+            + (f"（{'、'.join(names)}）" if names else "")
+            + " を使います"
+        )
     runner = JobRunner(store, job_id, workers=args.workers, timeout=args.timeout, passwords=book)
     if args.resume and book.common:
         # 再開時に受け取ったパスワードは、パスワードが必要だったファイルにも試す
@@ -452,6 +514,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--temp-dir", help="展開に使う一時フォルダ（空きの多いドライブを指定）")
     s.add_argument("--sevenzip", help="7z.exe の場所")
     s.add_argument("--resume", metavar="ジョブID", help="中断したジョブを続きから再開する")
+    s.add_argument(
+        "--allow-file",
+        metavar="ファイル",
+        help="拾わない値（許可リスト）の一覧（UTF-8・1行に1つ。自社の代表番号・所在地・見本の氏名など）",
+    )
+    s.add_argument(
+        "--rules-file",
+        metavar="ファイル",
+        help="自分で足す規則の一覧（UTF-8・1行に1つ「名前 | 正規表現 | 確度」。例: 社員番号 | EMP-\\d{6} | 中）",
+    )
     c = s.add_argument_group(
         "接続方式で指定する（フォルダの代わりに。パスワードは聞いて使うだけで保存しない）",
         "例: scan --connect smb --host nas01 --share 総務 --path 2024年度 --user taro / "

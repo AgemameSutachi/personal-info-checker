@@ -93,7 +93,7 @@
         <p class="help">暗号化された zip や Office ファイルなど、すべてに試します。ここが空でも、検査のあとでパスワードを聞きます。パスワードは保存しません。
           <label class="inline-check"><input type="checkbox" id="show-secret"> 入力内容を表示</label></p>
         <details class="advanced">
-          <summary>詳しい設定</summary>
+          <summary>詳しい設定<span id="adv-note" class="adv-note"></span></summary>
           <label class="check"><input type="checkbox" id="opt-ocr" checked> 画像とスキャンした PDF の文字を OCR で読む</label>
           <p id="ocr-warn" class="help warn hidden">OCR を使わないと、画像やスキャンした PDF は「検査できなかった」扱いになり、「個人情報は無い」と言い切れなくなります。</p>
           <label class="check"><input type="checkbox" id="opt-reuse" checked> 前回から変わっていないファイルは前回の結果を使う <small>（速い。外すと全部読み直す）</small></label>
@@ -103,6 +103,19 @@
             <label class="field"><span>1ファイルの時間制限（分）</span><input type="number" id="opt-timeout" min="1" value="30"></label>
           </div>
           <label class="field"><span>展開に使う一時フォルダ <small>（大きなディスクイメージを調べるときは空きの多いドライブを）</small></span><input type="text" id="opt-temp" placeholder="既定（Windows の一時フォルダ）"></label>
+          <label class="field" for="opt-allow"><span>拾わない値（許可リスト） <small>（1行に1つ）</small></span>
+            <textarea id="opt-allow" rows="4" spellcheck="false" aria-describedby="opt-allow-help" placeholder="例:&#10;03-1234-5678&#10;東京都千代田区丸の内1-1-1&#10;山田太郎"></textarea>
+          </label>
+          <p id="opt-allow-help" class="help">自社の代表番号・所在地・書類の見本の名前など、毎回「要確認」に並ぶ値を入れると、検出として数えなくなります。
+            見つけた値がまるごと同じときだけ外します（一部だけ同じものは外しません）。全角と半角・空白・ハイフンの違いは無視します。
+            外した件数は判定とレポートに出ます。値そのものはレポートに載せません。</p>
+          <label class="field" for="opt-rules"><span>自分で足す規則 <small>（1行に1つ「名前 | 探す語か正規表現 | 確度」。確度は 高・中・低で、省けば 中）</small></span>
+            <textarea id="opt-rules" rows="4" spellcheck="false" aria-describedby="opt-rules-help" placeholder="例:&#10;社員番号 | EMP-\d{6} | 中&#10;顧客番号 | C\d{8}&#10;機密"></textarea>
+          </label>
+          <p id="opt-rules-help" class="help">社員番号・顧客番号など、会社ごとに形の違う番号や語を「利用者の規則」として探します。「機密」のように語だけを書いても探せます。
+            正規表現では <code>\d</code> が数字1文字、<code>{6}</code> が6回の繰り返しです（<code>EMP-\d{6}</code> は「EMP-」と数字6桁）。
+            「#」で始まる行は読み飛ばします。書き方に誤りがあると、検査を始める前に何行目が悪いかを示します。</p>
+          <p class="help">この2つの欄は、次の検査にも前回の値を入れておきます。</p>
         </details>
         <div class="row">
           <button type="submit" id="btn-start" class="primary">検査を始める</button>

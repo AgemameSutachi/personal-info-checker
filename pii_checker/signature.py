@@ -145,7 +145,12 @@ def _environment(sevenzip: str | None, helper32: str | None) -> str:
 
 def engine_signature(options: ScanOptions) -> str:
     """検査器の版（ソース・結果に効く設定・使える部品）。"""
+    from .userrules import allow_signature
+
     opts = {k: v for k, v in asdict(options).items() if k not in _OPTION_EXCLUDE}
+    # 許可リスト・利用者の規則は結果に効く（変われば前回の結果を使い回さない）。許可リストは照合と同じ形に寄せて並べ、
+    # 書き順・重複・全角半角の違いだけでは変わらないようにする
+    opts["allow_values"] = allow_signature(opts.get("allow_values"))
     h = hashlib.sha256()
     h.update(code_fingerprint().encode())
     h.update(json.dumps(opts, sort_keys=True, ensure_ascii=False).encode())

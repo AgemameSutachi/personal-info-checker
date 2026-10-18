@@ -353,6 +353,29 @@ $("#opt-ocr").addEventListener("change", () => $("#ocr-warn").classList.toggle("
 
 const lines = (id) => $(id).value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 
+// ---------------------------------------------------------------- 拾わない値（許可リスト）・自分で足す規則
+// 「#」で始まる行は説明書きとして数えない（サーバーの読み方と同じ）
+const ruleLines = (id) => lines(id).filter((s) => !s.startsWith("#")).length;
+// 詳しい設定を閉じたままでも、使う設定があることが見えるよう、見出しに件数を添える
+function updateAdvNote() {
+  const a = ruleLines("#opt-allow"), r = ruleLines("#opt-rules");
+  const parts = [];
+  if (a) parts.push(`拾わない値 ${fmtNum(a)} 件`);
+  if (r) parts.push(`自分で足す規則 ${fmtNum(r)} 件`);
+  $("#adv-note").textContent = parts.length ? `（${parts.join("・")}を使う）` : "";
+}
+$("#opt-allow").addEventListener("input", updateAdvNote);
+$("#opt-rules").addEventListener("input", updateAdvNote);
+// 前回の検査で使った値を欄に入れておく（結果の DB に覚えてある。アプリ版でも消えない）
+async function loadUserRuleSettings() {
+  try {
+    const st = await api("/api/settings");
+    if (!$("#opt-allow").value) $("#opt-allow").value = st.allow_list || "";
+    if (!$("#opt-rules").value) $("#opt-rules").value = st.custom_rules || "";
+  } catch (_) { /* 読めなくても欄が空になるだけ */ }
+  updateAdvNote();
+}
+
 $("#form-new").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const msg = $("#new-msg");
@@ -386,6 +409,8 @@ $("#form-new").addEventListener("submit", async (ev) => {
       workers: $("#opt-workers").value || null,
       timeout: ($("#opt-timeout").value || 30) * 60,
       temp_dir: $("#opt-temp").value.trim() || null,
+      allow_list: $("#opt-allow").value,
+      custom_rules: $("#opt-rules").value,
     },
   };
   try {
@@ -399,6 +424,12 @@ $("#form-new").addEventListener("submit", async (ev) => {
     msg.textContent = e.message + (!useConn && /見つからない|接続できない/.test(e.message)
       ? "　→ エクスプローラーでその場所を開けるか、NAS なら先にログイン（資格情報の入力）を済ませてから、もう一度押してください。"
       : "");
+    // 許可リスト・規則の書き方の誤りなら、閉じている「詳しい設定」を開いてその欄へ
+    const bad = /「拾わない値（許可リスト）」/.test(e.message) ? "#opt-allow" : /「自分で足す規則」/.test(e.message) ? "#opt-rules" : null;
+    if (bad) {
+      $("details.advanced").open = true;
+      $(bad).focus();
+    }
   } finally {
     btn.disabled = false;
   }
@@ -975,6 +1006,7 @@ $("#rep-xlsx").addEventListener("click", () => download("xlsx"));
 (async () => {
   await loadInfo();
   if (!state.info) return;
+  await loadUserRuleSettings();
   await loadJobs();
   const m = location.hash.match(/^#(job|report)=([\w-]+)$/);
   if (m) {

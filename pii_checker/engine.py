@@ -143,6 +143,9 @@ class Collector:
     )  # (種類, 値) の hash → [低で数えた件数, Hit, 明細を持つか, 引数]
     head_chars: int = 0  # 書類の題を探すために見た本文の先頭の文字数（ファイル名は数えない）
     cue_title: str = ""  # 人の手がかりにした書類の題（「名簿」など。明細の注記を出し分ける）
+    # 許可リストと利用者の規則（userrules.Matcher。どちらも無ければ None）
+    matcher: object | None = None
+    allowed_seen: set = field(default_factory=set)  # 許可リストで外した (種類, 値) の hash（読み直しで二重に数えない）
 
     def add_text(
         self,
@@ -183,6 +186,8 @@ class Collector:
                 self.person_cue = True
                 self.cue_title = title.group(0)
         hits = detectors.detect(norm, header)
+        if self.matcher is not None:
+            hits += self.matcher.find(norm)  # 利用者の規則（見出しに関係なく本文に当てる）
         # 見出しが確かでないときは、見出しなしで読んだときの確度に留める（見出しなしでは拾えない分は低）
         plain = (
             {(h.pii_type, h.value): h.confidence for h in detectors.detect(norm, None)}
@@ -190,8 +195,12 @@ class Collector:
             else None
         )
         for hit in hits:
+            if self.matcher is not None and self.matcher.is_allowed(hit.pii_type, hit.value):
+                # 許可リストの値: 数えず、人の手がかりにもしない。外した件数だけ残す
+                self._count_allowed(hit, raw or skip_seen)
+                continue
             confidence = hit.confidence
-            if plain is not None:
+            if plain is not None and hit.pii_type != "custom":
                 confidence = plain.get((hit.pii_type, hit.value), Confidence.LOW)
             if raw and confidence == Confidence.HIGH:
                 confidence = Confidence.MEDIUM  # 残留データは値の区切りが失われていて取り違えうるので1段下げる
@@ -290,6 +299,15 @@ class Collector:
             norm, location, location_fn, method, raw = args
             pos = self._add_sample(hit, Confidence.MEDIUM, norm, location, location_fn, method, raw, [])
         self.seen[key] = (pos, Confidence.MEDIUM)
+
+    def _count_allowed(self, hit, reread: bool) -> None:
+        """許可リストで外した検出を数える。読み直し（生データ走査等）で既に外した値は数えない（検出の数え方と同じ）。"""
+        key = hash((hit.pii_type, hit.value))
+        if reread and key in self.allowed_seen:
+            return
+        if len(self.allowed_seen) < 3_000_000:
+            self.allowed_seen.add(key)
+        self.item.allowed += 1
 
     def _count(self, pii_type: str, confidence: Confidence) -> None:
         counts = self.item.finding_counts
@@ -556,6 +574,9 @@ class ScanContext:
         # 元のファイルのフォルダ（検査するのは一時フォルダの写しなので、隣のファイルはここで引く）
         self.source_dir: str | None = None
         self._owner = None  # 一時フォルダの持ち主の目印（開いている間は消せない）
+        from .userrules import matcher_for
+
+        self.matcher = matcher_for(options)  # 許可リストと利用者の規則（無ければ None）
 
     @property
     def tmpdir(self) -> str:
@@ -609,7 +630,7 @@ class ScanContext:
         item = ItemResult(path=blob.display, kind="", status=Status.PENDING, depth=depth)
         item.mtime = blob.mtime
         self.items.append(item)
-        collector = Collector(item, self.options.max_samples_per_type)
+        collector = Collector(item, self.options.max_samples_per_type, matcher=self.matcher)
         try:
             item.size = blob.size
             if depth > self.options.max_depth:

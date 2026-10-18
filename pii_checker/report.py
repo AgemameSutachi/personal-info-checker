@@ -26,6 +26,7 @@ from . import __version__
 from .detectors import PII_TYPES
 from .models import STATUS_LABELS, Confidence, Status
 from .store import Store
+from .userrules import rule_names
 from .verdict import decide
 
 CONF_LABELS = {c.value: c.label for c in Confidence}
@@ -160,6 +161,15 @@ def overview_rows(job: dict, summary: dict) -> list[tuple[str, object]]:
         ("設定: 生データ走査", "する" if opts.get("raw_sweep") else "しない"),
         ("設定: イメージの未使用領域", "走査する" if opts.get("deep_image_sweep") else "走査しない"),
         ("設定: 前回の結果の使い回し", "する" if opts.get("reuse", True) else "しない（全部読み直す）"),
+    ]
+    # 許可リストの値そのものは出さない（自社の電話番号などを、レポートの渡し先へ広めないため）。件数だけ
+    n_allow = len(opts.get("allow_values") or [])
+    names = rule_names(opts.get("custom_rules"))
+    rows.append(("設定: 許可リスト", f"{n_allow:,} 件" if n_allow else "なし"))
+    if n_allow or summary.get("allowed"):
+        rows.append(("許可リストで外した検出", summary.get("allowed", 0)))
+    rows.append(("設定: 利用者の規則", f"{len(names)} 件（{'、'.join(names)}）" if names else "なし"))
+    rows += [
         ("ツール", f"個人情報チェッカー {__version__}"),
         ("出力日時", _ts(time.time())),
     ]

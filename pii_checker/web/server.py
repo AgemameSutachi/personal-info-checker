@@ -29,6 +29,7 @@ from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
 from ..remote import ENCODINGS, KINDS, ConnectError, Connection, ftp_check, smb_connect, smb_disconnect
 from ..safeio import NETWORK_LOST_MSG, NetworkLost, output_inside_roots
 from ..store import Store
+from ..userrules import RuleError, parse_allow_list, parse_rules
 from ..verdict import decide
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -43,6 +44,21 @@ NEEDS_PASSWORD_HEADER = "X-Pii-Needs-Password"
 # 確かめてからもう一度押すよう添える（権限が無い等の、つながっても直らない失敗には付けない）
 NETWORK_HEADER = "X-Pii-Network"
 RE_HOST_PORT = re.compile(r":\d*")
+# 前回の検査で使った許可リスト・利用者の規則を覚えておく設定の名前（結果の DB の settings 表）
+SETTING_ALLOW = "new_scan.allow_list"
+SETTING_RULES = "new_scan.custom_rules"
+MAX_USER_TEXT = 1_000_000  # 許可リスト・規則の欄の文字数の上限（取り違えて大きなファイルを貼ったとき）
+
+
+def _user_text(options: dict, key: str) -> str:
+    """画面から来た許可リスト・規則の欄の文字列（1行に1つ）。配列で来ても行につなぐ。"""
+    v = options.get(key) or ""
+    if isinstance(v, list):
+        v = "\n".join(str(x) for x in v)
+    v = str(v)
+    if len(v) > MAX_USER_TEXT:
+        raise HTTPException(400, f"許可リスト・規則の欄が長すぎます（{MAX_USER_TEXT:,} 文字まで）")
+    return v
 
 
 def host_name(header: str | None) -> str:
@@ -288,6 +304,14 @@ def create_app(
     def create_job(payload: dict = Body(...)):
         conn = None
         conn_password = ""
+        # 許可リスト・利用者の規則の書き方は、接続や場所の確認より先に確かめる（誤りなら何もしないで断る）
+        o = payload.get("options", {})
+        allow_text, rules_text = _user_text(o, "allow_list"), _user_text(o, "custom_rules")
+        try:
+            allow_values = parse_allow_list(allow_text)
+            custom_rules = [r.to_dict() for r in parse_rules(rules_text)]
+        except RuleError as e:
+            raise HTTPException(400, str(e)) from None
         if payload.get("connection"):
             # 接続方式で指定（roots は使わない。両方来たら、どちらで検査するかが曖昧なので断る）
             if any(r and str(r).strip() for r in payload.get("roots") or []):
@@ -303,13 +327,14 @@ def create_app(
             if missing:
                 raise HTTPException(400, "見つからない・接続できない場所があります: " + "、".join(missing[:5]))
         on_ftp = conn is not None and conn.is_ftp
-        o = payload.get("options", {})
         opts = ScanOptions(
             ocr=bool(o.get("ocr", True)),
             deep_image_sweep=bool(o.get("deep_image_sweep", False)),
             reuse=bool(o.get("reuse", True)),
             temp_dir=o.get("temp_dir") or None,
             connection=conn.public() if conn else None,
+            allow_values=allow_values,
+            custom_rules=custom_rules,
         )
         if opts.temp_dir and not os.path.isdir(opts.temp_dir):
             raise HTTPException(
@@ -338,7 +363,18 @@ def create_app(
             passwords=book,
         )
         runner.start()
+        # 前回の値として覚えておき、次の検査の欄に入れておく（結果の DB に保存。利用者が入れた値なので保存してよい）
+        try:
+            store.set_setting(SETTING_ALLOW, allow_text)
+            store.set_setting(SETTING_RULES, rules_text)
+        except Exception:  # noqa: BLE001  覚えられなくても検査は始まっている（次の欄が空になるだけ）
+            pass
         return {"id": job_id}
+
+    @app.get("/api/settings")
+    def settings():
+        """前回の検査で使った許可リスト・利用者の規則（入れたままの文字列）。新しい検査の欄に入れておくために使う。"""
+        return {"allow_list": store.get_setting(SETTING_ALLOW), "custom_rules": store.get_setting(SETTING_RULES)}
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str):

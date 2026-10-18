@@ -39,6 +39,7 @@ PII_TYPES: dict[str, str] = {
     "birthdate": "生年月日",
     "gender": "性別",
     "age": "年齢",
+    "custom": "利用者の規則",  # 利用者が足した語・正規表現（userrules）。重要な種類には入れない
 }
 
 # これらは単独で漏れると被害が大きい（リスクの重み付けに使う）
@@ -989,6 +990,11 @@ def mask_value(pii_type: str, value: str) -> str:
         return "＊"
     if pii_type == "id_document":
         return v  # 書類の名前（「運転免許証」など）で、個人の値ではない
+    if pii_type == "custom":
+        # 利用者の規則に当たった値: 数字を含めば番号として末尾だけ残し、ほかは先頭1文字だけ残す
+        if any(c.isdigit() for c in v):
+            return _mask_digits_keep_last(v, 4 if len(re.sub(r"[^0-9A-Za-z]", "", v)) > 6 else 2)
+        return v[:1] + "＊" * max(1, min(len(v) - 1, 8))
     return v[:2] + "＊" * max(1, min(len(v) - 2, 8))
 
 

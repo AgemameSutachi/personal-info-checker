@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SAMPLES = [
     "excel/meibo.xlsx",
-    "clean/orders.docx",
+    "clean/orders.txt",
     "archive/zipcrypto_password.zip",
     "encrypted/password.xlsx",
     "pdf/encrypted_password.pdf",
@@ -75,7 +75,6 @@ def _zipcrypto_zip(name: str, data: bytes, password: str) -> bytes:
 
 def _make_samples(target: Path, work: Path) -> None:
     """SAMPLES の5件を target の下に作る。"""
-    import docx
     import pymupdf
 
     import make_corpus as mc
@@ -85,10 +84,9 @@ def _make_samples(target: Path, work: Path) -> None:
         (target / rel).parent.mkdir(parents=True, exist_ok=True)
     xlsx = c.xlsx_bytes()
     (target / "excel/meibo.xlsx").write_bytes(xlsx)
-    d = docx.Document()
-    for line in mc.clean_text().splitlines():
-        d.add_paragraph(line)
-    d.save(target / "clean/orders.docx")
+    # 対照は画像を含まないテキストにする（python-docx のひな形にはサムネイル画像が入り、OCR の無い PC では
+    # 「検査不能」が1件増えて、要対応の件数が環境で変わってしまう）
+    (target / "clean/orders.txt").write_text(mc.clean_text() + "\n", encoding="utf-8")
     (target / "archive/zipcrypto_password.zip").write_bytes(_zipcrypto_zip("meibo.xlsx", xlsx, mc.PASSWORD))
     (target / "encrypted/password.xlsx").write_bytes(mc.encrypt_ooxml(xlsx, mc.PASSWORD))
     doc = pymupdf.open()

@@ -66,8 +66,9 @@ _RE_HONORIFIC_TAIL = re.compile(r"(様|殿|さん|君|くん|ちゃん)$")
 _SPEED_LENGTHS = (8, 12, 16, 20, 24, 32, 64, 256, WINDOW)
 _SPEED_ABORT = 0.05  # 試し文字列1本でこれ（秒）を超えたら、長さに関わらずすぐ断る（急に遅くなる形）
 # WINDOW 文字の試し文字列1本の時間が、基準の正規表現（_SPEED_REFERENCE）の何倍までなら受け付けるか。
-# 基準はこの PC で測るので、PC の速さに左右されない（この PC の基準は約 2ms なので、目安は1本あたり約 10ms）
-_SPEED_RATIO = 4.0
+# 基準は同じ時にこの PC で測るので、PC の速さ・混み具合に左右されない。文字数の2乗で遅くなる普通の形（\w+\d+ など）は
+# 1本あたり基準の数倍に収まり、区切って当てるので検査を止めない。それより桁違いに遅い形（\w+\w?\d+x は数百倍）だけを断る
+_SPEED_RATIO = 10.0
 _SPEED_FLOOR = 0.002  # これ（秒）より速ければ比べない（測り方の揺れで断らない）
 _SPEED_REFERENCE = r"\w+@"  # 「名前@」のように、普通に書かれる程度の手間の正規表現
 _SPEED_DEFAULT_CHARS = ("a", "1", "あ", " ", "-", "A", "漢")
@@ -550,11 +551,30 @@ def _time_once(compiled: re.Pattern, text: str) -> float:
 
 
 @lru_cache(maxsize=1)
-def _reference_time() -> float:
-    """基準の正規表現を WINDOW 文字の試し文字列に当てる時間（この PC で測る。5回のうち最も速い値）。"""
-    ref = re.compile(_SPEED_REFERENCE, RULE_FLAGS)
-    text = "a" * WINDOW + "\x00"
-    return min(_time_once(ref, text) for _ in range(5))
+def _reference_pattern() -> re.Pattern:
+    return re.compile(_SPEED_REFERENCE, RULE_FLAGS)
+
+
+def _reference_time_now(length: int) -> float:
+    """同じ長さの試し文字列に基準の正規表現を当てる時間（今測る。3回のうち最も速い値。数ミリ秒で終わる）。"""
+    ref = _reference_pattern()
+    ref_text = "a" * max(1, length - 1) + "\x00"
+    return max(_SPEED_FLOOR / _SPEED_RATIO, min(_time_once(ref, ref_text) for _ in range(3)))
+
+
+def _slower_than_reference(compiled: re.Pattern, text: str) -> bool:
+    """規則が基準の正規表現の _SPEED_RATIO 倍より遅いか。
+
+    基準と規則を同じ時に交互に3回ずつ測り、それぞれ最も速い値で比べる。基準を一度だけ測って使い回すと、
+    PC が混んでいた時の基準で遅い規則を通したり、空いていた時の基準で普通の規則を断ったりするため。
+    """
+    ref = _reference_pattern()
+    ref_text = "a" * max(1, len(text) - 1) + "\x00"  # 同じ長さで比べる
+    ref_best = cand_best = float("inf")
+    for _ in range(3):
+        ref_best = min(ref_best, _time_once(ref, ref_text))
+        cand_best = min(cand_best, _time_once(compiled, text))
+    return cand_best > max(_SPEED_FLOOR, _SPEED_RATIO * ref_best)
 
 
 def _check_speed(compiled: re.Pattern, tree) -> str | None:
@@ -569,15 +589,20 @@ def _check_speed(compiled: re.Pattern, tree) -> str | None:
     _sample_chars(tree, chars)
     pool = list(dict.fromkeys([c for c in chars if c.isprintable()] + list(_SPEED_DEFAULT_CHARS)))[:12]
     mixed = "".join(pool[:4])
-    limit = max(_SPEED_FLOOR, _SPEED_RATIO * _reference_time())
     for n in _SPEED_LENGTHS:
         probes = [c * n + "\x00" for c in pool]
         probes.append((mixed * (n // max(1, len(mixed)) + 1))[:n] + "\x00")
         for text in probes:
             took = _time_once(compiled, text)
+            # 1本で _SPEED_ABORT を超えたら、長い文字列へ進まずにここで決める（急に遅くなる形で固まらないため）。
+            # PC が混んでいると普通の規則でも超えうるので、同じ長さの基準と交互に測り直して、桁違いのときだけ断る
             if took > _SPEED_ABORT:
-                return _MSG_SLOW
-            if n == WINDOW and took > limit and min(_time_once(compiled, text) for _ in range(2)) > limit:
+                # 明らかに遅い（_SPEED_ABORT の10倍超）ものは測り直さずに断る（遅い規則ほど測り直しも遅く、待たせるため）。
+                # 境目のものは、PC の混み具合の揺れかもしれないので、同じ長さの基準と交互に測り直して決める
+                if took > 10 * _SPEED_ABORT:
+                    return _MSG_SLOW if took > _SPEED_RATIO * _reference_time_now(len(text)) else None
+                return _MSG_SLOW if _slower_than_reference(compiled, text) else None
+            if n == WINDOW and took > _SPEED_FLOOR and _slower_than_reference(compiled, text):
                 return _MSG_SLOW
     return None
 

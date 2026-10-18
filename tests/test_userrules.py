@@ -204,9 +204,9 @@ def test_slow_or_risky_patterns_are_refused(pattern, what):
 
 
 def test_slow_pattern_found_by_timing_is_refused_quickly():
-    """形では見分けられないが当てるのが遅い規則（1文字のグループの繰り返し）は、時間を測って断る。"""
+    """形では見分けられないが当てるのが桁違いに遅い規則は、時間を測って断る。"""
     started = time.perf_counter()
-    msg = check_pattern("([0-9a-f])+x")
+    msg = check_pattern("\\w+\\w?\\d+x")
     assert msg and "時間がかかりすぎる" in msg, msg
     assert time.perf_counter() - started < 2
 
@@ -224,6 +224,7 @@ def test_slow_pattern_found_by_timing_is_refused_quickly():
         ".*X",
         "^C\\d{3}",
         "\\w+\\d+",  # 最後の2つの繰り返しは、後ろで失敗しないので続いていてもよい
+        "([0-9a-f])+x",  # 文字数の2乗で遅くなるが、区切って当てるので桁違いには遅くならない
         "株式会社（本社）",
     ],
 )

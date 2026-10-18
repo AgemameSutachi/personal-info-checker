@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_checker import cli, engine, runner, userrules  # noqa: E402
-from pii_checker.detectors import CRITICAL_TYPES, PERSON_CUE_TYPES, PII_TYPES, mask_value  # noqa: E402
+from pii_checker.detectors import CRITICAL_TYPES, PERSON_CUE_TYPES, PII_TYPES, mask_value, normalize  # noqa: E402
 from pii_checker.engine import Collector  # noqa: E402
 from pii_checker.models import ItemResult, ScanOptions, Status  # noqa: E402
 from pii_checker.report import write_xlsx  # noqa: E402
@@ -184,21 +184,88 @@ def test_rule_format_errors_name_the_line(text, where, what):
         ("(a)\\1", "後方参照"),
         ("\\d*", "長さ0"),
         ("a" * 201, "長すぎ"),
-        (".*.*.*=", "時間がかかりすぎる"),
-        ("(?:a|a)+b", "時間がかかりすぎる"),
-        ("\\s*\\s*\\s*x", "時間がかかりすぎる"),
+        (".*.*.*=", "続けた書き方"),
+        ("\\s*\\s*\\s*x", "続けた書き方"),
+        # 回数の上限が大きい繰り返しは、上限の無い繰り返しと同じに扱う
+        ("[a-z]{1,200}[a-z]{1,200}!", "続けた書き方"),
+        ("x{0,1000}x{0,1000}z", "続けた書き方"),
+        # 繰り返しの中の選択肢が同じ文字で始まりうる・長さが違う
+        ("(?:a|a)+b", "選択肢"),
+        ("(a|aa)+b", "選択肢"),
+        ("(?:a|b|ab)*c", "選択肢"),
+        ("(\\w|\\d)+x", "選択肢"),
     ],
 )
 def test_slow_or_risky_patterns_are_refused(pattern, what):
     started = time.perf_counter()
     msg = check_pattern(pattern)
     assert msg and (what in msg or (what == "入れ子" and "繰り返しの中に" in msg)), msg
-    assert time.perf_counter() - started < 10  # 断るまでに固まらない
+    assert time.perf_counter() - started < 2  # 断るまでに待たせない（画面の受け付けで待つ時間）
 
 
-@pytest.mark.parametrize("pattern", ["EMP-\\d{6}", "機密", "(?:EMP|STF)-\\d{4}", "(\\d{3}-)+\\d", "\\w+@\\w+", ".*X"])
+def test_slow_pattern_found_by_timing_is_refused_quickly():
+    """形では見分けられないが当てるのが遅い規則（1文字のグループの繰り返し）は、時間を測って断る。"""
+    started = time.perf_counter()
+    msg = check_pattern("([0-9a-f])+x")
+    assert msg and "時間がかかりすぎる" in msg, msg
+    assert time.perf_counter() - started < 2
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "EMP-\\d{6}",
+        "C\\d{8}",
+        "機密",
+        "(?:EMP|STF)-\\d{6}",
+        "(?:EMP|STF)-\\d{4}",
+        "(\\d{3}-)+\\d",
+        "\\w+@\\w+",
+        ".*X",
+        "^C\\d{3}",
+        "\\w+\\d+",  # 最後の2つの繰り返しは、後ろで失敗しないので続いていてもよい
+        "株式会社（本社）",
+    ],
+)
 def test_ordinary_patterns_are_accepted(pattern):
+    started = time.perf_counter()
     assert check_pattern(pattern) is None
+    assert time.perf_counter() - started < 0.5  # 普通の規則は受け付けで待たせない
+
+
+def test_rules_use_multiline():
+    """「^」「$」は行の頭・終わりに当たる（速さを確かめる段も同じ指定で当てる）。"""
+    m = userrules.Matcher([], parse_rules("顧客 | ^C\\d{3}"))
+    assert [h.value for h in m.find("x\nC123\nC456")] == ["C123", "C456"]
+    end = userrules.Matcher([], parse_rules("末尾 | \\d{3}$"))
+    assert [h.value for h in end.find("a123\nb456\nc7890x")] == ["123", "456"]
+
+
+def test_fullwidth_letters_fold_but_fullwidth_symbols_stay_literal():
+    """全角の英数字だけ半角に寄せ、全角の記号（＊・（）など）は正規表現の記号にしない。"""
+    assert parse_rules("x | ＥＭＰ\\ｄ{3}")[0].pattern == "EMP\\d{3}"
+    paren = userrules.Matcher([], parse_rules("本社 | 株式会社（本社）"))
+    assert [h.value for h in paren.find(normalize("株式会社（本社）"))] == ["株式会社(本社)"]
+    assert paren.find("株式会社本社") == []  # 「（）」をグループにしない
+    star = userrules.Matcher([], parse_rules("注意 | 注意＊"))
+    assert [h.value for h in star.find(normalize("注意＊"))] == ["注意*"]
+    assert star.find("注意注意") == []  # 「＊」を繰り返しの記号にしない
+    # 半角の記号は正規表現の記号のまま
+    assert [h.value for h in userrules.Matcher([], parse_rules("x | A(?:B|C)")).find("AC")] == ["AC"]
+
+
+@pytest.mark.parametrize(
+    "line, pattern",
+    [
+        ("名前 | []|] | 高", "[]|]"),
+        ("名前 | [^]|]+ | 高", "[^]|]+"),
+        ("名前 | [a|b] | 高", "[a|b]"),
+        ("名前 | (?:A|B)\\|C | 高", "(?:A|B)\\|C"),
+    ],
+)
+def test_split_fields_keeps_bar_inside_class(line, pattern):
+    rules = parse_rules(line)
+    assert (rules[0].pattern, rules[0].confidence) == (pattern, "high")
 
 
 def test_custom_type_is_not_critical_and_risk_follows_confidence():
@@ -222,9 +289,13 @@ def test_verdict_reports_allowed_count():
         "files_with_findings": 0,
     }
     v = decide({**base, "allowed": 3, "allow_list": 2}, "done")
-    assert v.level == "clean" and any("許可リストで外した検出 3 件" in d for d in v.detail)
+    assert v.level == "clean" and any("拾わない値（許可リスト）で外した検出 3 件" in d for d in v.detail)
+    # 外したために検出が無くなったときは、判定の文にその前提を添える
+    assert v.detail[0].startswith("拾わない値（許可リスト）の値を除いて、検出は無かった")
+    assert "拾わない値（許可リスト）の値を除いて、「個人情報は無い」" in v.next_step
     v0 = decide({**base, "allowed": 0, "allow_list": 2}, "done")
-    assert any("許可リストで外した検出 0 件" in d for d in v0.detail)
+    assert any("拾わない値（許可リスト）で外した検出 0 件" in d for d in v0.detail)
+    assert "値を除いて" not in v0.next_step  # 何も外していなければ添えない
     assert not any("許可リスト" in d for d in decide(base, "done").detail)  # 使っていなければ出さない
 
 
@@ -272,7 +343,7 @@ def test_job_counts_allowed_and_reuse_follows_settings(folder, tmp_path):
     assert s["allowed"] == 1 and s["allow_list"] == 1 and s["custom_rules"] == 1
     assert s["types"] == {"custom": 1}
     v = decide(s, "done")
-    assert v.level == "found" and any("許可リストで外した検出 1 件" in d for d in v.detail)
+    assert v.level == "found" and any("拾わない値（許可リスト）で外した検出 1 件" in d for d in v.detail)
 
     # 同じ許可リスト（書き方だけ違う）・同じ規則なら使い回し、外した件数も写す
     j2 = _run(store, folder, tmp_path, allow_values=["０９０ １２３４ ５６７８"], custom_rules=rules)
@@ -292,9 +363,9 @@ def test_job_counts_allowed_and_reuse_follows_settings(folder, tmp_path):
     cells = [str(c) for row in wb["判定"].iter_rows(values_only=True) for c in row if c is not None]
     wb.close()
     joined = "\n".join(cells)
-    assert "許可リストで外した検出 1 件" in joined
-    assert "設定: 許可リスト" in cells and "1 件" in cells
-    assert "設定: 利用者の規則" in cells and "1 件（社員番号）" in cells
+    assert "拾わない値（許可リスト）で外した検出 1 件" in joined
+    assert "設定: 拾わない値（許可リスト）" in cells and "1 件" in cells
+    assert "設定: 自分で足す規則" in cells and "1 件（社員番号）" in cells
     assert "090-1234-5678" not in joined and "5678" not in joined
 
 
@@ -348,7 +419,10 @@ def test_cli_allow_and_rules_files(tmp_path, folder, capsys):
     code, db = _cli_scan(tmp_path, folder, "--allow-file", str(allow), "--rules-file", str(rules))
     assert code == 0
     out = capsys.readouterr().out
-    assert "許可リスト 1 件・利用者の規則 1 件（社員番号）" in out and "許可リストで外した検出 1 件" in out
+    assert (
+        "拾わない値 1 件・自分で足す規則 1 件（社員番号） を使います" in out
+        and "拾わない値（許可リスト）で外した検出 1 件" in out
+    )
     store = Store(str(db))
     job = store.jobs()[0]["id"]
     opts = store.job(job)["options"]
@@ -448,14 +522,20 @@ def test_web_api_takes_settings_and_remembers_them(web):
         time.sleep(0.5)
     assert j["state"] == "done"
     assert j["summary"]["allowed"] == 1 and j["summary"]["types"] == {"custom": 1}
-    assert any("許可リストで外した検出 1 件" in x for x in j["verdict"]["detail"])
+    assert any("拾わない値（許可リスト）で外した検出 1 件" in x for x in j["verdict"]["detail"])
     # 前回の値（入れたままの文字列）を返す
     assert _call(base, "/api/settings")[1] == {"allow_list": allow_text, "custom_rules": RULES_TEXT}
-    # 明細は種類「利用者の規則」・規則の名前つきで、生の値は出ない
+    # 画面の明細の種類は「利用者の規則（社員番号）」のように規則の名前つきで、生の値は出ない
     st, f = _call(base, f"/api/jobs/{job_id}/findings")
-    assert f["rows"][0]["type"] == "利用者の規則" and f["rows"][0]["rule"] == "利用者の規則「社員番号」"
+    assert f["rows"][0]["type"] == "利用者の規則（社員番号）" and f["rows"][0]["rule"] == "利用者の規則「社員番号」"
+    # Excel・CSV の種類の列は今のまま（規則の名前は検出規則の列）
+    from pii_checker.report import write_csv
+
+    csv_path = write_csv(Store(str(tmp_path / "web.sqlite3")), job_id, str(tmp_path / "csv"))[0]
+    csv_text = Path(csv_path).read_text(encoding="utf-8-sig")
+    assert ",利用者の規則," in csv_text and "利用者の規則「社員番号」" in csv_text
     assert "123456" not in json.dumps(f, ensure_ascii=False)
     # レポートのページの見出しにも件数を出し、許可リストの値は出さない
     st, rep = _call(base, f"/api/jobs/{job_id}/report")
     flat = json.dumps(rep, ensure_ascii=False)
-    assert "設定: 許可リスト" in flat and "1 件（社員番号）" in flat and "090-1234-5678" not in flat
+    assert "設定: 拾わない値（許可リスト）" in flat and "1 件（社員番号）" in flat and "090-1234-5678" not in flat

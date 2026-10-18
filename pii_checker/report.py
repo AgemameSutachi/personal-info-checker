@@ -65,8 +65,11 @@ def _display_width(text: str) -> int:
     return sum(2 if ord(c) > 0x2E7F else 1 for c in str(text))
 
 
-def _sheet(wb, name: str, widths: list[int]):
-    """表のシート: 列幅・見出し行の固定を先に決める（書き込み専用モードでは行を足す前に設定する）。"""
+def _sheet(wb, name: str, widths: list[int], header_row: int = 1):
+    """表のシート: 列幅・見出し行の固定を先に決める（書き込み専用モードでは行を足す前に設定する）。
+
+    header_row は見出しの行（表の上に要約などを置くときは 2 以上。その行までは _row でなく ws.append で書く）。
+    """
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet(name)
@@ -74,17 +77,20 @@ def _sheet(wb, name: str, widths: list[int]):
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
         ws._piichk_widths[i] = w
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = f"A{header_row + 1}"
     ws._piichk_rows = 0
     ws._piichk_cols = len(widths)
+    ws._piichk_header_row = header_row
     return ws
 
 
 def _finish(ws) -> None:
-    """表のシートにフィルターを付ける。"""
+    """表のシートにフィルターを付ける（見出しの行から表の最後の行まで。表の上の要約は入れない）。"""
     from openpyxl.utils import get_column_letter
 
-    ws.auto_filter.ref = f"A1:{get_column_letter(ws._piichk_cols)}{max(1, ws._piichk_rows)}"
+    head = ws._piichk_header_row
+    last = head + max(0, ws._piichk_rows - 1)
+    ws.auto_filter.ref = f"A{head}:{get_column_letter(ws._piichk_cols)}{last}"
 
 
 def _safe(v):
@@ -166,6 +172,14 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
     flags = summary.get("flags") or {}
     for f in reportflags.FLAG_ORDER:
         rows.append((f"報告の目安: {reportflags.FLAG_LABELS[f]}", f"{flags.get(f, 0):,} ファイル"))
+    totals = summary.get("distinct_totals") or {}
+    rows += [
+        (
+            "報告の目安: 異なるマイナンバーの数の合計（ファイルごとの数の合計・上限の目安）",
+            totals.get("my_number", 0),
+        ),
+        ("報告の目安: 異なる個人の値の数の合計（ファイルごとの数の合計・上限の目安）", totals.get("people", 0)),
+    ]
     access = summary.get("access") or {}
     rows.append(("広く読めるフォルダにある、個人情報の可能性があるファイル", access.get(folderacl.BROAD, 0)))
     if access.get(folderacl.UNKNOWN) or access.get(folderacl.FTP):
@@ -184,13 +198,13 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
         ("設定: イメージの未使用領域", "走査する" if opts.get("deep_image_sweep") else "走査しない"),
         ("設定: 前回の結果の使い回し", "する" if opts.get("reuse", True) else "しない（全部読み直す）"),
     ]
-    # 許可リストの値そのものは出さない（自社の電話番号などを、レポートの渡し先へ広めないため）。件数だけ
+    # 拾わない値そのものは出さない（自社の電話番号などを、レポートの渡し先へ広めないため）。件数だけ
     n_allow = len(opts.get("allow_values") or [])
     names = rule_names(opts.get("custom_rules"))
-    rows.append(("設定: 許可リスト", f"{n_allow:,} 件" if n_allow else "なし"))
+    rows.append(("設定: 拾わない値（許可リスト）", f"{n_allow:,} 件" if n_allow else "なし"))
     if n_allow or summary.get("allowed"):
-        rows.append(("許可リストで外した検出", summary.get("allowed", 0)))
-    rows.append(("設定: 利用者の規則", f"{len(names)} 件（{'、'.join(names)}）" if names else "なし"))
+        rows.append(("拾わない値（許可リスト）で外した検出", summary.get("allowed", 0)))
+    rows.append(("設定: 自分で足す規則", f"{len(names)} 件（{'、'.join(names)}）" if names else "なし"))
     rows += [
         ("ツール", f"個人情報チェッカー {__version__}"),
         ("出力日時", _ts(time.time())),
@@ -210,16 +224,29 @@ def reading_notes(job: dict) -> list[str]:
         "「報告の目安」は" + reportflags.NOTE + "。根拠: " + "／".join(reportflags.SOURCES) + "。",
         "「異なる値」は、同じ値（全角半角・空白・ハイフンの違い、氏名の敬称は無視）を1つと数えた数（確度 中以上）。"
         "値そのものは残していない。" + reportflags.PEOPLE_NOTE + "。",
+        reportflags.PER_FILE_NOTE + "。ジョブ全体の「異なる値の数の合計」は" + reportflags.TOTAL_NOTE + "。",
         "「誰が読めるか」は、検出のあったファイルの親フォルダのアクセス権で、Everyone・Authenticated Users・"
-        "BUILTIN\\Users・Domain Users などに読み取りが許されていれば「広く読める」とした（目安。共有のアクセス許可・"
-        "ファイル個別の設定・グループの入れ子までは見ていない）。危険度は変えていない。",
+        "BUILTIN\\Users・Domain Users などに読み取りが許されていれば「広く読める」、その許可が見当たらなければ"
+        f"「{folderacl.LABELS[folderacl.LIMITED]}」とした（限られた人だけとは言い切れない。"
+        f"{folderacl.NOT_CHECKED_NOTE}）。危険度は変えていない。",
     ]
+
+
+# ファイル別の表の、報告の目安・異なる値・誰が読めるかの列（よく見る列を左に、補足の列は右の端に置く）
+FILE_MARK_HEADS = [
+    "報告の目安（目安・法的な判断ではない）",
+    "人数の目安",
+    "異なるマイナンバー",
+    "異なる値（確度 中以上）",
+    "誰が読めるか",
+]
+FILE_TAIL_HEADS = ["人数の目安の種類", "フォルダの所有者", "読める人・読めなかった理由"]
 
 
 def file_mark_cells(r) -> list:
     """ファイル別の表の「報告の目安・異なる値・誰が読めるか」の列（files の行から）。検出が無いファイルは空。"""
     if not r["n_findings"]:
-        return ["", "", "", "", "", "", "", ""]
+        return [""] * len(FILE_MARK_HEADS)
     distinct_json = r["distinct_counts"]
     mine = ""
     if distinct_json is not None:
@@ -228,12 +255,20 @@ def file_mark_cells(r) -> list:
     return [
         "・".join(reportflags.labels(r["flags"])),
         r["people_n"] if r["people_n"] is not None and r["people_type"] else "",
-        reportflags.type_label(r["people_type"]) if r["people_type"] else "",
         mine,
         reportflags.distinct_text(distinct_json),
         folderacl.LABELS.get(access, "") if access else "",
-        r["access_who"] or "",
+    ]
+
+
+def file_tail_cells(r) -> list:
+    """ファイル別の表の右の端の補足の列（人数の目安の種類・フォルダの所有者・読める人・読めなかった理由）。"""
+    if not r["n_findings"]:
+        return [""] * len(FILE_TAIL_HEADS)
+    return [
+        reportflags.type_label(r["people_type"]) if r["people_type"] else "",
         r["access_owner"] or "",
+        r["access_who"] or "",
     ]
 
 
@@ -295,22 +330,14 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
 
     # 3. ファイル別
     type_keys = list(PII_TYPES)
-    ws = _sheet(wb, "ファイル別", [80, 12, 8, 10, 40, 12, 14, 12, 40, 22, 30, 24] + [9] * len(type_keys) + [11, 19, 10])
+    ws = _sheet(wb, "ファイル別", [80, 12, 8, 10, 40, 12, 12, 40, 22] + [9] * len(type_keys) + [11, 19, 10, 14, 24, 30])
     _row(
         ws,
         ["パス", "最終状態", "危険度", "検出件数"]
-        + [
-            "報告の目安（目安・法的な判断ではない）",
-            "人数の目安",
-            "人数の目安の種類",
-            "異なるマイナンバー",
-            "異なる値（確度 中以上）",
-            "誰が読めるか",
-            "読める人・読めなかった理由",
-            "フォルダの所有者",
-        ]
+        + FILE_MARK_HEADS
         + [PII_TYPES[k] for k in type_keys]
-        + ["大きさ(KB)", "更新日時", "検査時間(秒)"],
+        + ["大きさ(KB)", "更新日時", "検査時間(秒)"]
+        + FILE_TAIL_HEADS,
         bold=True,
     )
     counts_by_top: dict[str, dict[str, int]] = {}
@@ -326,27 +353,40 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
             [r["top_path"], STATUS_JA.get(r["worst_status"] or "pending", "未検査"), r["risk"] or "", r["n_findings"]]
             + file_mark_cells(r)
             + [c.get(k, "") for k in type_keys]
-            + [_size(r["size"]), _ts(r["mtime"]), round(r["elapsed"] or 0, 2)],
+            + [_size(r["size"]), _ts(r["mtime"]), round(r["elapsed"] or 0, 2)]
+            + file_tail_cells(r),
             fill=fill,
         )
     _finish(ws)
 
-    # 4. 前回との違い（同じ検査先を最後まで終えた前回の検査と比べる）
-    ws = _sheet(wb, "前回との違い", [16, 80, 12, 12, 10, 10, 50])
+    # 4. 前回との違い（同じ検査先を最後まで終えた前回の検査と比べる）。要約は表の上に置き、絞り込みの範囲に入れない
+    ws = _sheet(wb, "前回との違い", [22, 80, 12, 12, 10, 10, 50], header_row=3)
+    head_note = jobdiff.summary_text(diff)
+    if job["state"] != "done":
+        head_note += "（この検査は最後まで終わっていないため、違いは途中までの結果によるもの）"
+    label = WriteOnlyCell(ws, value="要約")
+    label.font = Font(bold=True)
+    note = WriteOnlyCell(ws, value=_safe(head_note))
+    note.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.append([label, note])
+    ws.append([])
     _row(
         ws,
         ["違い", "パス", "今回の検出件数", "前回の検出件数", "今回の危険度", "前回の危険度", "理由・補足"],
         bold=True,
     )
-    head_note = jobdiff.summary_text(diff)
-    if job["state"] != "done":
-        head_note += "（この検査は最後まで終わっていないため、違いは途中までの結果によるもの）"
-    _row(ws, ["要約", head_note, "", "", "", "", ""], fill="EDEDED")
     for d in diff["rows"]:
+        kind = "gone_unchecked" if d.get("gone_reason") == jobdiff.GONE_UNCHECKED else d["kind"]
         _row(
             ws,
             [d["kind_label"], d["top_path"], d["n_now"], d["n_prev"], d["risk_now"], d["risk_prev"], d["note"]],
-            fill={"new": "F8CBAD", "increased": "FCE4D6", "gone": "C6EFCE", "decreased": "E2EFDA"}.get(d["kind"]),
+            fill={
+                "new": "F8CBAD",
+                "increased": "FCE4D6",
+                "gone": "C6EFCE",
+                "gone_unchecked": "FFE699",  # 調べられなかったので直ったとは言えない（要対応と同じ色）
+                "decreased": "E2EFDA",
+            }.get(kind),
         )
     _finish(ws)
 

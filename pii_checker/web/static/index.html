@@ -107,7 +107,7 @@
             <textarea id="opt-allow" rows="4" spellcheck="false" aria-describedby="opt-allow-help" placeholder="例:&#10;03-1234-5678&#10;東京都千代田区丸の内1-1-1&#10;山田太郎"></textarea>
           </label>
           <p id="opt-allow-help" class="help">自社の代表番号・所在地・書類の見本の名前など、毎回「要確認」に並ぶ値を入れると、検出として数えなくなります。
-            見つけた値がまるごと同じときだけ外します（一部だけ同じものは外しません）。全角と半角・空白・ハイフンの違いは無視します。
+            見つけた値がまるごと同じときだけ外します（一部だけ同じものは外しません）。全角と半角・空白・ハイフン・括弧の違いは無視し、氏名は「様」などの敬称を外して比べます。
             外した件数は判定とレポートに出ます。値そのものはレポートに載せません。</p>
           <label class="field" for="opt-rules"><span>自分で足す規則 <small>（1行に1つ「名前 | 探す語か正規表現 | 確度」。確度は 高・中・低で、省けば 中）</small></span>
             <textarea id="opt-rules" rows="4" spellcheck="false" aria-describedby="opt-rules-help" placeholder="例:&#10;社員番号 | EMP-\d{6} | 中&#10;顧客番号 | C\d{8}&#10;機密"></textarea>
@@ -212,7 +212,8 @@
       </div>
       <p id="diff-note" class="muted small hidden"></p>
       <p id="sample-note" class="muted small hidden"></p>
-      <div class="table-wrap"><table id="table"><thead></thead><tbody></tbody></table></div>
+      <p id="scroll-hint" class="muted small scroll-hint hidden" aria-hidden="true">→ 横にスクロールできます</p>
+      <div class="table-wrap" id="table-wrap-main"><table id="table"><thead></thead><tbody></tbody></table></div>
       <div class="pager">
         <button id="prev">前へ</button><span id="page-info" class="muted small"></span><button id="next">次へ</button>
       </div>

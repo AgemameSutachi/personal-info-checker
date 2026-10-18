@@ -142,3 +142,55 @@ def test_old_db_gets_flags_without_counts(tmp_path):
     assert rows["C:\\x\\a.csv"]["people_n"] is None and rows["C:\\x\\a.csv"]["distinct_counts"] is None
     assert rows["C:\\x\\b.csv"]["flags"] == ""
     assert store.summary("j1")["flags"]["financial"] == 1
+
+
+def _save(store, job, top, mine: int, people: int):
+    store.add_files(job, [(top, 1, 1.0)])
+    item = ItemResult(path=top, kind="CSV", status=Status.SCANNED)
+    item.finding_counts = {"my_number": mine, "email": people}
+    item.conf_counts = {"my_number:high": mine, "email:medium": people}
+    item.distinct_counts = {"my_number:high": mine, "email:medium": people}
+    store.save_result(job, FileResult(top_path=top, items=[item], distinct_counts=dict(item.distinct_counts)))
+
+
+def test_job_totals_are_shown_in_verdict_excel_and_marked_over_limits(tmp_path):
+    """ファイルごとでは 100・1,000 を超えなくても、合計が超えたら判定に目安として出す（ファイルごとの印は付かない）。"""
+    from openpyxl import load_workbook
+
+    from pii_checker.report import write_xlsx
+    from pii_checker.verdict import decide
+
+    store = Store(str(tmp_path / "db.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions())
+    for i in range(3):
+        _save(store, job, str(tmp_path / f"{i}.csv"), mine=40, people=400)
+    store.set_job(job, state="done")
+    s = store.summary(job)
+    assert s["distinct_totals"] == {"my_number": 120, "people": 1200, "uncounted_files": 0}
+    assert s["flags"]["many_my_number"] == 0 and s["flags"]["many_people"] == 0  # ファイルごとの印は付かない
+    detail = decide(s, "done").detail
+    joined = "\n".join(detail)
+    assert (
+        "異なるマイナンバーの数の合計 120（ファイルごとの数の合計。同じ人が複数のファイルにいれば重ねて数えるので上限の目安）"
+        in joined
+    )
+    assert "100 を超える" in joined
+    assert "異なる個人の値の数の合計 1,200（同）" in joined and "1,000 を超える" in joined
+    assert reportflags.PER_FILE_NOTE in detail
+    # Excel の判定シートにも同じ行と、概要の合計の行が出る
+    out = tmp_path / "r.xlsx"
+    write_xlsx(store, job, str(out))
+    cells = [c for row in load_workbook(out, read_only=True)["判定"].iter_rows(values_only=True) for c in row if c]
+    assert any("異なるマイナンバーの数の合計 120" in str(c) for c in cells)
+    assert 1200 in cells
+
+    # 合計が上限以下なら「超える」とは出さない
+    store2 = Store(str(tmp_path / "db2.sqlite3"))
+    job2 = store2.create_job([str(tmp_path)], ScanOptions())
+    _save(store2, job2, str(tmp_path / "a.csv"), mine=10, people=20)
+    lines = reportflags.total_lines(store2.summary(job2))
+    assert lines[0].startswith("異なるマイナンバーの数の合計 10（") and not any("超える" in x for x in lines)
+
+
+def test_financial_short_label_does_not_read_as_happened():
+    assert reportflags.FLAG_SHORT["financial"] == "被害のおそれ（カード・口座）"

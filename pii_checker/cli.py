@@ -154,9 +154,9 @@ def _user_rules(args) -> tuple[list[str], list[dict]]:
     rules: list[dict] = []
     try:
         if args.allow_file:
-            allow = parse_allow_list(_read_user_text(args.allow_file, "許可リスト"))
+            allow = parse_allow_list(_read_user_text(args.allow_file, "拾わない値（許可リスト）"))
         if args.rules_file:
-            rules = [r.to_dict() for r in parse_rules(_read_user_text(args.rules_file, "規則"))]
+            rules = [r.to_dict() for r in parse_rules(_read_user_text(args.rules_file, "自分で足す規則"))]
     except RuleError as e:
         raise UserTextError(str(e)) from None
     return allow, rules
@@ -169,7 +169,7 @@ def cmd_scan(args) -> int:
     if args.resume and (args.allow_file or args.rules_file):
         print(
             "--resume と --allow-file・--rules-file は一緒に使えません"
-            "（再開は、始めたときの許可リスト・規則をそのまま使います。変えるときは新しく検査してください）",
+            "（再開は、始めたときの拾わない値・自分で足す規則をそのまま使います。変えるときは新しく検査してください）",
             file=sys.stderr,
         )
         return 2
@@ -331,7 +331,7 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
 
         names = rule_names(job_opts.get("custom_rules"))
         print(
-            f"許可リスト {len(job_opts.get('allow_values') or [])} 件・利用者の規則 {len(names)} 件"
+            f"拾わない値 {len(job_opts.get('allow_values') or [])} 件・自分で足す規則 {len(names)} 件"
             + (f"（{'、'.join(names)}）" if names else "")
             + " を使います"
         )
@@ -387,6 +387,9 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
         print("  " + line)
     if v.next_step:
         print(f"\n次にすること: {v.next_step}")
+    from .jobdiff import cli_line, compute
+
+    print(f"\n{cli_line(compute(store, job_id))}")
     if store.files_with_status(job_id, ["needs_password"]):
         print(f"  パスワードが分かれば: pii-checker scan --resume {job_id} --password-file パスワード一覧.txt")
     if store.pending_files(job_id) or store.job(job_id)["state"] in (
@@ -551,7 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--rules-file",
         metavar="ファイル",
-        help="自分で足す規則の一覧（UTF-8・1行に1つ「名前 | 正規表現 | 確度」。例: 社員番号 | EMP-\\d{6} | 中）",
+        help="自分で足す規則の一覧（UTF-8・1行に1つ「名前 | 探す語か正規表現 | 確度」。例: 社員番号 | EMP-\\d{6} | 中）",
     )
     c = s.add_argument_group(
         "接続方式で指定する（フォルダの代わりに。パスワードは聞いて使うだけで保存しない）",

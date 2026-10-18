@@ -1,14 +1,18 @@
-"""許可リスト（拾わない値）と利用者の規則（自前の語・正規表現）。
+"""拾わない値（許可リスト）と自分で足す規則（利用者の規則。自前の語・正規表現）。
 
-- 許可リスト: 1行に1つの値。検出した値（伏せる前）を正規化し、許可リストの値（同じく正規化）と完全に一致したら、
+- 拾わない値: 1行に1つの値。検出した値（伏せる前）を正規化し、拾わない値（同じく正規化）と完全に一致したら、
   その検出は数えない（部分一致はしない）。外した件数は項目ごとに数えて残す（黙って消さない）。
-- 利用者の規則: 1行に1つ「名前 | 正規表現 | 確度」。当たった値を種類 custom（利用者の規則）として検出する。
+- 自分で足す規則: 1行に1つ「名前 | 正規表現 | 確度」。当たった値を種類 custom（利用者の規則）として検出する。
   書式・正規表現の誤りは、検査を始める前に「何行目の何が悪いか」を日本語で返して断る。
+  正規表現は複数行モード（re.MULTILINE。「^」「$」が行の頭・終わりに当たる）で当てる。
 
 極端に遅くなる正規表現への備え（規則は利用者が書くので、検査が終わらなくなる書き方を先に断る）:
 - 長さは MAX_PATTERN_LEN 文字まで。後方参照と、量指定子の入れ子（(\\d+)+ の形）は断る
 - 長さ0の文字列に当たりうる書き方（a* だけ等）は断る（どこにでも当たり、件数が意味を持たない）
-- 受け付ける前に、繰り返しの文字列へ実際に当てて時間を測り、長くなるものは断る（_check_speed）
+- 同じ文字に当たる長い繰り返しを続けた形（.*.*x・[a-z]{1,200}[a-z]{1,200}! など）と、繰り返しの中の選択肢が
+  同じ文字で始まりうる形（(?:a|b|ab)*c など）は断る。回数の上限が LONG_REPEAT を超える繰り返しは、上限の無い
+  繰り返しと同じに扱う
+- 受け付ける前に、繰り返しの文字列へ実際に当てて時間を測り、長くかかるものは断る（_check_speed）
 - 検査では、1回に当てる文字数を WINDOW 文字までに区切る（長い本文でも1回の当て方の手間に上限を置く）
 """
 
@@ -23,9 +27,11 @@ from functools import lru_cache
 from .models import Confidence
 
 try:  # Python 3.11 以降の正規表現の構文解析（形を調べるだけに使う）
+    import re._compiler as _sre_compile
     import re._constants as _sre_c
     import re._parser as _sre_p
 except ImportError:  # pragma: no cover  古い版の Python
+    import sre_compile as _sre_compile  # type: ignore
     import sre_constants as _sre_c  # type: ignore
     import sre_parse as _sre_p  # type: ignore
 
@@ -37,6 +43,8 @@ MAX_ALLOW_VALUE_LEN = 300  # 許可リストの1つの値の長さの上限
 WINDOW = 1024  # 検査で1回に当てる文字数の上限
 STEP = 768  # 区切りをずらす幅（WINDOW - STEP = 256 文字までの当たりは、区切りの境目でも欠けない）
 MAX_ERRORS_SHOWN = 5  # 断るときに並べる誤りの数
+LONG_REPEAT = 16  # 回数の上限がこれを超える繰り返し（{1,200} など）は、上限の無い繰り返し（+・*）と同じに扱う
+RULE_FLAGS = re.MULTILINE  # 規則を当てるときの指定（「^」「$」を行の頭・終わりに当てる）
 
 CUSTOM_TYPE = "custom"
 CONFIDENCE_WORDS = {
@@ -55,9 +63,16 @@ _RE_ALLOW_STRIP = re.compile(r"[\s\-‐‑‒–—―ー−()]")
 _RE_HONORIFIC_TAIL = re.compile(r"(様|殿|さん|君|くん|ちゃん)$")
 
 # 速さを確かめるときの、繰り返しの文字列の長さ（短いものから順に当て、遅くなった時点で断る）
-_SPEED_LENGTHS = (8, 12, 16, 20, 24, 32, 64, 128, 256, 512, WINDOW)
-_SPEED_BUDGET = 0.2  # 1つの長さで、すべての試し文字列に当てる合計時間の上限（秒）
+_SPEED_LENGTHS = (8, 12, 16, 20, 24, 32, 64, 256, WINDOW)
+_SPEED_ABORT = 0.05  # 試し文字列1本でこれ（秒）を超えたら、長さに関わらずすぐ断る（急に遅くなる形）
+# WINDOW 文字の試し文字列1本の時間が、基準の正規表現（_SPEED_REFERENCE）の何倍までなら受け付けるか。
+# 基準はこの PC で測るので、PC の速さに左右されない（この PC の基準は約 2ms なので、目安は1本あたり約 10ms）
+_SPEED_RATIO = 4.0
+_SPEED_FLOOR = 0.002  # これ（秒）より速ければ比べない（測り方の揺れで断らない）
+_SPEED_REFERENCE = r"\w+@"  # 「名前@」のように、普通に書かれる程度の手間の正規表現
 _SPEED_DEFAULT_CHARS = ("a", "1", "あ", " ", "-", "A", "漢")
+# 2つの繰り返しが同じ文字に当たりうるかを確かめる文字（本文は NFKC で寄せてあるので半角の記号・英数字と仮名・漢字）
+_OVERLAP_SAMPLE = "".join(chr(i) for i in range(32, 127)) + "\t\nあアー漢〒・々"
 
 
 class RuleError(ValueError):
@@ -127,6 +142,7 @@ def _split_fields(line: str) -> list[str]:
     cur: list[str] = []
     depth = 0
     in_class = False
+    class_start = -1  # 文字クラスの中身の始まり（ここに来た「]」は閉じではなく文字そのもの: []|] や [^]|]）
     i = 0
     while i < len(line):
         c = line[i]
@@ -135,10 +151,13 @@ def _split_fields(line: str) -> list[str]:
             i += 2
             continue
         if in_class:
-            if c == "]":
+            if c == "^" and i == class_start:
+                class_start += 1
+            elif c == "]" and i != class_start:
                 in_class = False
         elif c == "[":
             in_class = True
+            class_start = i + 1
         elif c == "(":
             depth += 1
         elif c == ")":
@@ -217,11 +236,44 @@ def rules_from_dicts(items: list[dict] | None) -> list[UserRule]:
 
 
 def _normalize_pattern(pattern: str) -> str:
-    """正規表現を、検査する本文と同じ形（NFKC。全角の英数字・記号は半角）に寄せる。
+    """正規表現を、検査する本文（NFKC で寄せてある）に当たる形にする。
 
-    本文は検出の前に NFKC で寄せてあるので、全角で書いた「ＥＭＰ－」も「EMP-」として当たるようにする。
+    全角の英数字だけは半角に寄せる（「ＥＭＰ\\ｄ」を「EMP\\d」として扱う）。全角の記号など、寄せると形が変わる
+    ほかの文字は、正規表現の記号にせず、その文字そのもの（本文と同じく NFKC で寄せた文字）として当てる。
+    全体を NFKC で寄せると「（本社）」が「(本社)」というグループに、「＊」が繰り返しの記号に化けるため。
     """
-    return unicodedata.normalize("NFKC", pattern)
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern) and _is_fullwidth_symbol(pattern[i + 1]):
+            # 「\（」のように全角の記号を逃がしてあっても、同じくその文字そのものとして当てる
+            out.append(re.escape(unicodedata.normalize("NFKC", pattern[i + 1])))
+            i += 2
+            continue
+        if c == "\\" and i + 1 < len(pattern):
+            out.append(c + _fold_alnum(pattern[i + 1]))
+            i += 2
+            continue
+        if _is_fullwidth_symbol(c):
+            out.append(re.escape(unicodedata.normalize("NFKC", c)))
+        else:
+            out.append(_fold_alnum(c))
+        i += 1
+    return "".join(out)
+
+
+def _fold_alnum(c: str) -> str:
+    """全角の英数字（０-９・Ａ-Ｚ・ａ-ｚ）を半角にする。ほかの文字はそのまま。"""
+    o = ord(c)
+    if 0xFF10 <= o <= 0xFF19 or 0xFF21 <= o <= 0xFF3A or 0xFF41 <= o <= 0xFF5A:
+        return chr(o - 0xFEE0)
+    return c
+
+
+def _is_fullwidth_symbol(c: str) -> bool:
+    """NFKC で形が変わる、全角の英数字以外の文字（全角の記号・半角の仮名・㈱ など）か。"""
+    return _fold_alnum(c) == c and unicodedata.normalize("NFKC", c) != c
 
 
 def check_pattern(pattern: str, check_speed: bool = True) -> str | None:
@@ -230,8 +282,8 @@ def check_pattern(pattern: str, check_speed: bool = True) -> str | None:
         return f"正規表現が長すぎます（{len(pattern)} 文字。{MAX_PATTERN_LEN} 文字まで）"
     p = _normalize_pattern(pattern)
     try:
-        tree = _sre_p.parse(p)
-        compiled = re.compile(p)
+        tree = _sre_p.parse(p, RULE_FLAGS)
+        compiled = re.compile(p, RULE_FLAGS)
     except re.error as e:
         return f"正規表現の書き方に誤りがあります（{_describe_re_error(e)}）"
     except (RecursionError, OverflowError, ValueError) as e:
@@ -302,21 +354,166 @@ def _has_variable_repeat(sub) -> bool:
     return False
 
 
-def _risky_shape(sub) -> str | None:
-    """極端に遅くなりうる形（後方参照・量指定子の入れ子）なら理由を返す。"""
-    for op, av in sub:
+def _is_long_repeat(op, av) -> bool:
+    """回数の決まっていない繰り返しで、上限が無いか LONG_REPEAT を超えるもの（+・*・{1,200} など）か。"""
+    return op in _REPEATS and av[0] != av[1] and av[1] > LONG_REPEAT
+
+
+_SINGLE_CHAR_OPS = {_sre_c.LITERAL, _sre_c.NOT_LITERAL, _sre_c.IN, _sre_c.ANY}
+
+
+def _first_items(seq, state) -> list | None:
+    """並び（部分木）の1文字目に当たりうる1文字の部品の一覧。分からなければ None。"""
+    out: list = []
+    for op, av in seq:
+        if op in _SINGLE_CHAR_OPS:
+            out.append((op, av))
+            return out
+        if op is _sre_c.AT or op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
+            continue  # 位置の指定・先読みは文字を食べない
+        if op in _REPEATS:
+            inner = _first_items(av[2], state)
+            if inner is None:
+                return None
+            out += inner
+            if av[0] > 0:
+                return out
+            continue
+        if op is _sre_c.SUBPATTERN:
+            inner = _first_items(av[3], state)
+            if inner is None:
+                return None
+            out += inner
+            if _sre_p.SubPattern(state, list(av[3])).getwidth()[0] > 0:
+                return out
+            continue
+        if op is _sre_c.BRANCH:
+            for alt in av[1]:
+                inner = _first_items(alt, state)
+                if inner is None:
+                    return None
+                out += inner
+            return out
+        return None
+    return out
+
+
+def _chars_matched(items: list, state) -> set[str] | None:
+    """1文字の部品の一覧が当たる、試しの文字の集まり。作れなければ None。"""
+    got: set[str] = set()
+    for item in items:
+        try:
+            single = _sre_compile.compile(_sre_p.SubPattern(state, [item]), RULE_FLAGS)
+        except Exception:  # noqa: BLE001  内部の部品で作れない形は「分からない」として扱う
+            return None
+        got.update(ch for ch in _OVERLAP_SAMPLE if single.fullmatch(ch))
+    return got
+
+
+def _overlap(a_items: list | None, b_items: list | None, state) -> bool:
+    """2つの1文字目の候補が、同じ文字に当たりうるか（分からなければ False）。"""
+    if a_items is None or b_items is None:
+        return False
+    a, b = _chars_matched(a_items, state), _chars_matched(b_items, state)
+    return bool(a and b and a & b)
+
+
+_MSG_NESTED = (
+    "繰り返しの中に、回数の決まっていない繰り返しを入れる書き方（例: (\\d+)+ や (a*)*）は使えません"
+    "（検査が極端に遅くなることがあるため）。「\\d+」のように1段の繰り返しに書き直してください"
+)
+_MSG_ADJACENT = (
+    "同じ文字に当たる長い繰り返しを続けた書き方（例: .*.*x・\\d*\\d*・[a-z]{1,200}[a-z]{1,200}!）は使えません"
+    "（当たらない所で当て方を何通りも試し、検査が極端に遅くなるため）。繰り返しを1つにまとめるか、"
+    f"「\\d{{6}}」のように回数を決めた形（上限 {LONG_REPEAT} 回まで）に書き直してください"
+)
+_MSG_BRANCH = (
+    "繰り返しの中の選択肢が同じ文字で始まりうる書き方（例: (?:a|b|ab)*c・(\\w|\\d)+x）は使えません"
+    "（当て方を何通りも試し、検査が遅くなるため）。「[ab]+c」「\\w+x」のように1つの文字の集まりに書き直してください"
+)
+
+
+def _risky_shape(sub, state=None, top: bool = True) -> str | None:
+    """極端に遅くなりうる形（後方参照・量指定子の入れ子・重なる長い繰り返しの連続・重なる選択肢の繰り返し）なら理由を返す。
+
+    top は正規表現の一番外の並びか。一番外の並びの最後の2つ（「\\w+\\d+」で終わる形）は、両方が当たれば
+    そこで当たりが決まり、後ろで失敗して当て直すことが無いので、続いた繰り返しでも断らない。
+    """
+    state = state if state is not None else getattr(sub, "state", None)
+    items = list(sub)
+    for idx, (op, av) in enumerate(items):
         if op in (_sre_c.GROUPREF, _sre_c.GROUPREF_EXISTS):
             return "後方参照（\\1 など）は使えません（検査が極端に遅くなることがあるため）"
         if op in _REPEATS and av[1] > 1 and _has_variable_repeat(av[2]):
-            return (
-                "繰り返しの中に、回数の決まっていない繰り返しを入れる書き方（例: (\\d+)+ や (a*)*）は使えません"
-                "（検査が極端に遅くなることがあるため）。「\\d+」のように1段の繰り返しに書き直してください"
-            )
+            return _MSG_NESTED
+        if state is not None and op in _REPEATS and av[1] > 1:
+            if _ambiguous_branch(av[2], state) or _repeat_body_overlaps(av[2], state):
+                return _MSG_BRANCH
+        at_end = top and idx + 2 == len(items)
+        if state is not None and not at_end and _is_long_repeat(op, av) and idx + 1 < len(items):
+            nop, nav = items[idx + 1]
+            if _is_long_repeat(nop, nav) and _overlap(_first_items(av[2], state), _first_items(nav[2], state), state):
+                return _MSG_ADJACENT
         for c in _children(op, av):
-            found = _risky_shape(c)
+            found = _risky_shape(c, state, top=False)
             if found:
                 return found
     return None
+
+
+def _ambiguous_branch(sub, state) -> bool:
+    """部分木の中に、繰り返すと当て方が何通りにもなる選択肢（|）があるか。
+
+    次のどれかに当たる選択肢を数える（繰り返しの中に置くと、同じ文字の並びを何通りにも分けて試すため）:
+    - 長さの違う選択肢がある（(?:a|b|ab)・(a|aa) は「aa」を a+a とも aa とも取れる）
+    - 長さ0の選択肢が2つ以上ある（(a|a) は構文解析で a(?:|) にくくられる）
+    - 1文字目に同じ文字が当たりうる選択肢の組がある
+    """
+    for op, av in sub:
+        if op is _sre_c.BRANCH:
+            alts = [list(a) for a in av[1]]
+            widths = [_sre_p.SubPattern(state, a).getwidth() for a in alts]
+            if len(set(widths)) > 1:
+                return True
+            if sum(1 for w in widths if w[0] == 0) > 1:
+                return True
+            firsts = [_first_items(a, state) for a in alts]
+            for i in range(len(firsts)):
+                for j in range(i + 1, len(firsts)):
+                    if _overlap(firsts[i], firsts[j], state):
+                        return True
+        for c in _children(op, av):
+            if _ambiguous_branch(c, state):
+                return True
+    return False
+
+
+def _repeat_body_overlaps(body, state) -> bool:
+    """繰り返す中身が、同じ文字で始まりうる選択肢を持つグループか（(?:a|b|ab)・(\\w|\\d) の形）。
+
+    1文字の部品をそのまま繰り返す形（\\w+・[ab]+）は速いので数えない。グループの中の選択肢（|）か、
+    グループの中の文字の集まりで、同じ文字に当たりうるもの同士があるときだけ真。
+    """
+    seq = list(body)
+    if len(seq) != 1 or seq[0][0] is not _sre_c.SUBPATTERN:
+        return False
+    inner = list(seq[0][1][3])
+    if len(inner) == 1 and inner[0][0] is _sre_c.BRANCH:
+        alts = [_first_items(alt, state) for alt in inner[0][1][1]]
+        for i in range(len(alts)):
+            for j in range(i + 1, len(alts)):
+                if _overlap(alts[i], alts[j], state):
+                    return True
+        return False
+    if len(inner) == 1 and inner[0][0] is _sre_c.IN:
+        # (\w|\d) は構文解析で1つの文字の集まり（IN）にまとめられる。まとめた中身同士が重なるかを見る
+        members = [m for m in inner[0][1] if m[0] is not _sre_c.NEGATE]
+        if len(members) == len(inner[0][1]):
+            for i in range(len(members)):
+                for j in range(i + 1, len(members)):
+                    if _overlap([(_sre_c.IN, [members[i]])], [(_sre_c.IN, [members[j]])], state):
+                        return True
+    return False
 
 
 def _sample_chars(sub, out: list[str]) -> None:
@@ -339,28 +536,49 @@ def _sample_chars(sub, out: list[str]) -> None:
             _sample_chars(c, out)
 
 
+_MSG_SLOW = (
+    "当てるのに時間がかかりすぎる書き方です（同じ文字が続く所で、当て方を何通りも試してしまう形）。"
+    "「.*」「\\s*」などの繰り返しを減らすか、「\\d{6}」のように回数を決めた形に書き直してください"
+)
+
+
+def _time_once(compiled: re.Pattern, text: str) -> float:
+    started = time.perf_counter()
+    for _ in compiled.finditer(text):
+        pass
+    return time.perf_counter() - started
+
+
+@lru_cache(maxsize=1)
+def _reference_time() -> float:
+    """基準の正規表現を WINDOW 文字の試し文字列に当てる時間（この PC で測る。5回のうち最も速い値）。"""
+    ref = re.compile(_SPEED_REFERENCE, RULE_FLAGS)
+    text = "a" * WINDOW + "\x00"
+    return min(_time_once(ref, text) for _ in range(5))
+
+
 def _check_speed(compiled: re.Pattern, tree) -> str | None:
     """繰り返しの文字列に実際に当てて時間を測り、長くかかるなら理由を返す。
 
-    短い文字列から順に当て、1つの長さで合計 _SPEED_BUDGET 秒を超えた時点で断る（長い文字列で固まる前に止める）。
-    最後の長さは検査で1回に当てる文字数（WINDOW）と同じにしてある。
+    短い文字列から順に当て、試し文字列1本で _SPEED_ABORT 秒を超えたらすぐ断る（急に遅くなる形で固まる前に止める）。
+    最後の長さ（検査で1回に当てる文字数 WINDOW）では、基準の正規表現の _SPEED_RATIO 倍を超えるものを断る。
+    超えたときは測り直して、最も速い値で決める（ほかの処理と重なった揺れで断らない）。
+    普通の規則は全部で数ミリ秒で終わるので、受け付けるときに待たせない。
     """
     chars: list[str] = []
     _sample_chars(tree, chars)
     pool = list(dict.fromkeys([c for c in chars if c.isprintable()] + list(_SPEED_DEFAULT_CHARS)))[:12]
     mixed = "".join(pool[:4])
+    limit = max(_SPEED_FLOOR, _SPEED_RATIO * _reference_time())
     for n in _SPEED_LENGTHS:
         probes = [c * n + "\x00" for c in pool]
         probes.append((mixed * (n // max(1, len(mixed)) + 1))[:n] + "\x00")
-        started = time.perf_counter()
         for text in probes:
-            for _ in compiled.finditer(text):
-                pass
-            if time.perf_counter() - started > _SPEED_BUDGET:
-                return (
-                    "当てるのに時間がかかりすぎる書き方です（同じ文字が続く所で、当て方を何通りも試してしまう形）。"
-                    "「.*」「\\s*」などの繰り返しを減らすか、「\\d{6}」のように回数を決めた形に書き直してください"
-                )
+            took = _time_once(compiled, text)
+            if took > _SPEED_ABORT:
+                return _MSG_SLOW
+            if n == WINDOW and took > limit and min(_time_once(compiled, text) for _ in range(2)) > limit:
+                return _MSG_SLOW
     return None
 
 
@@ -385,7 +603,7 @@ class Matcher:
 
     def __init__(self, allow_values: list[str], rules: list[UserRule]):
         self.allow = frozenset(k for k in (normalize_allow(v) for v in allow_values) if k)
-        self.rules = [_Compiled(r, re.compile(r.pattern), Confidence(r.confidence)) for r in rules]
+        self.rules = [_Compiled(r, re.compile(r.pattern, RULE_FLAGS), Confidence(r.confidence)) for r in rules]
 
     def is_allowed(self, pii_type: str, value: str) -> bool:
         """検出した値が許可リストの値と一致するか（正規化して完全一致。部分一致はしない）。"""

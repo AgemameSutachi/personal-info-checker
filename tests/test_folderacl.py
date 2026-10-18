@@ -15,6 +15,7 @@ from pii_checker.folderacl import (
     ACCESS_ALLOWED_ACE_TYPE,
     ACCESS_DENIED_ACE_TYPE,
     BROAD,
+    CONTAINER_INHERIT_ACE,
     FTP,
     INHERIT_ONLY_ACE,
     LIMITED,
@@ -22,6 +23,7 @@ from pii_checker.folderacl import (
     UNKNOWN,
     AccessCache,
     judge,
+    may_lookup_name,
 )
 from pii_checker.models import ScanOptions
 from pii_checker.store import Store
@@ -46,6 +48,61 @@ def test_judge_broad_and_limited():
     assert judge(None)[0] == BROAD
     # ドメインの普通のユーザー（-1001）は「広く誰でも」ではない
     assert judge([(ALLOW, 0, READ, "S-1-5-21-1-2-3-1001")])[0] == LIMITED
+
+
+def test_subfolder_only_inheritance_is_not_broad():
+    """サブフォルダにだけ継承される項目（CONTAINER_INHERIT だけ）は、このフォルダのファイルに届かないので数えない。"""
+    CI, OI, IO = CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE, INHERIT_ONLY_ACE
+    assert judge([(ALLOW, CI, READ, "S-1-1-0")]) == (LIMITED, [])
+    assert judge([(ALLOW, CI | IO, 0x80000000, "S-1-1-0")]) == (LIMITED, [])
+    # ファイルへ継承されるもの（OI を含む）と、継承の指定の無いフォルダ自身の項目は数える
+    assert judge([(ALLOW, CI | OI, READ, "S-1-1-0")])[0] == BROAD
+    assert judge([(ALLOW, OI | IO, READ, "S-1-1-0")])[0] == BROAD
+    assert judge([(ALLOW, 0, READ, "S-1-5-11")])[0] == BROAD
+
+
+def test_limited_label_does_not_claim_only_few_people():
+    """「広い許可なし」は言い切らない表現にし、見ていないもの（全社員グループ・Samba のグループ等）を説明に出す。"""
+    assert folderacl.LABELS[LIMITED] == "広い許可なし（目安）"
+    assert "限られた人だけ" not in folderacl.LABELS[LIMITED]
+    assert "見当たらない" in folderacl.DESCRIPTIONS[LIMITED]
+    note = folderacl.NOT_CHECKED_NOTE
+    assert "全社員" in note and "Samba" in note and "ファイル個別" in note
+
+
+def test_owner_name_is_looked_up_only_locally():
+    """所有者の名前は、よく知られた SID とこの PC のアカウントだけ引く（ドメインコントローラーへ問い合わせない）。"""
+    local = "S-1-5-21-111-222-333"
+    for sid in ("S-1-1-0", "S-1-5-18", "S-1-5-32-544", "S-1-5-11", "S-1-5-80-1-2-3-4-5", "S-1-16-12288"):
+        assert may_lookup_name(sid, local), sid
+    assert may_lookup_name(local + "-1001", local)  # この PC のアカウント
+    assert not may_lookup_name("S-1-5-21-999-888-777-1105", local)  # ドメインのアカウント
+    assert not may_lookup_name("S-1-5-21-111-222-3334-1001", local)  # 頭の数字が途中まで同じだけ
+    assert not may_lookup_name(local + "-1001-5", local)
+    assert not may_lookup_name("S-1-22-2-100", local)  # Samba の Unix のグループ
+    assert not may_lookup_name("S-1-5-21-111-222-333-1001", "")  # この PC の SID が分からなければ引かない
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows のアクセス権の試験")
+def test_account_name_returns_sid_string_without_lookup(monkeypatch):
+    """引かない SID では LookupAccountSidW を呼ばず、SID の文字列のまま返す。"""
+    import ctypes
+
+    calls = []
+    real = folderacl._adv.LookupAccountSidW
+
+    def spy(*args):
+        calls.append(args)
+        return real(*args)
+
+    psid = ctypes.c_void_p()
+    assert ctypes.windll.advapi32.ConvertStringSidToSidW("S-1-5-21-999-888-777-1105", ctypes.byref(psid))
+    try:
+        monkeypatch.setattr(folderacl._adv, "LookupAccountSidW", spy)
+        assert folderacl._account_name(psid) == "S-1-5-21-999-888-777-1105"
+        assert calls == []
+    finally:
+        ctypes.windll.kernel32.LocalFree(psid)
 
 
 def test_ftp_is_not_queried():

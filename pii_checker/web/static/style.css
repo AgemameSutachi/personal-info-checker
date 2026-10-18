@@ -168,6 +168,12 @@ th { position: sticky; top: 0; background: var(--panel); font-size: 12.5px; colo
 tbody tr:hover { background: var(--row-hover); }
 tbody tr.clickable { cursor: pointer; }
 td.path { word-break: break-all; min-width: 280px; }
+/* 一覧の表の内訳・報告の目安の列（狭く潰れて1文字ずつ折り返さないよう、最小の幅を付ける） */
+#table td.types { min-width: 140px; }
+#table td.flags { min-width: 120px; }
+#table td.note { min-width: 160px; }
+#table td.path { min-width: 220px; }  /* 1280px の窓で、札の列まで枠に収める */
+.scroll-hint { margin: 0 0 4px; text-align: right; }
 td.num { text-align: right; white-space: nowrap; }
 .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; border: 1px solid var(--line); }
 .pill.needs_password { background: var(--undetermined); }
@@ -234,6 +240,7 @@ td.nowrap, .nowrap { white-space: nowrap; }
 dialog .close { font-size: 14px; padding: 6px 12px; }
 .detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
 .detail-path { flex: 1 1 100%; word-break: break-all; }
+.detail-meta { flex: 1 1 100%; }
 #detail-body .table-wrap { max-height: none; }
 .inline-check { display: inline-flex; gap: 4px; align-items: center; margin-left: 8px; color: var(--text); }
 #detail-body .table-wrap { overflow-x: auto; }

@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
@@ -121,3 +122,23 @@ def test_results_survive_restart_and_match_excel(tmp_path, folder):
             assert str(excel_overview.get(k)) == str(v), k
     finally:
         s2.stop()
+
+
+def test_screen_type_label_names_the_custom_rule():
+    """画面の検出明細・詳細の窓の種類は「利用者の規則（社員番号）」。ほかの種類と、名前の取れない規則はそのまま。"""
+    from pii_checker.web.server import finding_type_label
+
+    assert finding_type_label("custom", "利用者の規則「社員番号」") == "利用者の規則（社員番号）"
+    assert finding_type_label("custom", "") == "利用者の規則"
+    assert finding_type_label("phone", "電話の語") == "電話番号"
+
+
+def test_screen_texts_follow_readme():
+    """画面の説明文: 拾わない値は括弧・敬称の違いも無視する。一覧から大きさ・更新日時を外し、横スクロールの案内を持つ。"""
+    static = Path(__file__).resolve().parent.parent / "pii_checker" / "web" / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    assert "ハイフン・括弧の違いは無視し、氏名は「様」などの敬称を外して比べます" in html
+    assert "→ 横にスクロールできます" in html
+    assert 'head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "誰が読めるか"];' in js
+    assert "無くなった" in js and 'x.gone_reason === "unchecked"' in js

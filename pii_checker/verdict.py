@@ -71,10 +71,11 @@ def _decide(summary: dict, job_state: str) -> Verdict:
         )
     if out_of_scope:
         detail.append(f"対象外 {out_of_scope:,} 件（動画・音声・実行ファイル・フォントなど、文字の情報を持たない形式）")
-    if summary.get("allowed") or summary.get("allow_list"):
-        # 外した分は黙って消さず、件数を判定の文に残す（0 件でも、許可リストを使ったことは示す）
+    allowed = summary.get("allowed", 0)
+    if allowed or summary.get("allow_list"):
+        # 外した分は黙って消さず、件数を判定の文に残す（0 件でも、拾わない値を使ったことは示す）
         detail.append(
-            f"許可リストで外した検出 {summary.get('allowed', 0):,} 件（許可リストの値と一致したため、件数・判定に数えていない）"
+            f"拾わない値（許可リスト）で外した検出 {allowed:,} 件（拾わない値と一致したため、件数・判定に数えていない）"
         )
 
     # 報告の目安の印・広く読めるフォルダにあるファイル（どちらも目安。判定の段階は変えない）
@@ -124,6 +125,10 @@ def _decide(summary: dict, job_state: str) -> Verdict:
             detail,
             next_step="{FIND}で確度 低 の候補を目視で確かめてください。個人情報でなければ、そのまま言い切れます。",
         )
+    if allowed:
+        # 拾わない値で外したから検出が無くなったときは、その前提を判定の文の頭に置く（外した値は無いとは言えない）
+        detail.insert(0, f"拾わない値（許可リスト）の値を除いて、検出は無かった（外した検出 {allowed:,} 件）")
+    except_allowed = "拾わない値（許可リスト）の値を除いて、" if allowed else ""
     if partial:
         return Verdict(
             "clean_partial",
@@ -136,5 +141,6 @@ def _decide(summary: dict, job_state: str) -> Verdict:
         "検出なし（全ファイルを中身まで検査した）",
         detail,
         can_declare_clean=True,
-        next_step="検査した範囲（指定したフォルダ）については「個人情報は無い」と報告できます（zip などの中身を含む全ファイルを中身まで検査済み）。",
+        next_step=f"検査した範囲（指定したフォルダ）については、{except_allowed}「個人情報は無い」と報告できます"
+        "（zip などの中身を含む全ファイルを中身まで検査済み）。",
     )

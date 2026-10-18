@@ -29,7 +29,7 @@ from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
 from ..remote import ENCODINGS, KINDS, ConnectError, Connection, ftp_check, smb_connect, smb_disconnect
 from ..safeio import NETWORK_LOST_MSG, NetworkLost, output_inside_roots
 from ..store import Store
-from ..userrules import RuleError, parse_allow_list, parse_rules
+from ..userrules import CUSTOM_TYPE, RuleError, parse_allow_list, parse_rules
 from ..verdict import decide
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -57,7 +57,7 @@ def _user_text(options: dict, key: str) -> str:
         v = "\n".join(str(x) for x in v)
     v = str(v)
     if len(v) > MAX_USER_TEXT:
-        raise HTTPException(400, f"許可リスト・規則の欄が長すぎます（{MAX_USER_TEXT:,} 文字まで）")
+        raise HTTPException(400, f"拾わない値・自分で足す規則の欄が長すぎます（{MAX_USER_TEXT:,} 文字まで）")
     return v
 
 
@@ -604,6 +604,10 @@ def create_app(
             "previous": d["previous"],
             "previous_text": jobdiff.previous_text(d["previous"]),
             "summary_text": jobdiff.summary_text(d),
+            # 結果に効く設定・検査器の版が違うときの添え書きと、違うものの名前（同じなら空）
+            "settings_note": jobdiff.settings_note(d),
+            "settings_changed": d["settings_changed"],
+            "gone_unchecked": d["gone_unchecked"],
             "partial": job["state"] != "done",
             "counts": d["counts"],
             "kinds": jobdiff.KIND_LABELS,
@@ -669,7 +673,7 @@ def create_app(
             "rows": [
                 {
                     "path": r[0],
-                    "type": PII_TYPES.get(r[1], r[1]),
+                    "type": finding_type_label(r[1], r[6]),
                     "confidence": r[2],
                     "confidence_label": CONF_LABELS.get(r[2], r[2]),
                     "value": r[3],
@@ -724,6 +728,19 @@ FILE_COLUMNS = (
 )
 
 
+def finding_type_label(pii_type: str, rule: str | None) -> str:
+    """画面に出す種類の名前。利用者の規則は、どの規則に当たったかが分かるよう「利用者の規則（社員番号）」の形にする。
+
+    規則の名前は検出規則の欄（「利用者の規則「社員番号」」）から取る。Excel・CSV は種類と検出規則を別の列に出すので変えない。
+    """
+    label = PII_TYPES.get(pii_type, pii_type)
+    if pii_type == CUSTOM_TYPE and rule:
+        prefix = "利用者の規則「"
+        if rule.startswith(prefix) and rule.endswith("」"):
+            return f"{label}（{rule[len(prefix):-1]}）"
+    return label
+
+
 def _file_view(r, counts: dict[str, int]) -> dict:
     """files の1行を画面に渡す形にする（報告の目安・異なる値・誰が読めるかの表示用の文字も付ける）。"""
     d = dict(r)
@@ -747,6 +764,9 @@ def _file_view(r, counts: dict[str, int]) -> dict:
                 else {PII_TYPES.get(k, k): n for k, n in reportflags.distinct_medium(distinct).items()}
             ),
             "access_label": folderacl.LABELS.get(d["access"], "") if d["access"] else "",
+            # 詳細の窓に出す説明（言い切らない表現と、見ていないもの）
+            "access_desc": folderacl.DESCRIPTIONS.get(d["access"], "") if d["access"] else "",
+            "access_note": folderacl.NOT_CHECKED_NOTE if d["access"] in (folderacl.BROAD, folderacl.LIMITED) else "",
         }
     )
     return d

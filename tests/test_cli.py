@@ -206,3 +206,24 @@ def test_exit_code_for_levels():
         4,
         4,
     ]
+
+
+def test_cli_prints_diff_line_and_totals(tmp_path, capsys):
+    """コマンドの最後に前回との違いの1行を出す（前回が無ければその旨）。"""
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "a.txt").write_text("顧客 携帯 090-1234-5678\n", encoding="utf-8")
+    assert _scan(tmp_path, root, "diff") == 0
+    out = capsys.readouterr().out
+    assert "前回との違い: 比べる前回の検査がありません" in out
+    (root / "b.txt").write_text("顧客 携帯 080-1111-2222\n", encoding="utf-8")
+    assert _scan(tmp_path, root, "diff") == 0
+    out = capsys.readouterr().out
+    line = next(x for x in out.splitlines() if x.startswith("前回との違い:"))
+    assert "新しく見つかった 1 件・無くなった 0 件・増えた 0 件・減った 0 件" in line and "前回の検査（" in line
+    assert "異なる個人の値の数の合計 2" in out  # 判定の文にジョブ全体の合計
+
+
+def test_rules_file_help_names_the_format():
+    text = cli.build_parser()._subparsers._group_actions[0].choices["scan"].format_help()
+    assert "名前 | 探す語か正規表現 | 確度" in text

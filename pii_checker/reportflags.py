@@ -28,7 +28,7 @@ FLAG_LABELS = {
 FLAG_SHORT = {
     "my_number": "マイナンバー",
     "sensitive": "要配慮",
-    "financial": "財産的被害",
+    "financial": "被害のおそれ（カード・口座）",
     "many_my_number": "マイナンバー100超",
     "many_people": "1,000人超",
 }
@@ -129,8 +129,38 @@ def labels(text: str | None, short: bool = False) -> list[str]:
     return [names[f] for f in decode(text)]
 
 
+TOTAL_NOTE = "ファイルごとの数の合計。同じ人が複数のファイルにいれば重ねて数えるので上限の目安"
+PER_FILE_NOTE = "ファイルごとの印（100 超・1,000 超）は、そのファイルの中の数で決めたもので、全体の人数ではない"
+
+
+def total_lines(summary: dict) -> list[str]:
+    """ジョブ全体の、異なる値の数の合計の行（マイナンバー・個人の値）。合計が 100・1,000 を超えたら目安として示す。
+
+    数えたファイルが無ければ空。合計は、ファイルごとの異なる値の数を足したもの（ファイルをまたいだ重なりは
+    値を残していないので除けない）。
+    """
+    t = summary.get("distinct_totals") or {}
+    mine, people = int(t.get("my_number") or 0), int(t.get("people") or 0)
+    if not mine and not people:
+        return []
+    lines = []
+    if mine:
+        over = f"。{MY_NUMBER_LIMIT} を超える（番号法の報告の規則の目安）" if mine > MY_NUMBER_LIMIT else ""
+        lines.append(f"異なるマイナンバーの数の合計 {mine:,}（{TOTAL_NOTE}）{over}")
+    if people:
+        over = f"。{PEOPLE_LIMIT:,} を超える（個人情報保護法施行規則の目安）" if people > PEOPLE_LIMIT else ""
+        lines.append(f"異なる個人の値の数の合計 {people:,}（{'同' if mine else TOTAL_NOTE}）{over}")
+    if t.get("uncounted_files"):
+        lines.append(f"異なる値を数えていない古い版の検査のファイル {t['uncounted_files']:,} 件は、合計に入れていない")
+    lines.append(PER_FILE_NOTE)
+    return lines
+
+
 def verdict_lines(summary: dict) -> list[str]:
-    """総合判定の文に添える行（印ごとのファイル数・広く読めるフォルダにあるファイル数）。当たるものが無ければ空。"""
+    """総合判定の文に添える行（印ごとのファイル数・異なる値の数の合計・広く読めるフォルダにあるファイル数）。
+
+    当たるものが無ければ空。
+    """
     flags = summary.get("flags") or {}
     parts = [f"{FLAG_LABELS[f]} {flags[f]:,} 件" for f in FLAG_ORDER if flags.get(f)]
     lines = []
@@ -140,6 +170,7 @@ def verdict_lines(summary: dict) -> list[str]:
             + "、".join(parts)
             + "（目安。法的な判断ではない。判断は専門家・所管部署へ）"
         )
+    lines += total_lines(summary)
     broad = (summary.get("access") or {}).get("broad", 0)
     if broad:
         lines.append(f"広く読めるフォルダ（Everyone など）にある、個人情報の可能性があるファイル {broad:,} 件")

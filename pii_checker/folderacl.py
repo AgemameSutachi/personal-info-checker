@@ -4,7 +4,7 @@
 読み取りを許されているかを見る。結果は次の3つ（と FTP）:
 
 - broad … 広く読める（Everyone・Authenticated Users・BUILTIN\\Users・Domain Users・Anonymous などに読み取りの許可）
-- limited … 限られた人だけ（上の SID に読み取りの許可が無い）
+- limited … 広い許可なし（上の SID への読み取りの許可は見当たらない。限られた人だけとは言い切らない）
 - unknown … 読めなかった（アクセス権を読む権限が無い・回線断・Windows 以外 など）
 - ftp … FTP にはアクセス権を問い合わせる手段が無いので取らない
 
@@ -13,7 +13,12 @@
 FILE_FLAG_OPEN_NO_RECALL を付けて、階層化ストレージから呼び戻させない。pywin32 は依存に無いので ctypes で呼ぶ。
 
 判定は目安: 拒否の項目は、同じ「広く誰でも」の SID への読み取りの拒否があれば許可を打ち消すとみなすだけで、
-グループの入れ子・ファイル側の個別の設定・共有のアクセス許可（SMB の共有の設定）までは見ない。
+全社員を入れたグループ（会社が作ったグループ）・Samba の Unix のグループ・グループの入れ子・ファイル側の個別の設定・
+共有のアクセス許可（SMB の共有の設定）までは見ない。
+
+所有者の名前は、この PC の中だけで引ける SID（よく知られた SID と、この PC のアカウント）だけを名前にし、
+ほかは SID の文字列のまま出す（ドメインのアカウントの名前を引くとドメインコントローラーへ問い合わせが飛び、
+「検査先を読むほかはどこにも接続しない」という約束を破るため）。
 """
 
 from __future__ import annotations
@@ -28,12 +33,25 @@ LIMITED = "limited"
 UNKNOWN = "unknown"
 FTP = "ftp"
 
+# 表の列に並べる短い名前
 LABELS = {
     BROAD: "広く読める（Everyone など）",
-    LIMITED: "限られた人だけ",
+    LIMITED: "広い許可なし（目安）",
     UNKNOWN: "読めなかった",
     FTP: "取れない（FTP）",
 }
+# 詳細の説明（詳細の窓・レポートの読み方に出す）
+DESCRIPTIONS = {
+    BROAD: "Everyone・Authenticated Users・Users・Domain Users などに読み取りが許されている（目安）",
+    LIMITED: "Everyone などへの読み取りの許可は見当たらない（目安。限られた人だけとは言い切れない）",
+    UNKNOWN: "アクセス権を読めなかった",
+    FTP: "FTP ではアクセス権を問い合わせられない",
+}
+# 見ていないもの（「広い許可なし」でも広く読めることがある理由）
+NOT_CHECKED_NOTE = (
+    "全社員を入れたグループ（会社が作ったグループ）・Samba の Unix のグループ・ファイル個別のアクセス権・"
+    "グループの入れ子・共有のアクセス許可は見ていない"
+)
 
 # 「広く誰でも」に当たるよく知られた SID
 WELL_KNOWN_BROAD = {
@@ -53,7 +71,11 @@ READ_MASK = 0x0001 | 0x80000000 | 0x10000000
 ACCESS_ALLOWED_ACE_TYPE = 0
 ACCESS_DENIED_ACE_TYPE = 1
 OBJECT_INHERIT_ACE = 0x01
+CONTAINER_INHERIT_ACE = 0x02
 INHERIT_ONLY_ACE = 0x08
+
+# この PC の中だけで名前を引ける、よく知られた SID（Everyone・SYSTEM・BUILTIN\Administrators・サービス など）
+RE_WELL_KNOWN_SID = re.compile(r"^S-1-(?:[0-3]-\d+|5-\d+|5-32-\d+|5-80(?:-\d+)+|16-\d+)$")
 
 
 @dataclass
@@ -82,7 +104,10 @@ def broad_name(sid: str) -> str | None:
 def judge(aces: list[tuple[int, int, int, str]] | None) -> tuple[str, list[str]]:
     """DACL の項目 (種類, フラグ, 権利, SID) の一覧から、広く読めるかを決める。aces が None は DACL が無い（全員に許可）。
 
-    フォルダ自身に効く項目（継承専用でない）か、中のファイルへ継承される項目（OBJECT_INHERIT）だけを見る。
+    中のファイルに届く項目だけを見る: 中のファイルへ継承される項目（OBJECT_INHERIT）か、継承の指定の無い項目
+    （フォルダ自身の設定。Samba は Unix の権限を継承の指定の無い項目として見せるので、目安として数える）。
+    サブフォルダにだけ継承される項目（CONTAINER_INHERIT だけで OBJECT_INHERIT が無いもの）は、継承専用でも
+    フォルダ自身にも効く形でも、このフォルダのファイルには届かないので数えない。
     """
     if aces is None:
         return BROAD, ["Everyone（アクセス権の設定が無く、全員に許可）"]
@@ -94,12 +119,25 @@ def judge(aces: list[tuple[int, int, int, str]] | None) -> tuple[str, list[str]]
             continue
         if flags & INHERIT_ONLY_ACE and not flags & OBJECT_INHERIT_ACE:
             continue  # 下のフォルダにだけ継承され、このフォルダのファイルには効かない
+        if flags & CONTAINER_INHERIT_ACE and not flags & OBJECT_INHERIT_ACE:
+            continue  # このフォルダ（の一覧）とサブフォルダにだけ効き、このフォルダのファイルには継承されない
         if ace_type == ACCESS_DENIED_ACE_TYPE:
             denied.add(name)
         elif ace_type == ACCESS_ALLOWED_ACE_TYPE and name not in allowed:
             allowed.append(name)
     allowed = [n for n in allowed if n not in denied]
     return (BROAD, allowed) if allowed else (LIMITED, [])
+
+
+def may_lookup_name(sid: str, local_domain: str) -> bool:
+    """SID の名前を、この PC の中だけで引けるか（よく知られた SID と、この PC のアカウント）。
+
+    local_domain はこの PC のアカウントの SID の頭（S-1-5-21-…）。分からなければ空で、よく知られた SID だけ引く。
+    ドメインのアカウント・NAS だけが知るアカウント（Samba の S-1-22-…）は引かない（問い合わせが外へ飛ぶため）。
+    """
+    if RE_WELL_KNOWN_SID.match(sid):
+        return True
+    return bool(local_domain) and sid.startswith(local_domain + "-") and sid.count("-") == local_domain.count("-") + 1
 
 
 def read_folder(path: str) -> FolderAccess:
@@ -221,12 +259,44 @@ if os.name == "nt":
         finally:
             _k32.LocalFree(out)
 
-    def _account_name(psid) -> str:
-        """SID の名前（「DOMAIN\\user」）。引けなければ SID の文字列。
+    _net = ctypes.WinDLL("netapi32", use_last_error=True)
+    _net.NetUserModalsGet.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    _net.NetUserModalsGet.restype = wintypes.DWORD
+    _net.NetApiBufferFree.argtypes = [ctypes.c_void_p]
 
-        名前はこの PC の引き方に任せる（検査先の NAS へは問い合わせない。ドメインに入った PC では、ドメインの SID を
-        ドメインコントローラーへ問い合わせることがある）。NAS だけが知るアカウントは SID の文字列のまま出る。
+    class USER_MODALS_INFO_2(ctypes.Structure):
+        _fields_ = [("usrmod2_domain_name", wintypes.LPWSTR), ("usrmod2_domain_id", ctypes.c_void_p)]
+
+    _local_domain_cache: list[str] = []
+
+    def _local_domain_sid() -> str:
+        """この PC のアカウントの SID の頭（S-1-5-21-…）。この PC の SAM に聞くだけで、外へは問い合わせない。"""
+        if _local_domain_cache:
+            return _local_domain_cache[0]
+        sid = ""
+        buf = ctypes.c_void_p()
+        try:
+            if _net.NetUserModalsGet(None, 2, ctypes.byref(buf)) == 0 and buf.value:
+                info = USER_MODALS_INFO_2.from_address(buf.value)
+                if info.usrmod2_domain_id:
+                    sid = _sid_string(info.usrmod2_domain_id)
+        except OSError:
+            sid = ""
+        finally:
+            if buf.value:
+                _net.NetApiBufferFree(buf)
+        _local_domain_cache.append(sid)
+        return sid
+
+    def _account_name(psid) -> str:
+        """SID の名前（「DOMAIN\\user」）。この PC の中だけで引けない SID は、SID の文字列のまま返す。
+
+        LookupAccountSidW はドメインの SID をドメインコントローラーへ問い合わせる。「検査先を読むほかはどこにも
+        接続しない」ため、よく知られた SID とこの PC のアカウントの SID だけを引く（may_lookup_name）。
         """
+        sid = _sid_string(psid)
+        if not may_lookup_name(sid, _local_domain_sid()):
+            return sid
         name_len = wintypes.DWORD(256)
         dom_len = wintypes.DWORD(256)
         name = ctypes.create_unicode_buffer(256)
@@ -236,7 +306,7 @@ if os.name == "nt":
             None, psid, name, ctypes.byref(name_len), dom, ctypes.byref(dom_len), ctypes.byref(use)
         ):
             return f"{dom.value}\\{name.value}" if dom.value else name.value
-        return _sid_string(psid)
+        return sid
 
     def _read_dacl(path: str) -> tuple[list[tuple[int, int, int, str]] | None, str]:
         """フォルダの DACL の項目と所有者の名前を返す。DACL が無い（全員に許可）ときは項目を None で返す。"""

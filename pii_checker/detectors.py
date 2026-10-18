@@ -132,10 +132,11 @@ PERSONAL_PHONE_KW = re.compile(r"(自宅|携帯|個人|緊急連絡|本人|実�
 ORDER_KW = re.compile(
     r"(注文|受注|発注|伝票|管理番号|品番|型番|製造番号|シリアル|serial|order|商品コード|jan|s/?n\b)", re.I
 )
-# 型番・伝票番号などの語（値の左にあれば、電話・カード番号の形をしていても製品や伝票の番号とみなして確度 低）
+# 製品の番号の語（値の左にあれば、電話・カード番号の形をしていても製品の番号とみなして確度 低）。
+# 整理番号・受付番号・伝票番号・お問い合わせ番号・追跡番号は入れない（名簿・受付票の「整理番号1 山田太郎 090-…」の
+# ように、番号の列の右に人の電話が並ぶ書き方が多く、下げると個人の電話を見落とすため）
 MODEL_KW = re.compile(
-    r"(型番|品番|製品コード|商品コード|部品番号|図面番号|追跡番号|お?問い?合わせ番号|伝票番号|整理番号|受付番号|"
-    r"(?<![a-z])isbn(?![a-z])|(?<![a-z])jan(?![a-z]))",
+    r"(型番|品番|製品コード|商品コード|部品番号|図面番号|(?<![a-z])isbn(?![a-z])|(?<![a-z])jan(?![a-z]))",
     re.I,
 )
 # 語が無ければ拾わない番号（クレジットカードの Luhn が合わないものを、打ち間違いとして 低 で残すときの語）
@@ -872,13 +873,15 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
     return hits
 
 
-# 本人確認書類の写しの判別（書類の名前, 書類の名前の語, 一緒に載る語）。どちらの語も空白を除いた大文字の文字列で探す
-ID_DOCUMENT_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-    ("運転免許証", ("運転免許証",), ("公安委員会", "免許の条件", "交付")),
-    ("個人番号カード", ("個人番号カード",), ("有効期限", "個人番号", "電子証明書")),
-    ("在留カード", ("在留カード",), ("在留資格", "在留期間", "就労制限")),
-    ("健康保険証", ("被保険者証", "資格確認書"), ("保険者番号", "記号")),
-    ("旅券", ("旅券", "PASSPORT"), ("発行年月日", "有効期間満了日", "DATEOFISSUE")),
+# 本人確認書類の写しの判別（書類の名前, 書類の名前の語, 一緒に載る語, 一緒に載る語がいくつ要るか）。
+# どの語も空白を除いた大文字の文字列で探す。被保険者証・個人番号カードは、案内の文書・申請書の見本にも
+# 「記号」「有効期限」などが1つは並びやすいので、一緒に載る語を2つ求める
+ID_DOCUMENT_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...], int], ...] = (
+    ("運転免許証", ("運転免許証",), ("公安委員会", "免許の条件", "交付"), 1),
+    ("個人番号カード", ("個人番号カード",), ("有効期限", "電子証明書", "個人番号", "生年月日"), 2),
+    ("在留カード", ("在留カード",), ("在留資格", "在留期間", "就労制限"), 1),
+    ("健康保険証", ("被保険者証", "資格確認書"), ("保険者番号", "記号", "番号", "資格取得年月日"), 2),
+    ("旅券", ("旅券", "PASSPORT"), ("発行年月日", "有効期間満了日", "DATEOFISSUE"), 1),
 )
 
 
@@ -895,15 +898,21 @@ def detect_id_documents(text: str, from_ocr: bool) -> list[Hit]:
     # OCR は文字のあいだに空白を挟むことがあるので、空白を除いてから探す
     compact = re.sub(r"\s+", "", text).upper()
     hits: list[Hit] = []
-    for doc, names, companions in ID_DOCUMENT_RULES:
+    for doc, names, companions, need in ID_DOCUMENT_RULES:
         name = next((n for n in names if n in compact), None)
         if name is None:
             continue
         # 書類の名前の語そのものに含まれる語（「個人番号カード」の「個人番号」）は、名前の語を除いた残りで探す
         rest = compact.replace(name, "\0")
-        companion = next((c for c in companions if c in rest), None)
-        if companion is None:
+        found: list[str] = []
+        # 長い語から探して、見つけた語は消す（「保険者番号」の中の「番号」を別の語として二重に数えない）
+        for c in sorted(companions, key=len, reverse=True):
+            if c in rest:
+                found.append(c)
+                rest = rest.replace(c, "\0")
+        if len(found) < need:
             continue
+        companion = "」「".join(found[:need])
         pos = text.upper().find(name)
         start, end = (pos, pos + len(name)) if pos >= 0 else (0, 0)
         hits.append(

@@ -474,7 +474,7 @@ async function loadDiffBox(j) {
     d = await api(`/api/jobs/${encodeURIComponent(j.id)}/diff?limit=1`);
   } catch (_) { box.classList.add("hidden"); return; }
   if (state.jobId !== j.id) return;
-  box.classList.remove("hidden");
+  box.classList.toggle("hidden", !d.previous);
   $("#diff-text").textContent = d.summary_text + (d.partial ? "（この検査は最後まで終わっていないため、途中までの結果で比べています）" : "");
   $("#diff-links").innerHTML = Object.entries(d.counts || {})
     .filter(([, n]) => n > 0)
@@ -791,7 +791,7 @@ const pill = (cls, text) => `<span class="pill ${esc(cls)}">${esc(text)}</span>`
 const FLAG_TIP = "漏えい時の報告の目安（法的な判断ではありません。判断は専門家・所管部署へ）";
 const flagPills = (x) => (x.flag_short || []).map((s, i) => `<span class="pill flag" title="${esc((x.flag_labels || [])[i] || s)}／${esc(FLAG_TIP)}">${esc(s)}</span>`).join(" ");
 // 誰が読めるか（親フォルダのアクセス権）。広く読めるときは誰に許されているかを title に
-const accessCell = (x) => (x.access ? `<span class="pill acc-${esc(x.access)}" title="${esc([x.access_who, x.access_owner ? "所有者: " + x.access_owner : ""].filter(Boolean).join("／"))}">${esc(x.access_label)}</span>` : "");
+const accessCell = (x) => (x.access ? `<span class="pill acc-${esc(x.access)}" title="${esc([x.access_desc, x.access_who, x.access_owner ? "所有者: " + x.access_owner : "", x.access_note ? x.access_note + "（目安）" : ""].filter(Boolean).join("／"))}">${esc(x.access_label)}</span>` : "");
 const distinctText = (d) => (d == null ? "（数えていない・古い版の検査）" : typesText(d));
 const EMPTY_TEXT = {
   attention: "対応が必要な項目はありません。",
@@ -815,16 +815,17 @@ async function loadTable() {
     click = r.rows.map((x) => x.top_path);
   } else if (state.tab === "hits" || state.tab === "all") {
     r = await api(`/api/jobs/${id}/files?${base}&only_findings=${state.tab === "hits"}`);
-    head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "誰が読めるか", "大きさ", "更新日時"];
-    rows = r.rows.map((x) => [pathCell(x.top_path), pill(x.worst_status || "pending", x.status_label), x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, `<span class="small">${esc(typesText(x.types))}</span>`, flagPills(x), accessCell(x), `<td class="num">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`]);
+    head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "誰が読めるか"];
+    rows = r.rows.map((x) => [pathCell(x.top_path), pill(x.worst_status || "pending", x.status_label), x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, `<td class="types small">${esc(typesText(x.types))}</td>`, `<td class="flags">${flagPills(x)}</td>`, accessCell(x)]);
     click = r.rows.map((x) => x.top_path);
   } else if (state.tab === "diff") {
     r = await api(`/api/jobs/${id}/diff?${base}&kind=${encodeURIComponent($("#f-diff").value)}`);
-    head = ["違い", "ファイル", "今回の検出件数", "前回の検出件数", "今回の危険度", "前回の危険度", "理由・補足"];
+    head = ["違い", "ファイル", "今回の件数", "前回の件数", "今回の危険度", "前回の危険度", "理由・補足"];
     const cls = { new: "high", increased: "medium", gone: "scanned", decreased: "scanned" };
-    rows = r.rows.map((x) => [pill(cls[x.kind] || "", x.kind_label), pathCell(x.top_path), `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, x.risk_now && x.risk_now !== "なし" ? pill("r-" + x.risk_now, x.risk_now) : "", x.risk_prev && x.risk_prev !== "なし" ? pill("r-" + x.risk_prev, x.risk_prev) : "", esc(x.note)]);
+    const diffCls = (x) => (x.kind === "gone" && x.gone_reason === "unchecked" ? "needs_password" : cls[x.kind] || "");
+    rows = r.rows.map((x) => [pill(diffCls(x), x.kind_label), pathCell(x.top_path), `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, x.risk_now && x.risk_now !== "なし" ? pill("r-" + x.risk_now, x.risk_now) : "", x.risk_prev && x.risk_prev !== "なし" ? pill("r-" + x.risk_prev, x.risk_prev) : "", `<td class="note">${esc(x.note)}</td>`]);
     click = r.rows.map((x) => x.top_path);
-    $("#diff-note").textContent = r.summary_text + (r.partial ? "（この検査は最後まで終わっていないため、途中までの結果で比べています）" : "") + (r.previous ? "　※「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。" : "");
+    $("#diff-note").textContent = r.previous ? "※ 前回との違いの要約は、上の「前回との違い」の枠にあります。「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。" : "";
     EMPTY_TEXT.diff = r.previous ? "該当する違いはありません。" : r.summary_text;
   } else if (state.tab === "items") {
     r = await api(`/api/jobs/${id}/all_items?${base}`);
@@ -854,12 +855,21 @@ async function loadTable() {
     const again = $(`#table tbody tr[data-i="${focusIdx}"]`);
     if (again) again.focus();
   }
+  updateScrollHint();
   $("#table-count").textContent = `${fmtNum(r.total)} 件`;
   const end = Math.min(state.offset + state.limit, r.total);
   $("#page-info").textContent = r.total ? `${fmtNum(state.offset + 1)}〜${fmtNum(end)} / ${fmtNum(r.total)}` : "";
   $("#prev").disabled = state.offset === 0;
   $("#next").disabled = end >= r.total;
 }
+
+// 表が枠より広いとき（狭い窓）だけ、横にスクロールできることを知らせる
+function updateScrollHint() {
+  const wrap = $("#table-wrap-main");
+  if (!wrap) return;
+  $("#scroll-hint").classList.toggle("hidden", wrap.scrollWidth <= wrap.clientWidth + 2);
+}
+window.addEventListener("resize", updateScrollHint);
 
 async function openDetail(topPath) {
   dialogOpener = document.activeElement;
@@ -876,11 +886,14 @@ async function openDetail(topPath) {
       <div class="small muted">${esc(FLAG_TIP)}</div>
       ${fileRow.people_text ? `<div><strong>人数の目安:</strong> ${esc(fileRow.people_text)}<span class="small muted">（異なる値が最も多い種類の数で代えたもの）</span></div>` : ""}
       <div><strong>異なる値（確度 中以上）:</strong> ${esc(distinctText(fileRow.distinct)) || "なし"}</div>
-      ${fileRow.access ? `<div><strong>誰が読めるか:</strong> ${accessCell(fileRow)} ${esc(fileRow.access_who || "")}${fileRow.access_owner ? `<span class="small muted">（フォルダの所有者: ${esc(fileRow.access_owner)}）</span>` : ""}</div>` : ""}
+      ${fileRow.access ? `<div><strong>誰が読めるか:</strong> ${accessCell(fileRow)} ${esc(fileRow.access_who || "")}${fileRow.access_owner ? `<span class="small muted">（フォルダの所有者: ${esc(fileRow.access_owner)}）</span>` : ""}</div>
+      ${fileRow.access_desc ? `<div class="small muted">${esc(fileRow.access_desc)}${fileRow.access_note ? `。${esc(fileRow.access_note)}` : ""}</div>` : ""}` : ""}
     </div>` : "";
+  const fileInfo = fileRow ? `<div class="small muted detail-meta">大きさ ${esc(fmtSize(fileRow.size)) || "不明"}・更新日時 ${esc(fmtTime(fileRow.mtime)) || "不明"}</div>` : "";
   const actions = `
     <div class="detail-actions">
       <div class="mono small detail-path">${esc(topPath)}</div>
+      ${fileInfo}
       <button type="button" id="btn-copy-path">パスをコピー</button>
       ${state.desktop ? '<button type="button" id="btn-reveal">エクスプローラーで場所を開く</button>' : ""}
       <span id="detail-msg" class="msg small" role="status"></span>

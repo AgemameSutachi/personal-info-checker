@@ -672,17 +672,25 @@ class Store:
         # 報告の目安の印ごとのファイル数と、検出のあったファイルの親フォルダのアクセス権の内訳
         flag_counts = {f: 0 for f in reportflags.FLAG_ORDER}
         access_counts: dict[str, int] = {}
+        # ジョブ全体の、異なる値の数の合計（ファイルごとの数を足したもの。同じ人が複数のファイルにいれば重ねて数える）
+        totals = {"my_number": 0, "people": 0, "uncounted_files": 0}
         for r in q(
-            "SELECT flags, access FROM files WHERE job_id=? AND state='done' AND n_findings > 0",
+            "SELECT flags, access, distinct_counts, people_n FROM files WHERE job_id=? AND state='done' AND n_findings > 0",
             (job_id,),
         ):
             for f in reportflags.decode(r[0]):
                 flag_counts[f] += 1
             if r[1]:
                 access_counts[r[1]] = access_counts.get(r[1], 0) + 1
+            if r[2] is None:
+                totals["uncounted_files"] += 1  # 異なる値を数えていない古い版の検査
+            else:
+                totals["my_number"] += reportflags.distinct_medium(json.loads(r[2] or "{}")).get("my_number", 0)
+                totals["people"] += int(r[3] or 0)
         return {
             "flags": flag_counts,
             "access": access_counts,
+            "distinct_totals": totals,
             "files_total": files_total,
             "files_done": files_done,
             "item_status": status_counts,

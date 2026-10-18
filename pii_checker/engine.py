@@ -30,7 +30,7 @@ from .models import (
     ScanOptions,
     Status,
 )
-from .userrules import normalize_allow
+from .userrules import CUSTOM_TYPE, normalize_allow, rule_key, rule_name_of_text
 
 IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは一時ファイルに書き出して扱う
 # これより大きいものはメモリへ丸ごと読まない（形式の読み方をあきらめ、文字として読める部分だけを少しずつ検査する）。
@@ -129,6 +129,15 @@ PERSON_CUE_NOTE = "（同じファイルに氏名などの人の手がかりあ�
 TITLE_CUE_NOTE = "（ファイル名・本文の先頭に「{}」の書類の題があり、人の手がかりとみなした）"
 RANK_CONF = {c.rank: c for c in Confidence}
 _RE_HONORIFIC_TAIL = re.compile(r"(様|殿|さん|君|くん|ちゃん)$")
+
+
+def _distinct_type(hit) -> str:
+    """異なる値を数えるときの種類。利用者の規則は規則の名前ごとに分ける（「custom/社員番号」）。"""
+    if hit.pii_type == CUSTOM_TYPE:
+        name = rule_name_of_text(hit.rule)
+        if name is not None:
+            return rule_key(name)
+    return hit.pii_type
 
 
 def distinct_key(pii_type: str, value: str) -> str:
@@ -260,13 +269,13 @@ class Collector:
                 self._maybe_upgrade(prev, hit, confidence, norm, location, location_fn, method, raw, key)
                 if raw or skip_seen:
                     continue
-                self._count(hit.pii_type, confidence)
+                self._count(hit.pii_type, confidence, hit)
                 continue
-            self._count(hit.pii_type, confidence)
+            self._count(hit.pii_type, confidence, hit)
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, hits)
             if len(self.seen) < 3_000_000:
                 self.seen[key] = (idx, confidence)
-                self.distinct_keys[key] = (hit.pii_type, hash(distinct_key(hit.pii_type, hit.value)))
+                self.distinct_keys[key] = (_distinct_type(hit), hash(distinct_key(hit.pii_type, hit.value)))
 
     def finish(self) -> None:
         """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
@@ -357,11 +366,16 @@ class Collector:
             self.allowed_seen.add(key)
         self.item.allowed += 1
 
-    def _count(self, pii_type: str, confidence: Confidence) -> None:
+    def _count(self, pii_type: str, confidence: Confidence, hit=None) -> None:
         counts = self.item.finding_counts
         counts[pii_type] = counts.get(pii_type, 0) + 1
         ck = f"{pii_type}:{confidence.value}"
         self.item.conf_counts[ck] = self.item.conf_counts.get(ck, 0) + 1
+        if hit is not None and pii_type == CUSTOM_TYPE:
+            # 利用者の規則は、どの規則に当たったかを内訳に出すため、規則の名前ごとにも数える（種類の件数とは別に持つ）
+            name = rule_name_of_text(hit.rule)
+            if name is not None:
+                self.item.rule_counts[name] = self.item.rule_counts.get(name, 0) + 1
 
     def _cue_note(self) -> str:
         """引き上げた理由の注記。書類の題で手がかりにしたときは、ありもしない氏名を探させないよう題と書く。"""

@@ -643,11 +643,16 @@ class Matcher:
         return False
 
     def find(self, text: str) -> list:
-        """本文（normalize 済み）から利用者の規則に当たるものを探す。1回に当てる文字数は WINDOW まで。"""
+        """本文（normalize 済み）から利用者の規則に当たるものを探す。1回に当てる文字数は WINDOW まで。
+
+        当てる前に改行（CR LF・CR）を LF に寄せる（re の「$」「^」は LF でしか行の境目にならず、Excel のセル内改行・
+        メールの本文などの CR LF で行末の規則が当たらないため）。返す位置は元の本文での位置に戻す。
+        """
         from .detectors import Hit
 
         if not self.rules or not text:
             return []
+        text, to_original = _fold_newlines(text)
         hits = []
         n = len(text)
         for c in self.rules:
@@ -671,15 +676,40 @@ class Matcher:
                                 CUSTOM_TYPE,
                                 c.confidence,
                                 m.group(0),
-                                m.start(),
-                                m.end(),
-                                f"利用者の規則「{c.rule.name}」",
+                                to_original(m.start()),
+                                to_original(m.end()),
+                                rule_text(c.rule.name),
                             )
                         )
                 if last:
                     break
                 start += STEP
         return hits
+
+
+def _fold_newlines(text: str):
+    """(CR LF・CR を LF に寄せた本文, 寄せた本文の位置→元の本文の位置)。CR が無ければ本文をそのまま返す。
+
+    CR だけの改行は1文字のまま LF にするので位置は変わらない。CR LF は1文字に縮むので、縮めた改行より後ろの位置は
+    その数だけ元へずらす。
+    """
+    if "\r" not in text:
+        return text, _same_position
+    import bisect
+
+    merged: list[int] = []  # 寄せた本文での、CR LF を縮めた改行の位置
+    removed = 0
+    for m in re.finditer("\r\n", text):
+        merged.append(m.start() - removed)
+        removed += 1
+    folded = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not merged:
+        return folded, _same_position
+    return folded, lambda pos: pos + bisect.bisect_left(merged, pos)
+
+
+def _same_position(pos: int) -> int:
+    return pos
 
 
 @lru_cache(maxsize=16)
@@ -701,6 +731,34 @@ def matcher_for(options) -> Matcher | None:
 def allow_signature(values: list[str] | None) -> list[str]:
     """前回の結果を使い回してよいかの判定に使う許可リストの形（正規化して並べ替え。書き順・重複では変えない）。"""
     return sorted({k for k in (normalize_allow(v) for v in values or []) if k})
+
+
+RULE_KEY_PREFIX = CUSTOM_TYPE + "/"  # 異なる値・内訳を規則ごとに分けて数える鍵（「custom/社員番号」）
+_RULE_TEXT_HEAD = "利用者の規則「"  # 明細の検出規則の欄の形（「利用者の規則「社員番号」」）
+
+
+def rule_text(name: str) -> str:
+    """明細の「検出規則」の欄に出す文（「利用者の規則「社員番号」」）。"""
+    return f"{_RULE_TEXT_HEAD}{name}」"
+
+
+def rule_name_of_text(rule: str | None) -> str | None:
+    """「検出規則」の欄の文から規則の名前を取り出す。利用者の規則の文でなければ None。"""
+    if rule and rule.startswith(_RULE_TEXT_HEAD) and rule.endswith("」"):
+        return rule[len(_RULE_TEXT_HEAD) : -1]
+    return None
+
+
+def rule_key(name: str) -> str:
+    """規則ごとに分けて数えるときの種類の鍵（「custom/社員番号」）。"""
+    return RULE_KEY_PREFIX + name
+
+
+def rule_name_of_key(key: str | None) -> str | None:
+    """規則ごとの種類の鍵から規則の名前を取り出す。規則ごとの鍵でなければ None。"""
+    if key and key.startswith(RULE_KEY_PREFIX):
+        return key[len(RULE_KEY_PREFIX) :]
+    return None
 
 
 def rule_names(rules: list[dict] | None) -> list[str]:

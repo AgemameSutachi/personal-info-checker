@@ -100,7 +100,13 @@ def test_diff_kinds_and_notes(tmp_path):
     assert rows[0][0] == "要約" and "新しく見つかった 2 件" in rows[0][1]
     assert rows[2][0] == "違い" and len(rows) == 3 + 7
     assert load_workbook(out)["前回との違い"].auto_filter.ref == "A3:G10"
-    assert {r[0] for r in rows[3:]} >= {"無くなった", "新しく見つかった"}
+    assert {r[0] for r in rows[3:]} >= {"無くなった", "新しく見つかった", "無くなった（今回は見つからない）"}
+    # 塗り: 直した（検出が無くなった）だけ緑。今回は見つからないものは中立、調べられなかったものは要対応の色
+    fills = {
+        r[1].value.rsplit("\\", 1)[-1]: r[0].fill.fgColor.rgb[-6:]
+        for r in load_workbook(out)["前回との違い"].iter_rows(min_row=4)
+    }
+    assert (fills["fixed.txt"], fills["deleted.txt"], fills["locked.zip"]) == ("C6EFCE", "EDEDED", "FFE699")
     overview = {r[0]: r[1] for r in wb["判定"].iter_rows(values_only=True) if r and r[0] and len(r) > 1}
     assert "新しく見つかった 2 件" in overview["前回との違い"]
 
@@ -137,6 +143,22 @@ def test_case_only_difference_is_same_file(tmp_path):
     cur2 = _job(store, [ftp], {ftp + "/a.txt": (1, S)}, connection=conn)
     kinds = sorted(r["kind"] for r in jobdiff.compute(store, cur2)["rows"])
     assert kinds == ["gone", "new"]
+
+
+def test_settings_change_with_no_difference_says_changes_may_be_hidden(tmp_path):
+    """設定が違って違いが0件のときは、「ファイルの変化が隠れていることもある」と添える（「含みます」とは言わない）。"""
+    store = Store(str(tmp_path / "db.sqlite3"))
+    root = r"C:\共有"
+    S = Status.SCANNED
+    _job(store, [root], {root + r"\a.txt": (2, S)})
+    cur = _job(store, [root], {root + r"\a.txt": (2, S)}, ocr=False)
+    d = jobdiff.compute(store, cur)
+    assert not any(d["counts"].values())
+    text = jobdiff.summary_text(d)
+    assert "違いはありません" in text
+    assert "ファイルの変化が隠れていることもあります（違うもの: OCR）" in text
+    assert "違いにはファイルの変化でないものを含みます" not in text
+    assert "ファイルの変化が隠れていることもあります" in jobdiff.cli_line(d)
 
 
 def test_settings_or_version_change_is_noted(tmp_path):
@@ -192,7 +214,10 @@ def test_gone_under_unreadable_folder_is_not_called_deleted(tmp_path):
     assert got["名簿.xlsx"]["kind_label"] == "無くなった（調べられなかった）"
     assert got["x.csv"]["note"] == "今回は調べられなかった（リンクを辿らなかった）"
     assert got["old.txt"]["note"] == "今回は見つからない（消した・移した・名前を変えた、または今回は見えなかった）"
-    assert got["old.txt"]["gone_reason"] == jobdiff.GONE_MISSING and got["old.txt"]["kind_label"] == "無くなった"
+    assert (
+        got["old.txt"]["gone_reason"] == jobdiff.GONE_MISSING
+        and got["old.txt"]["kind_label"] == "無くなった（今回は見つからない）"
+    )
     assert d["gone_unchecked"] == 2
     assert "無くなった 3 件（うち調べられなかった 2 件）" in jobdiff.summary_text(d)
 

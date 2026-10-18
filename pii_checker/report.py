@@ -178,7 +178,7 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
             "報告の目安: 異なるマイナンバーの数の合計（ファイルごとの数の合計・上限の目安）",
             totals.get("my_number", 0),
         ),
-        ("報告の目安: 異なる個人の値の数の合計（ファイルごとの数の合計・上限の目安）", totals.get("people", 0)),
+        (f"報告の目安: 人数の目安の合計（{reportflags.PEOPLE_TOTAL_NOTE}）", totals.get("people", 0)),
     ]
     access = summary.get("access") or {}
     rows.append(("広く読めるフォルダにある、個人情報の可能性があるファイル", access.get(folderacl.BROAD, 0)))
@@ -194,7 +194,7 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
     opts = job["options"]
     rows += [
         ("設定: OCR", "する" if opts.get("ocr") else "しない"),
-        ("設定: 生データ走査", "する" if opts.get("raw_sweep") else "しない"),
+        ("設定: ファイル全体の文字の走査（削除済みの残りも探す）", "する" if opts.get("raw_sweep") else "しない"),
         ("設定: イメージの未使用領域", "走査する" if opts.get("deep_image_sweep") else "走査しない"),
         ("設定: 前回の結果の使い回し", "する" if opts.get("reuse", True) else "しない（全部読み直す）"),
     ]
@@ -224,7 +224,12 @@ def reading_notes(job: dict) -> list[str]:
         "「報告の目安」は" + reportflags.NOTE + "。根拠: " + "／".join(reportflags.SOURCES) + "。",
         "「異なる値」は、同じ値（全角半角・空白・ハイフンの違い、氏名の敬称は無視）を1つと数えた数（確度 中以上）。"
         "値そのものは残していない。" + reportflags.PEOPLE_NOTE + "。",
-        reportflags.PER_FILE_NOTE + "。ジョブ全体の「異なる値の数の合計」は" + reportflags.TOTAL_NOTE + "。",
+        reportflags.PER_FILE_NOTE
+        + "。ジョブ全体の「異なるマイナンバーの数の合計」は"
+        + reportflags.TOTAL_NOTE
+        + "。「人数の目安の合計」は"
+        + reportflags.PEOPLE_TOTAL_NOTE
+        + "。",
         "「誰が読めるか」は、検出のあったファイルの親フォルダのアクセス権で、Everyone・Authenticated Users・"
         "BUILTIN\\Users・Domain Users などに読み取りが許されていれば「広く読める」、その許可が見当たらなければ"
         f"「{folderacl.LABELS[folderacl.LIMITED]}」とした（限られた人だけとは言い切れない。"
@@ -376,14 +381,17 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         bold=True,
     )
     for d in diff["rows"]:
-        kind = "gone_unchecked" if d.get("gone_reason") == jobdiff.GONE_UNCHECKED else d["kind"]
+        kind = {jobdiff.GONE_UNCHECKED: "gone_unchecked", jobdiff.GONE_MISSING: "gone_missing"}.get(
+            d.get("gone_reason"), d["kind"]
+        )
         _row(
             ws,
             [d["kind_label"], d["top_path"], d["n_now"], d["n_prev"], d["risk_now"], d["risk_prev"], d["note"]],
             fill={
                 "new": "F8CBAD",
                 "increased": "FCE4D6",
-                "gone": "C6EFCE",
+                "gone": "C6EFCE",  # 検出が無くなった（直した・中身が変わった）
+                "gone_missing": "EDEDED",  # 今回は見つからない（直ったとは言えないので中立の色）
                 "gone_unchecked": "FFE699",  # 調べられなかったので直ったとは言えない（要対応と同じ色）
                 "decreased": "E2EFDA",
             }.get(kind),

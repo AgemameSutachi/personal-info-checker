@@ -331,7 +331,7 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
 
         names = rule_names(job_opts.get("custom_rules"))
         print(
-            f"拾わない値 {len(job_opts.get('allow_values') or [])} 件・自分で足す規則 {len(names)} 件"
+            f"拾わない値（許可リスト）{len(job_opts.get('allow_values') or [])} 件・自分で足す規則 {len(names)} 件"
             + (f"（{'、'.join(names)}）" if names else "")
             + " を使います"
         )

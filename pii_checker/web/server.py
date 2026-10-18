@@ -29,7 +29,7 @@ from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
 from ..remote import ENCODINGS, KINDS, ConnectError, Connection, ftp_check, smb_connect, smb_disconnect
 from ..safeio import NETWORK_LOST_MSG, NetworkLost, output_inside_roots
 from ..store import Store
-from ..userrules import CUSTOM_TYPE, RuleError, parse_allow_list, parse_rules
+from ..userrules import CUSTOM_TYPE, RuleError, parse_allow_list, parse_rules, rule_key, rule_name_of_text
 from ..verdict import decide
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -521,11 +521,12 @@ def create_app(
             part = top_paths[i : i + 400]
             marks = ",".join("?" * len(part))
             for r in store.query(
-                f"SELECT top_path, counts FROM items WHERE job_id=? AND counts != '{{}}' AND top_path IN ({marks})",
+                f"SELECT top_path, counts, rule_counts FROM items WHERE job_id=? AND counts != '{{}}'"
+                f" AND top_path IN ({marks})",
                 (job_id, *part),
             ):
                 d = out.setdefault(r["top_path"], {})
-                for k, n in json.loads(r["counts"]).items():
+                for k, n in split_rule_counts(json.loads(r["counts"]), r["rule_counts"]).items():
                     d[k] = d.get(k, 0) + n
         return out
 
@@ -628,13 +629,20 @@ def create_app(
                 "reason": r["reason"],
                 "method": r["method"],
                 "depth": r["depth"],
-                "counts": json.loads(r["counts"]),
+                # 種類の日本語名 → 件数（利用者の規則は規則ごと）
+                "counts": {
+                    reportflags.type_label(k): n
+                    for k, n in split_rule_counts(json.loads(r["counts"]), r["rule_counts"]).items()
+                },
                 "notes": json.loads(r["notes"]),
-                # 種類 → 異なる値の数（確度 中以上）。None は数えていない古い版の検査
+                # 種類の日本語名 → 異なる値の数（確度 中以上。利用者の規則は規則ごと）。None は数えていない古い版の検査
                 "distinct": (
                     None
                     if r["distinct_counts"] is None
-                    else reportflags.distinct_medium(json.loads(r["distinct_counts"] or "{}"))
+                    else {
+                        reportflags.type_label(k): n
+                        for k, n in reportflags.distinct_medium(json.loads(r["distinct_counts"] or "{}")).items()
+                    }
                 ),
             }
             for r in rows
@@ -728,17 +736,30 @@ FILE_COLUMNS = (
 )
 
 
+def split_rule_counts(counts: dict[str, int], rule_counts_json: str | None) -> dict[str, int]:
+    """項目の種類別の件数の「利用者の規則」を、規則の名前ごと（「custom/社員番号」）に分ける。
+
+    規則ごとの件数が無い（古い版の検査）か、合計が合わないときは分けずに返す（数を食い違わせない）。
+    """
+    rules = json.loads(rule_counts_json or "{}") if rule_counts_json else {}
+    if not rules or counts.get(CUSTOM_TYPE) != sum(rules.values()):
+        return counts
+    out = {k: n for k, n in counts.items() if k != CUSTOM_TYPE}
+    for name, n in rules.items():
+        out[rule_key(name)] = n
+    return out
+
+
 def finding_type_label(pii_type: str, rule: str | None) -> str:
     """画面に出す種類の名前。利用者の規則は、どの規則に当たったかが分かるよう「利用者の規則（社員番号）」の形にする。
 
     規則の名前は検出規則の欄（「利用者の規則「社員番号」」）から取る。Excel・CSV は種類と検出規則を別の列に出すので変えない。
     """
-    label = PII_TYPES.get(pii_type, pii_type)
-    if pii_type == CUSTOM_TYPE and rule:
-        prefix = "利用者の規則「"
-        if rule.startswith(prefix) and rule.endswith("」"):
-            return f"{label}（{rule[len(prefix):-1]}）"
-    return label
+    if pii_type == CUSTOM_TYPE:
+        name = rule_name_of_text(rule)
+        if name is not None:
+            return reportflags.type_label(rule_key(name))
+    return PII_TYPES.get(pii_type, pii_type)
 
 
 def _file_view(r, counts: dict[str, int]) -> dict:
@@ -752,7 +773,7 @@ def _file_view(r, counts: dict[str, int]) -> dict:
             "status_label": (
                 STATUS_JA.get(d["worst_status"] or "pending", "未検査") if d["state"] == "done" else "未検査"
             ),
-            "types": {PII_TYPES.get(k, k): n for k, n in counts.items()},
+            "types": {reportflags.type_label(k): n for k, n in counts.items()},
             "flag_codes": reportflags.decode(d.pop("flags")),
             "flag_labels": reportflags.labels(r["flags"]) if has else [],
             "flag_short": reportflags.labels(r["flags"], short=True) if has else [],
@@ -761,7 +782,7 @@ def _file_view(r, counts: dict[str, int]) -> dict:
             "distinct": (
                 None
                 if distinct is None
-                else {PII_TYPES.get(k, k): n for k, n in reportflags.distinct_medium(distinct).items()}
+                else {reportflags.type_label(k): n for k, n in reportflags.distinct_medium(distinct).items()}
             ),
             "access_label": folderacl.LABELS.get(d["access"], "") if d["access"] else "",
             # 詳細の窓に出す説明（言い切らない表現と、見ていないもの）

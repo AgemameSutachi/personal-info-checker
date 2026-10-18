@@ -153,3 +153,54 @@ def test_header_cache_does_not_keep_long_cells():
     assert engine._short_header_strength.cache_info().currsize == 0
     assert engine._header_strength("氏名") == engine.HEADER_SURE
     assert engine._short_header_strength.cache_info().currsize == 1
+
+
+SEVENZIP = Path(__file__).resolve().parent.parent / "vendor" / "7zip" / "7z.exe"
+
+
+@pytest.mark.parametrize("use_7z", [False, True])
+def test_broken_office_file_reason_is_plain_japanese(tmp_path, monkeypatch, use_7z):
+    """zip として壊れた xlsx は、利用者の見ている形式の名前と日本語の理由を出し、生のエラーは補足に短く置く。"""
+    if use_7z and not SEVENZIP.is_file():
+        pytest.skip("vendor/7zip/7z.exe が無い")
+    p = tmp_path / "名簿.xlsx"
+    p.write_bytes(b"PK\x03\x04broken-data-not-a-real-zip" * 10)
+    if not use_7z:
+        import pii_checker.formats.archive as archive
+
+        monkeypatch.setattr(archive, "find_7z", lambda configured: None)
+    r = scan_file(str(p), ScanOptions(sevenzip=str(SEVENZIP) if use_7z else None))
+    it = r.items[0]
+    assert it.status == Status.UNCHECKABLE
+    assert it.kind == "Excel（xlsx）・壊れている可能性"
+    assert it.reason.startswith("ファイルが壊れているか、拡張子どおりの形式ではない可能性があります")
+    notes = "／".join(it.notes)
+    assert "技術情報:" in notes
+    # 一時フォルダのパス・元のファイルのパスは理由にも補足にも出さない
+    for text in (it.reason, notes):
+        assert "piichk_" not in text and str(tmp_path) not in text and "AppData" not in text
+
+
+def test_broken_zip_reason_without_office_extension(tmp_path):
+    """Office でない拡張子の壊れた zip は、形式の名前を変えず、圧縮ソフトで開けるかを確かめる案内を出す。"""
+    p = tmp_path / "資料.zip"
+    p.write_bytes(b"PK\x03\x04broken" * 5)
+    r = scan_file(str(p), ScanOptions(sevenzip=str(SEVENZIP) if SEVENZIP.is_file() else None))
+    it = r.items[0]
+    assert it.status == Status.UNCHECKABLE
+    assert it.kind == "ZIP アーカイブ"
+    assert it.reason.startswith("ファイルが壊れているか、対応していない形式の可能性があります")
+    assert "piichk_" not in it.reason and "piichk_" not in "／".join(it.notes)
+
+
+def test_tech_summary_drops_paths():
+    from pii_checker.formats.archive import tech_summary
+
+    tmp = r"C:\Users\x\AppData\Local\Temp\piichk_ab\tmpcd\壊れ.xlsx"
+    out = (
+        "ppData\\Local\\Temp\n"
+        f"\n\nErrors: 1\n\nERROR: {tmp} : {tmp}\nOpen ERROR: Cannot open the file as [zip] archive\n"
+        "\n\nERRORS:\nIs not archive\n"
+    )
+    got = tech_summary(out, tmp, r"C:\Users\x\AppData\Local\Temp\piichk_ab\tmpcd")
+    assert got == "Cannot open the file as [zip] archive・Is not archive"

@@ -7,8 +7,9 @@
 - 要配慮個人情報を含む … 要配慮個人情報の検出が確度 中以上
 - 財産的被害のおそれ … クレジットカード番号・銀行口座番号の検出が確度 中以上
 - 異なるマイナンバーが 100 を超える … 番号法の報告の規則（本人の数が百人を超える事態）に寄せた目安
-- 異なる個人の値が 1,000 を超える … 個人情報保護法施行規則第7条第4号（本人の数が千人を超える事態）に寄せた目安。
-  人の数は数えられないので、氏名・マイナンバー・メール・電話などのうち、異なる値が最も多い種類の数で代える
+- 人数の目安が 1,000 を超える … 個人情報保護法施行規則第7条第4号（本人の数が千人を超える事態）に寄せた目安。
+  人の数は数えられないので、氏名・マイナンバー・メール・電話などのうち、異なる値が最も多い種類の数（人数の目安）で代える。
+  同じ数の種類が並んだときは PEOPLE_TYPES の順（氏名＞マイナンバー＞メール＞電話＞…）で先のものを選ぶ
 
 異なる値の数は、確度 中以上の値だけを数える（判定の「個人情報の可能性あり」と同じ線）。
 """
@@ -22,7 +23,7 @@ FLAG_LABELS = {
     "sensitive": "要配慮個人情報を含む",
     "financial": "財産的被害のおそれ（カード番号・口座番号）",
     "many_my_number": "異なるマイナンバーが 100 を超える",
-    "many_people": "異なる個人の値が 1,000 を超える",
+    "many_people": "人数の目安が 1,000 を超える",
 }
 # 表の列に並べる短い名前
 FLAG_SHORT = {
@@ -37,7 +38,8 @@ FLAG_ORDER = tuple(FLAG_LABELS)
 MY_NUMBER_LIMIT = 100  # 番号法の報告の規則: 本人の数が百人を超える
 PEOPLE_LIMIT = 1000  # 個人情報保護法施行規則第7条第4号: 本人の数が千人を超える
 
-# 1人に1つずつ付く見込みの強い種類（人の数の目安に使う）。生年月日・性別・年齢は同じ値の人が多いので使わない
+# 1人に1つずつ付く見込みの強い種類（人の数の目安に使う）。生年月日・性別・年齢は同じ値の人が多いので使わない。
+# 並びは、異なる値の数が同じときに選ぶ優先の順（氏名＞マイナンバー＞メール＞電話＞…）
 PEOPLE_TYPES = (
     "name",
     "my_number",
@@ -75,7 +77,7 @@ def distinct_medium(distinct: dict | None) -> dict[str, int]:
     """種類→異なる値の数（確度 中以上）。0 の種類は入れない。"""
     out: dict[str, int] = {}
     for k in distinct or {}:
-        t = k.split(":", 1)[0]
+        t = k.rsplit(":", 1)[0]  # 利用者の規則は「custom/規則の名前:確度」（名前に「:」があっても確度で区切る）
         if t not in out:
             n = _at_least_medium(distinct, t)
             if n:
@@ -84,7 +86,10 @@ def distinct_medium(distinct: dict | None) -> dict[str, int]:
 
 
 def people_estimate(distinct: dict | None) -> tuple[int | None, str]:
-    """(人の数の目安, どの種類で判断したか)。異なる値を数えていない（古い版の検査）なら (None, "")。"""
+    """(人の数の目安, どの種類で判断したか)。異なる値を数えていない（古い版の検査）なら (None, "")。
+
+    同じ数の種類が並んだときは PEOPLE_TYPES の順で先のものを選ぶ（数が多いときだけ後の種類に替える）。
+    """
     if distinct is None:
         return None, ""
     best_n, best_t = 0, ""
@@ -130,11 +135,14 @@ def labels(text: str | None, short: bool = False) -> list[str]:
 
 
 TOTAL_NOTE = "ファイルごとの数の合計。同じ人が複数のファイルにいれば重ねて数えるので上限の目安"
+# 人数の目安の合計は、ファイルごとに「最も多い種類の数」を足したもの。ファイルをまたいだ重なりで多く、
+# 種類の取り方（あるファイルは氏名・別のファイルはメール）で少なくも出るので、上限とは言わない
+PEOPLE_TOTAL_NOTE = "ファイルごとの人数の目安を足したもの。重ねて数えることも、少なく数えることもある目安"
 PER_FILE_NOTE = "ファイルごとの印（100 超・1,000 超）は、そのファイルの中の数で決めたもので、全体の人数ではない"
 
 
 def total_lines(summary: dict) -> list[str]:
-    """ジョブ全体の、異なる値の数の合計の行（マイナンバー・個人の値）。合計が 100・1,000 を超えたら目安として示す。
+    """ジョブ全体の合計の行（異なるマイナンバーの数・人数の目安）。合計が 100・1,000 を超えたら目安として示す。
 
     数えたファイルが無ければ空。合計は、ファイルごとの異なる値の数を足したもの（ファイルをまたいだ重なりは
     値を残していないので除けない）。
@@ -149,7 +157,7 @@ def total_lines(summary: dict) -> list[str]:
         lines.append(f"異なるマイナンバーの数の合計 {mine:,}（{TOTAL_NOTE}）{over}")
     if people:
         over = f"。{PEOPLE_LIMIT:,} を超える（個人情報保護法施行規則の目安）" if people > PEOPLE_LIMIT else ""
-        lines.append(f"異なる個人の値の数の合計 {people:,}（{'同' if mine else TOTAL_NOTE}）{over}")
+        lines.append(f"人数の目安の合計 {people:,}（{PEOPLE_TOTAL_NOTE}）{over}")
     if t.get("uncounted_files"):
         lines.append(f"異なる値を数えていない古い版の検査のファイル {t['uncounted_files']:,} 件は、合計に入れていない")
     lines.append(PER_FILE_NOTE)
@@ -178,8 +186,13 @@ def verdict_lines(summary: dict) -> list[str]:
 
 
 def type_label(pii_type: str) -> str:
+    """種類の日本語名。利用者の規則の規則ごとの鍵（「custom/社員番号」）は「利用者の規則（社員番号）」にする。"""
     from .detectors import PII_TYPES
+    from .userrules import CUSTOM_TYPE, rule_name_of_key
 
+    name = rule_name_of_key(pii_type)
+    if name is not None:
+        return f"{PII_TYPES.get(CUSTOM_TYPE, CUSTOM_TYPE)}（{name}）"
     return PII_TYPES.get(pii_type, pii_type)
 
 

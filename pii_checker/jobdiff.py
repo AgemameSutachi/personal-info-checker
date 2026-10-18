@@ -33,6 +33,8 @@ GONE_FIXED = "fixed"  # 今回は検出が無い（直した・中身が変わ�
 GONE_MISSING = "missing"  # 今回は見つからない（消した・移した・名前を変えた、または見えなかった）
 GONE_UNCHECKED = "unchecked"  # 今回は調べられなかった・まだ調べていない（言い切れない）
 GONE_UNCHECKED_LABEL = "無くなった（調べられなかった）"
+# 今回は見つからないものは、直したとは言えないので札の色を中立にし、名前でも分ける
+GONE_MISSING_LABEL = "無くなった（今回は見つからない）"
 NO_PREVIOUS = "比べる前回の検査がありません（同じ場所を最後まで検査した記録が無い）"
 _BLOCKING = {s.value for s in Status if s.blocks_clean_verdict}
 _STATUS_JA = {s.value: label for s, label in STATUS_LABELS.items()}
@@ -42,7 +44,7 @@ _SETTING_NAMES = {
     "allow_values": "拾わない値（許可リスト）",
     "custom_rules": "自分で足す規則",
     "ocr": "OCR",
-    "raw_sweep": "生データ走査",
+    "raw_sweep": "ファイル全体の文字の走査",
     "deep_image_sweep": "イメージの空き領域の走査",
 }
 # 結果に効かない設定（場所・道具のパス・展開の区切り方・使い回し・接続先・明細の見本の数）
@@ -273,10 +275,13 @@ def compute(store, job_id: str) -> dict:
     }
 
 
+_GONE_LABELS = {GONE_UNCHECKED: GONE_UNCHECKED_LABEL, GONE_MISSING: GONE_MISSING_LABEL}
+
+
 def _row(kind: str, path: str, now: dict | None, before: dict | None, note: str, gone_reason: str = "") -> dict:
     return {
         "kind": kind,
-        "kind_label": GONE_UNCHECKED_LABEL if gone_reason == GONE_UNCHECKED else KIND_LABELS[kind],
+        "kind_label": _GONE_LABELS.get(gone_reason, KIND_LABELS[kind]),
         "top_path": path,
         "n_now": (now or {}).get("n_findings") or 0,
         "n_prev": (before or {}).get("n_findings") or 0,
@@ -296,14 +301,19 @@ def previous_text(prev: dict | None) -> str:
 
 
 def settings_note(d: dict) -> str:
-    """設定・検査器の版が違うときの添え書き（同じなら空）。"""
+    """設定・検査器の版が違うときの添え書き（同じなら空）。
+
+    違いが1件以上なら「違いにはファイルの変化でないものを含みます」、0件なら「ファイルの変化が隠れていることもあります」
+    （設定の違いで、変わったファイルの検出が増減して打ち消し合うこともあるため）。
+    """
     names = d.get("settings_changed") or []
     if not names:
         return ""
-    return (
-        "前回と設定（または検査器の版）が違うため、違いにはファイルの変化でないものを含みます"
-        f"（違うもの: {'・'.join(names)}）"
-    )
+    if any((d.get("counts") or {}).values()):
+        what = "違いにはファイルの変化でないものを含みます"
+    else:
+        what = "ファイルの変化が隠れていることもあります"
+    return f"前回と設定（または検査器の版）が違うため、{what}（違うもの: {'・'.join(names)}）"
 
 
 def counts_text(d: dict) -> str:

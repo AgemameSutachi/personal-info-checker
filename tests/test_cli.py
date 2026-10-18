@@ -221,7 +221,7 @@ def test_cli_prints_diff_line_and_totals(tmp_path, capsys):
     out = capsys.readouterr().out
     line = next(x for x in out.splitlines() if x.startswith("前回との違い:"))
     assert "新しく見つかった 1 件・無くなった 0 件・増えた 0 件・減った 0 件" in line and "前回の検査（" in line
-    assert "異なる個人の値の数の合計 2" in out  # 判定の文にジョブ全体の合計
+    assert "人数の目安の合計 2" in out  # 判定の文にジョブ全体の合計
 
 
 def test_rules_file_help_names_the_format():

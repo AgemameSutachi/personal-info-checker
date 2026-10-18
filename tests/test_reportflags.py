@@ -175,7 +175,11 @@ def test_job_totals_are_shown_in_verdict_excel_and_marked_over_limits(tmp_path):
         in joined
     )
     assert "100 を超える" in joined
-    assert "異なる個人の値の数の合計 1,200（同）" in joined and "1,000 を超える" in joined
+    assert (
+        "人数の目安の合計 1,200（ファイルごとの人数の目安を足したもの。重ねて数えることも、少なく数えることもある目安）"
+        in joined
+    )
+    assert "1,000 を超える" in joined and "上限" not in [x for x in detail if x.startswith("人数の目安の合計")][0]
     assert reportflags.PER_FILE_NOTE in detail
     # Excel の判定シートにも同じ行と、概要の合計の行が出る
     out = tmp_path / "r.xlsx"
@@ -190,6 +194,22 @@ def test_job_totals_are_shown_in_verdict_excel_and_marked_over_limits(tmp_path):
     _save(store2, job2, str(tmp_path / "a.csv"), mine=10, people=20)
     lines = reportflags.total_lines(store2.summary(job2))
     assert lines[0].startswith("異なるマイナンバーの数の合計 10（") and not any("超える" in x for x in lines)
+
+
+def test_people_estimate_ties_follow_fixed_priority():
+    """人数の目安で数が同じときは、氏名＞マイナンバー＞メール＞電話＞… の順で選ぶ（書いた順・辞書の順に左右されない）。"""
+    one = {"phone:medium": 1, "address:medium": 1, "email:medium": 1, "name:medium": 1, "my_number:high": 1}
+    assert reportflags.people_estimate(one) == (1, "name")
+    assert reportflags.people_estimate({"address:medium": 1, "phone:medium": 1}) == (1, "phone")
+    assert reportflags.people_estimate({"phone:medium": 1, "email:medium": 1}) == (1, "email")
+    assert reportflags.people_estimate({"email:medium": 2, "my_number:high": 2, "phone:medium": 2}) == (2, "my_number")
+    # 数が多ければ後の種類でも選ぶ
+    assert reportflags.people_estimate({"name:medium": 1, "phone:medium": 2}) == (2, "phone")
+    assert reportflags.PEOPLE_TYPES[:4] == ("name", "my_number", "email", "phone")
+
+
+def test_per_file_people_flag_wording():
+    assert reportflags.FLAG_LABELS["many_people"] == "人数の目安が 1,000 を超える"
 
 
 def test_financial_short_label_does_not_read_as_happened():

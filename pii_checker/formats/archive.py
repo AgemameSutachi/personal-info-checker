@@ -60,6 +60,78 @@ def find_7z(configured: str | None) -> str | None:
     return None
 
 
+# zip の形の Office・OpenDocument の拡張子 → 利用者が見ている形式の名前（壊れていて zip として開けないときに使う）
+ZIP_BASED_DOCS = {
+    "xlsx": "Excel（xlsx）",
+    "xlsm": "Excel（xlsm）",
+    "xltx": "Excel（xltx）",
+    "xltm": "Excel（xltm）",
+    "docx": "Word（docx）",
+    "docm": "Word（docm）",
+    "dotx": "Word（dotx）",
+    "pptx": "PowerPoint（pptx）",
+    "pptm": "PowerPoint（pptm）",
+    "ppsx": "PowerPoint（ppsx）",
+    "potx": "PowerPoint（potx）",
+    "vsdx": "Visio（vsdx）",
+    "ods": "OpenDocument 表計算（ods）",
+    "odt": "OpenDocument 文書（odt）",
+    "odp": "OpenDocument プレゼンテーション（odp）",
+    "xps": "XPS",
+    "oxps": "XPS",
+}
+BROKEN_DOC_REASON = (
+    "ファイルが壊れているか、拡張子どおりの形式ではない可能性があります。元のアプリで開けるか確かめてください"
+)
+BROKEN_ARCHIVE_REASON = "ファイルが壊れているか、対応していない形式の可能性があります{}。元のアプリ（圧縮ソフト等）で開けるか確かめてください"
+_TECH_MARKERS = (
+    "ERROR:",
+    "Open ERROR",
+    "Is not archive",
+    "Cannot open",
+    "Unexpected end",
+    "Headers Error",
+    "Data Error",
+)
+
+
+def _extension(display: str) -> str:
+    """表示用のパス（アーカイブの中は「外!内」）の最後の名前の拡張子（小文字・点なし）。"""
+    leaf = display.replace("\\", "/").rsplit("!", 1)[-1].rsplit("/", 1)[-1]
+    return leaf.rsplit(".", 1)[-1].lower() if "." in leaf else ""
+
+
+def tech_summary(out: str, *paths: str) -> str:
+    """7-Zip の出力から、利用者に見せてよい短い技術情報を作る（一時フォルダ・ファイルのパスは除く）。"""
+    lines: list[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or not any(m in line for m in _TECH_MARKERS):
+            continue
+        for p in paths:
+            if p:
+                line = line.replace(p, "")
+        line = " ".join(line.replace("Open ERROR:", "").replace("ERROR:", "").replace(" : ", " ").split()).strip(" :")
+        if line and line not in lines:
+            lines.append(line)
+    return "・".join(lines)[:200]
+
+
+def broken_archive(item: ItemResult, blob: Blob, tech: str = "", tried_7z: bool = True) -> Uncheckable:
+    """zip などとして開けなかったときの検査不能（利用者向けの日本語を主に、生のエラーは補足へ短く）。
+
+    拡張子が Office・OpenDocument のものなら、形式の欄を利用者が見ている名前（「Excel（xlsx）・壊れている可能性」）にする。
+    """
+    doc = ZIP_BASED_DOCS.get(_extension(blob.display))
+    if tech:
+        item.notes.append(f"技術情報: {tech}")
+    if doc:
+        item.kind = f"{doc}・壊れている可能性"
+        return Uncheckable(BROKEN_DOC_REASON)
+    hint = "（7-Zip でも開けなかった）" if tried_7z else "（7-Zip を入れると読める場合もある）"
+    return Uncheckable(BROKEN_ARCHIVE_REASON.format(hint))
+
+
 def _fix_zip_name(info: zipfile.ZipInfo) -> str:
     """UTF-8 フラグの無い zip の名前を cp932（日本語 Windows の既定）として読み直す。"""
     name = info.filename
@@ -95,9 +167,9 @@ def handle_zip(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         z = zipfile.ZipFile(f)
     except (zipfile.BadZipFile, OSError) as e:
         if find_7z(ctx.options.sevenzip):
-            item.notes.append(f"Python の zip で開けなかったため 7-Zip で展開（{e}）")
+            item.notes.append(f"Python の zip で開けなかったため 7-Zip で試した（{e}）")
             return handle_with_7z_exe(ctx, blob, item, col, depth, kind="zip")
-        raise Uncheckable(f"zip を開けなかった（壊れている可能性。7-Zip があれば再試行できる）: {e}")
+        raise broken_archive(item, blob, f"zip として開けなかった（{e}）", tried_7z=False)
     with f, z:
         infos = [i for i in z.infolist() if not i.is_dir()]
         needs_7z = any((i.flag_bits & 0x1) or i.compress_type not in SUPPORTED_ZIP_METHODS for i in infos)
@@ -288,7 +360,8 @@ def handle_with_7z_exe(
                 broken_listing = out.strip()[-200:]
             break
         if not any(m in out for m in WRONG_PW_MARKERS):
-            raise Uncheckable(f"7-Zip で開けなかった（壊れているか未対応）: {out.strip()[-300:]}")
+            # 生の出力は一時フォルダのパスを含み、文の途中から始まるので、短くまとめて補足に置く
+            raise broken_archive(item, blob, tech_summary(out, path, os.path.dirname(path)))
     if listing is None:
         raise NeedPassword("archive", _pw_reason(ctx, "アーカイブの一覧自体が暗号化されている"))
     entries = [

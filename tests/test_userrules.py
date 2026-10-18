@@ -421,7 +421,7 @@ def test_cli_allow_and_rules_files(tmp_path, folder, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert (
-        "拾わない値 1 件・自分で足す規則 1 件（社員番号） を使います" in out
+        "拾わない値（許可リスト）1 件・自分で足す規則 1 件（社員番号） を使います" in out
         and "拾わない値（許可リスト）で外した検出 1 件" in out
     )
     store = Store(str(db))
@@ -540,3 +540,59 @@ def test_web_api_takes_settings_and_remembers_them(web):
     st, rep = _call(base, f"/api/jobs/{job_id}/report")
     flat = json.dumps(rep, ensure_ascii=False)
     assert "設定: 拾わない値（許可リスト）" in flat and "1 件（社員番号）" in flat and "090-1234-5678" not in flat
+    # 一覧の内訳・詳細の異なる値・項目の件数は、利用者の規則を規則の名前ごとに出す
+    st, files = _call(base, f"/api/jobs/{job_id}/files?only_findings=true")
+    row = files["rows"][0]
+    assert row["types"] == {"利用者の規則（社員番号）": 1}
+    assert row["distinct"] == {"利用者の規則（社員番号）": 1}
+    st, its = _call(base, f"/api/jobs/{job_id}/items?top_path={urllib.request.quote(row['top_path'])}")
+    assert its[0]["counts"] == {"利用者の規則（社員番号）": 1} and its[0]["distinct"] == {"利用者の規則（社員番号）": 1}
+
+
+def test_custom_counts_and_distinct_are_split_by_rule_name():
+    """利用者の規則は、件数（rule_counts）と異なる値（custom/規則の名前）を規則ごとに数える。種類の件数は今のまま。"""
+    item, col = _collector(rules_text="社員番号 | EMP-\\d{6}\n顧客番号 | C\\d{8} | 高\n")
+    col.add_text("EMP-123456 EMP-123456 EMP-654321 C12345678", "本文")
+    col.finish()
+    assert item.finding_counts == {"custom": 4}
+    assert item.rule_counts == {"社員番号": 3, "顧客番号": 1}
+    assert item.distinct_counts == {"custom/社員番号:medium": 2, "custom/顧客番号:high": 1}
+    from pii_checker import reportflags
+
+    assert reportflags.distinct_text(json.dumps(item.distinct_counts, ensure_ascii=False)) == (
+        "利用者の規則（社員番号） 2・利用者の規則（顧客番号） 1"
+    )
+    assert reportflags.type_label("custom/社:番号") == "利用者の規則（社:番号）"
+    assert reportflags.distinct_medium({"custom/社:番号:medium": 3}) == {"custom/社:番号": 3}
+
+
+def test_split_rule_counts_keeps_totals():
+    from pii_checker.web.server import split_rule_counts
+
+    assert split_rule_counts({"custom": 3, "phone": 1}, '{"社員番号": 2, "顧客番号": 1}') == {
+        "phone": 1,
+        "custom/社員番号": 2,
+        "custom/顧客番号": 1,
+    }
+    # 規則ごとの件数が無い（古い版）・合計が合わないときは分けない
+    assert split_rule_counts({"custom": 3}, "{}") == {"custom": 3}
+    assert split_rule_counts({"custom": 3}, None) == {"custom": 3}
+    assert split_rule_counts({"custom": 3}, '{"社員番号": 2}') == {"custom": 3}
+
+
+@pytest.mark.parametrize("newline", ["\r\n", "\r", "\n"])
+def test_rules_fold_crlf_before_matching(newline):
+    """セル内改行・メールの本文の CR LF・CR でも、行末の規則が各行に当たる。位置は元の本文での位置を返す。"""
+    m = userrules.Matcher([], parse_rules("番号 | ^C\\d{3}$"))
+    text = f"C123{newline}C456{newline}end"
+    hits = m.find(text)
+    assert [h.value for h in hits] == ["C123", "C456"]
+    assert [text[h.start : h.end] for h in hits] == ["C123", "C456"]
+
+
+def test_rules_fold_crlf_positions_after_many_lines():
+    m = userrules.Matcher([], parse_rules("番号 | C\\d{3}$"))
+    text = "\r\n".join(f"x{i} C{i:03d}" for i in range(300))  # WINDOW をまたぐ長さ
+    hits = m.find(text)
+    assert len(hits) == 300
+    assert all(text[h.start : h.end] == h.value for h in hits)

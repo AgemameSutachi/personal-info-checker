@@ -229,6 +229,8 @@ class Store:
             self._conn.execute("ALTER TABLE items ADD COLUMN allowed INTEGER DEFAULT 0")
         if "distinct_counts" not in cols:  # 異なる値の数（古い版の DB では NULL のまま＝数えていない）
             self._conn.execute("ALTER TABLE items ADD COLUMN distinct_counts TEXT")
+        if "rule_counts" not in cols:  # 利用者の規則の名前→件数（古い版の DB では空＝規則ごとに分けていない）
+            self._conn.execute("ALTER TABLE items ADD COLUMN rule_counts TEXT DEFAULT '{}'")
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         for name, decl in FILE_EXTRA_COLUMNS.items():
             if name not in fcols:
@@ -451,8 +453,8 @@ class Store:
             for seq, it in enumerate(result.items):
                 c.execute(
                     "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                    " password_kind, counts, notes, conf_counts, allowed, distinct_counts)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id,
                         result.top_path,
@@ -471,6 +473,7 @@ class Store:
                         json.dumps(it.conf_counts, ensure_ascii=False),
                         it.allowed,
                         json.dumps(it.distinct_counts or {}, ensure_ascii=False),
+                        json.dumps(it.rule_counts or {}, ensure_ascii=False),
                     ),
                 )
                 c.executemany(
@@ -537,9 +540,9 @@ class Store:
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
                 "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                " password_kind, counts, notes, conf_counts, allowed, distinct_counts) SELECT ?, top_path, seq, path,"
-                " kind, status, reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts, allowed,"
-                " distinct_counts FROM items WHERE job_id=? AND top_path=?",
+                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts) SELECT ?, top_path,"
+                " seq, path, kind, status, reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts,"
+                " allowed, distinct_counts, rule_counts FROM items WHERE job_id=? AND top_path=?",
                 (job_id, src["job_id"], top),
             )
             # 印は写さずに決め直す（印の決め方は検査器の版に含めないので、前回の後で変わっていることがある）

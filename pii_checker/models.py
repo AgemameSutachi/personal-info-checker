@@ -90,6 +90,8 @@ class ItemResult:
     # 「種類:確度」→異なる値の数（正規化した値で同じものを1つと数える。確度は同じ値で見た最も高いもの）。
     # 値もハッシュも持たない（数え終えたら捨てる）
     distinct_counts: dict[str, int] = field(default_factory=dict)
+    # 利用者の規則の名前→件数（全数。finding_counts の「custom」を規則ごとに分けたもの。内訳の表示に使う）
+    rule_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

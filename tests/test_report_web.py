@@ -141,4 +141,11 @@ def test_screen_texts_follow_readme():
     assert "ハイフン・括弧の違いは無視し、氏名は「様」などの敬称を外して比べます" in html
     assert "→ 横にスクロールできます" in html
     assert 'head = ["ファイル", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "誰が読めるか"];' in js
-    assert "無くなった" in js and 'x.gone_reason === "unchecked"' in js
+    assert "無くなった" in js and 'unchecked: "needs_password", missing: "neutral"' in js
+    # 「広い許可なし（目安）」と「無くなった（今回は見つからない）」は緑（安全・直った）にしない
+    css = (static / "style.css").read_text(encoding="utf-8")
+    assert ".pill.acc-limited { background: var(--running); }" in css
+    assert ".pill.neutral { background: var(--running); }" in css
+    # 狭い幅の「前回との違い」は、理由を札の下に出して列を隠す
+    assert '#table[data-tab="diff"] .note-inline { display: block;' in css
+    assert "拾わない値（許可リスト）${fmtNum(a)} 件" in js

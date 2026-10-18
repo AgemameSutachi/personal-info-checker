@@ -360,7 +360,7 @@ const ruleLines = (id) => lines(id).filter((s) => !s.startsWith("#")).length;
 function updateAdvNote() {
   const a = ruleLines("#opt-allow"), r = ruleLines("#opt-rules");
   const parts = [];
-  if (a) parts.push(`拾わない値 ${fmtNum(a)} 件`);
+  if (a) parts.push(`拾わない値（許可リスト）${fmtNum(a)} 件`);
   if (r) parts.push(`自分で足す規則 ${fmtNum(r)} 件`);
   $("#adv-note").textContent = parts.length ? `（${parts.join("・")}を使う）` : "";
 }
@@ -822,10 +822,17 @@ async function loadTable() {
     r = await api(`/api/jobs/${id}/diff?${base}&kind=${encodeURIComponent($("#f-diff").value)}`);
     head = ["違い", "ファイル", "今回の件数", "前回の件数", "今回の危険度", "前回の危険度", "理由・補足"];
     const cls = { new: "high", increased: "medium", gone: "scanned", decreased: "scanned" };
-    const diffCls = (x) => (x.kind === "gone" && x.gone_reason === "unchecked" ? "needs_password" : cls[x.kind] || "");
-    rows = r.rows.map((x) => [pill(diffCls(x), x.kind_label), pathCell(x.top_path), `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, x.risk_now && x.risk_now !== "なし" ? pill("r-" + x.risk_now, x.risk_now) : "", x.risk_prev && x.risk_prev !== "なし" ? pill("r-" + x.risk_prev, x.risk_prev) : "", `<td class="note">${esc(x.note)}</td>`]);
+    // 「無くなった」は、検出が無くなった（直した）ものだけ緑。今回は見つからないものは中立、調べられなかったものは要対応の色
+    const goneCls = { unchecked: "needs_password", missing: "neutral" };
+    const diffCls = (x) => (x.kind === "gone" && goneCls[x.gone_reason]) || cls[x.kind] || "";
+    // 狭い幅では「理由・補足」の列を隠し、同じ文を「違い」の札の下に小さく出す（横にずらさなくても理由が読める）
+    rows = r.rows.map((x) => [`<td class="kind">${pill(diffCls(x), x.kind_label)}<div class="small muted note-inline">${esc(x.note)}</div></td>`, pathCell(x.top_path), `<td class="num">${fmtNum(x.n_now)}</td>`, `<td class="num">${fmtNum(x.n_prev)}</td>`, x.risk_now && x.risk_now !== "なし" ? pill("r-" + x.risk_now, x.risk_now) : "", x.risk_prev && x.risk_prev !== "なし" ? pill("r-" + x.risk_prev, x.risk_prev) : "", `<td class="note">${esc(x.note)}</td>`]);
     click = r.rows.map((x) => x.top_path);
-    $("#diff-note").textContent = r.previous ? "※ 前回との違いの要約は、上の「前回との違い」の枠にあります。「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。" : "";
+    // 設定が違う回は、表の上にもその旨を1行出す（要約の枠を見ていなくても、違いの読み方を誤らないように）
+    $("#diff-note").innerHTML = r.previous
+      ? (r.settings_note ? `<span class="diff-settings">※ ${esc(r.settings_note)}</span><br>` : "")
+        + "※ 前回との違いの要約は、上の「前回との違い」の枠にあります。「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。"
+      : "";
     EMPTY_TEXT.diff = r.previous ? "該当する違いはありません。" : r.summary_text;
   } else if (state.tab === "items") {
     r = await api(`/api/jobs/${id}/all_items?${base}`);
@@ -836,12 +843,13 @@ async function loadTable() {
     const t = encodeURIComponent($("#f-type").value), c = encodeURIComponent($("#f-conf").value);
     r = await api(`/api/jobs/${id}/findings?${base}&pii_type=${t}&confidence=${c}`);
     head = ["ファイル", "種類", "確度", "値（マスク済み）", "場所", "前後の文脈"];
-    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<span class="mono">${esc(x.value)}</span>`, esc(x.location), `<span class="small" title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
+    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<span class="mono">${esc(x.value)}</span>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small" title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
     click = r.rows.map((x) => x.top_path);
   }
   // 作り直しの前にフォーカスしていた行を覚えて、後で戻す
   const focusedRow = document.activeElement && document.activeElement.closest && document.activeElement.closest("#table tbody tr[data-i]");
   const focusIdx = focusedRow ? focusedRow.dataset.i : null;
+  $("#table").dataset.tab = state.tab;
   $("#table thead").innerHTML = `<tr>${head.map((h) => `<th scope="col">${esc(h)}</th>`).join("")}</tr>`;
   $("#table tbody").innerHTML = rows.length
     ? rows.map((cells, i) => `<tr class="clickable" data-i="${i}" tabindex="0" title="クリックまたは Enter で詳しく見る">${cells.map((c) => (c.startsWith("<td") ? c : `<td>${c}</td>`)).join("")}</tr>`).join("")
@@ -909,11 +917,11 @@ async function openDetail(topPath) {
         ${it.method ? `<div class="small muted">読み方: ${esc(it.method)}</div>` : ""}
         ${it.notes.length ? `<div class="small muted">補足: ${it.notes.map(esc).join("／")}</div>` : ""}
         ${Object.keys(it.counts).length ? `<div class="small">検出: ${Object.entries(it.counts).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
-        ${it.distinct && Object.keys(it.distinct).length ? `<div class="small">異なる値（確度 中以上）: ${Object.entries(it.distinct).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
+        ${it.distinct && Object.keys(it.distinct).length && !(idx === 0 && marks) ? `<div class="small">異なる値（確度 中以上）: ${Object.entries(it.distinct).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
       </div>`).join("") +
     (f.rows.length
       ? `<h4>検出明細（${f.total > f.rows.length ? `${fmtNum(f.total)} 件のうち ${fmtNum(f.rows.length)} 件を表示` : `全 ${fmtNum(f.total)} 件`}）</h4>
-         <div class="table-wrap"><table><thead><tr><th>種類</th><th>確度</th><th>値</th><th>場所</th><th>文脈</th></tr></thead><tbody>${f.rows.map((x) => `<tr><td class="nowrap">${esc(x.type)}</td><td>${pill(x.confidence, x.confidence_label)}</td><td class="mono">${esc(x.value)}</td><td>${esc(x.location)}</td><td class="small">${esc(x.context)}</td></tr>`).join("")}</tbody></table></div>`
+         <div class="table-wrap"><table><thead><tr><th>種類</th><th>確度</th><th>値</th><th>場所</th><th>文脈</th></tr></thead><tbody>${f.rows.map((x) => `<tr><td class="nowrap">${esc(x.type)}</td><td>${pill(x.confidence, x.confidence_label)}</td><td class="mono">${esc(x.value)}</td><td class="loc">${esc(x.location)}</td><td class="small">${esc(x.context)}</td></tr>`).join("")}</tbody></table></div>`
       : "");
   $("#btn-copy-path").addEventListener("click", async () => {
     $("#detail-msg").textContent = (await copyText(topPath.split("!")[0])) ? "コピーしました" : "コピーできませんでした";

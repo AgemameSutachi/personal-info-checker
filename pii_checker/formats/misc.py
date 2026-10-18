@@ -431,7 +431,7 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
     text = ocr.ocr_image_bytes(data)
     item.method = f"OCR（{w}×{h}px・{frames}ページ）"
     item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
-    col.add_lines(text, location_prefix="OCR ", method="OCR")
+    col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)
 
 
 def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:

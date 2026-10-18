@@ -350,8 +350,26 @@ class Collector:
             nk = f"{pii_type}:{new.value}"
             cc[nk] = cc.get(nk, 0) + 1
 
-    def add_lines(self, text: str, location_prefix: str = "", method: str = "") -> None:
-        """長い本文を行の塊に分けて検査する（位置は「N行目」で示す）。"""
+    def add_id_documents(self, text: str, location: str, method: str = "OCR") -> None:
+        """OCR で読んだ1項目分（画像1枚・PDF の1ページ）の文字から、本人確認書類の写しを見分けて加える。
+
+        同じ書類でもページごとに1件として数える（値が書類の名前なので、値の重複では1件にまとめない）。
+        """
+        if not text:
+            return
+        norm = detectors.normalize(text)
+        for hit in detectors.detect_id_documents(norm, from_ocr=True):
+            self.person_cue = True  # 本人確認書類の写しは、それだけで人と結びつく
+            self._count(hit.pii_type, hit.confidence)
+            self._add_sample(hit, hit.confidence, norm, location, None, method, False, [])
+
+    def add_lines(self, text: str, location_prefix: str = "", method: str = "", ocr: bool = False) -> None:
+        """長い本文を行の塊に分けて検査する（位置は「N行目」で示す）。
+
+        ocr=True は OCR で読んだ1項目分の文字（本人確認書類の写しの判別もする）。
+        """
+        if ocr:
+            self.add_id_documents(text, location_prefix.strip() or "OCR", method or "OCR")
         lines = text.splitlines()
         block = 200
         for i in range(0, len(lines), block):

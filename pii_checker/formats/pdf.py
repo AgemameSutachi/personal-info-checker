@@ -192,7 +192,7 @@ def _ocr_page(ctx: ScanContext, page, col: Collector, no: int) -> tuple[bool, st
         else Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
     )
     text = ocr.ocr_pil_image(img)
-    col.add_lines(text, location_prefix=f"{no}ページ（OCR） ", method="OCR")
+    col.add_lines(text, location_prefix=f"{no}ページ（OCR） ", method="OCR", ocr=True)
     return True, ""
 
 

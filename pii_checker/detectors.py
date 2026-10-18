@@ -12,6 +12,7 @@ import functools
 import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Callable
 
 from .models import Confidence
 
@@ -24,7 +25,12 @@ PII_TYPES: dict[str, str] = {
     "passport": "旅券番号",
     "pension": "基礎年金番号",
     "health_insurance": "保険証の記号番号",
+    "residence_card": "在留カード番号",
+    "resident_code": "住民票コード",
+    "employment_insurance": "雇用保険被保険者番号",
+    "id_document": "本人確認書類の写し",
     "sensitive": "要配慮個人情報",
+    "member_id": "会員・社員などの番号",
     "name": "氏名",
     "address": "住所",
     "postal_code": "郵便番号",
@@ -44,6 +50,10 @@ CRITICAL_TYPES = {
     "passport",
     "pension",
     "health_insurance",
+    "residence_card",
+    "resident_code",
+    "employment_insurance",
+    "id_document",
     "sensitive",
 }
 
@@ -121,6 +131,14 @@ PERSONAL_PHONE_KW = re.compile(r"(自宅|携帯|個人|緊急連絡|本人|実�
 ORDER_KW = re.compile(
     r"(注文|受注|発注|伝票|管理番号|品番|型番|製造番号|シリアル|serial|order|商品コード|jan|s/?n\b)", re.I
 )
+# 型番・伝票番号などの語（値の左にあれば、電話・カード番号の形をしていても製品や伝票の番号とみなして確度 低）
+MODEL_KW = re.compile(
+    r"(型番|品番|製品コード|商品コード|部品番号|図面番号|追跡番号|お?問い?合わせ番号|伝票番号|整理番号|受付番号|"
+    r"(?<![a-z])isbn(?![a-z])|(?<![a-z])jan(?![a-z]))",
+    re.I,
+)
+# 語が無ければ拾わない番号（クレジットカードの Luhn が合わないものを、打ち間違いとして 低 で残すときの語）
+CARD_NUMBER_KW = re.compile(r"(カード番号|クレジット|クレカ|card\s?no|card\s?number)", re.I)
 MONEY_AFTER = re.compile(r"^\s*(円|,|万|千|百|ドル|\.[0-9])")
 MONEY_BEFORE = re.compile(r"(残高|金額|額|振替|手数料|入金|出金|支払|請求)")
 RE_PHONE_BARE = re.compile(rf"{NOT_DIGIT_BEFORE}0[1-9][0-9]{{8,9}}{NOT_DIGIT_AFTER}")
@@ -164,6 +182,30 @@ RE_PASSPORT = re.compile(
 RE_PENSION = re.compile(rf"(?:基礎年金番号|年金番号)[^0-9\n]{{0,12}}?([0-9]{{4}}{H}?[0-9]{{6}})(?![0-9])")
 RE_INSURANCE = re.compile(
     r"(?:被保険者番号|保険者番号|記号番号|保険証番号)[^0-9A-Za-z\n]{0,8}?([0-9A-Za-z][0-9A-Za-z\-]{3,19})"
+)
+# 在留カード番号（英字2＋数字8＋英字2）。語の無いものは型番などと区別できないので拾わない
+RE_RESIDENCE_CARD = re.compile(
+    r"(?:在留カード番号|在留カード)[^A-Za-z0-9\n]{0,12}?([A-Z]{2}[0-9]{8}[A-Z]{2})(?![A-Za-z0-9])"
+)
+# 住民票コード（11桁）。検査数字の算式を公的な資料で確かめられていないので、桁数と語だけで判定する
+RE_RESIDENT_CODE = re.compile(r"住民票コード[^0-9\n]{0,12}?([0-9]{11})(?![0-9])")
+# 雇用保険被保険者番号（4桁-6桁-1桁、区切りの無い11桁も）
+EMPLOYMENT_KW = re.compile(r"雇用保険\s?(?:の\s?)?(?:被保険者\s?)?番号")
+RE_EMPLOYMENT = re.compile(
+    rf"{EMPLOYMENT_KW.pattern}[^0-9\n]{{0,12}}?([0-9]{{4}}{H}[0-9]{{6}}{H}[0-9]|[0-9]{{11}})(?![0-9])"
+)
+# 会員・社員などの番号。それだけでは人を特定しにくいので確度 低（要確認）どまり
+MEMBER_ID_WORDS = r"社員番号|職員番号|従業員番号|会員番号|顧客番号|お客様番号|学籍番号|患者番号|診察券番号"
+RE_MEMBER_ID = re.compile(
+    # 後ろに「年」「件」などの単位が続く数（「会員番号 2024年度から」「会員番号 1200件」）は番号ではない
+    rf"(?:{MEMBER_ID_WORDS})[\s:：]{{0,3}}((?=[0-9A-Za-z\-]*[0-9])[0-9A-Za-z][0-9A-Za-z\-]{{3,19}})"
+    r"(?![0-9A-Za-z\-]|\s?[年月日円件名人個回桁台])"
+)
+# 口座の「金融機関コード-支店番号-口座番号」（4桁-3桁-7桁）の書き方
+RE_BANK_FULL = re.compile(
+    rf"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座|振込先)[^0-9\n]{{0,12}}?"
+    rf"([0-9]{{4}}{H}[0-9]{{3}}{H}[0-9]{{7}})(?![0-9])",
+    re.I,
 )
 NAME_CHARS = r"[一-龥々ぁ-んァ-ヶー]"
 RE_NAME_LABEL = re.compile(
@@ -224,6 +266,11 @@ HEADER_EXACT = {
     "address": "address",
 }
 HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
+    # 「在留カード番号」はカード番号の語を、「雇用保険被保険者番号」は保険証の語（被保険者番号）を含むので先に見る。
+    # 「雇用保険料」の列は番号ではない
+    (re.compile(r"(在留カード番号|在留カードno)", re.I), "residence_card"),
+    (re.compile(r"(雇用保険.{0,6}番号)"), "employment_insurance"),
+    (re.compile(r"(住民票コード)"), "resident_code"),
     (re.compile(r"(マイナンバー|個人番号|mynumber)", re.I), "my_number"),
     (re.compile(r"(カード番号|クレジット|cardno|cardnumber)", re.I), "credit_card"),
     (re.compile(r"(口座番号|口座no|口座)", re.I), "bank_account"),
@@ -231,6 +278,7 @@ HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(旅券|パスポート|passport)", re.I), "passport"),
     (re.compile(r"(年金番号)"), "pension"),
     (re.compile(r"(被保険者番号|保険者番号|保険証|記号番号)"), "health_insurance"),
+    (re.compile(rf"({MEMBER_ID_WORDS})"), "member_id"),
     (
         re.compile(r"(病名|病歴|既往歴|診断|傷病|障害|犯罪|前科|宗教|信条|本籍|信仰)"),
         "sensitive",
@@ -416,6 +464,35 @@ def _context_has(text: str, start: int, end: int, pattern: re.Pattern[str], widt
     return _context_find(text, start, end, pattern, width) is not None
 
 
+def _model_word_before(context_text: str, start: int, width: int = 20) -> str | None:
+    """値の左（width 文字）にある型番・伝票番号などの語。無いか、その語と値のあいだに電話の語があれば None。
+
+    「型番 X-100 TEL 090-…」のように、電話の語が値のすぐ左にあるなら電話の語を優先する。
+    """
+    left = context_text[max(0, start - width) : start]
+    last = None
+    for m in MODEL_KW.finditer(left):
+        last = m
+    if last is None or PHONE_KW.search(left[last.end() :]):
+        return None
+    return last.group(0)
+
+
+def _phone_unless_model(m: re.Match, rule: str, model_word: Callable[[int], str | None], category: str | None) -> Hit:
+    """電話の語つきの番号を 中 で返す。ただし値の左に型番などの語があれば 低 にする（列見出しが電話なら下げない）。"""
+    model = model_word(m.start()) if category != "phone" else None
+    if model:
+        return Hit(
+            "phone",
+            Confidence.LOW,
+            m.group(0),
+            m.start(),
+            m.end(),
+            rule + f"（前に「{model}」の語があり、型番などの番号とみなした）",
+        )
+    return Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), rule)
+
+
 def _landline_context(context_text: str, start: int, end: int) -> tuple[str | None, str | None]:
     """固定電話の近くの (会社の語, 個人の語)。会社の語があり個人の語が無ければ、会社の代表番号とみなす。"""
     return (
@@ -490,6 +567,23 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         if len(re.sub(r"[^0-9A-Za-z]", "", v)) < 4:
             return None
         conf = Confidence.HIGH if category != "health_insurance" else Confidence.MEDIUM
+    elif category == "residence_card":
+        if len(re.sub(r"[^0-9A-Za-z]", "", v)) < 8 or not digits:
+            return None
+        conf = Confidence.HIGH
+    elif category == "resident_code":
+        if len(digits) != 11:
+            return None
+        conf = Confidence.HIGH
+    elif category == "employment_insurance":
+        if len(digits) != 11:
+            return None
+        conf = Confidence.HIGH
+    elif category == "member_id":
+        # 社員番号などの列。数字を含む短い値だけ（それだけでは人を特定しにくいので 低）
+        if not digits or len(v) > 30:
+            return None
+        conf = Confidence.LOW
     elif category in ("gender", "age"):
         conf = Confidence.LOW
     elif category == "sensitive":
@@ -519,6 +613,9 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
     def ctx(start: int, end: int, pattern: re.Pattern[str]) -> bool:
         return _context_has(context_text, start + offset, end + offset, pattern)
 
+    def model_word(start: int) -> str | None:
+        return _model_word_before(context_text, start + offset)
+
     has_digit = any(c.isdigit() for c in text)
 
     if has_digit:
@@ -536,6 +633,18 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
             if any(s <= m.start() < e for s, e in license_spans):
                 continue
             if not my_number_is_valid(digits):
+                if len(set(digits)) > 1 and ctx(m.start(), m.end(), MY_NUMBER_KW):
+                    # 語はあるのに検査数字が合わない: 打ち間違いの可能性があるので、消さずに 低 で残す
+                    hits.append(
+                        Hit(
+                            "my_number",
+                            Confidence.LOW,
+                            m.group(0),
+                            m.start(),
+                            m.end(),
+                            "12桁・個人番号の語あり・検査数字が合わない（打ち間違いの可能性）",
+                        )
+                    )
                 continue
             if ctx(m.start(), m.end(), MY_NUMBER_KW) or category == "my_number":
                 conf, rule = Confidence.HIGH, "12桁・検査数字一致・個人番号の語"
@@ -555,25 +664,50 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
             digits = re.sub(r"[^0-9]", "", raw)
             if not (13 <= len(digits) <= 19) or len(set(digits)) == 1:
                 continue
-            if not (luhn_is_valid(digits) and card_prefix_is_plausible(digits)):
+            if not luhn_is_valid(digits):
+                if ctx(m.start(), m.end(), CARD_NUMBER_KW):
+                    # 語はあるのに Luhn 検査が合わない: 打ち間違いの可能性があるので、消さずに 低 で残す
+                    hits.append(
+                        Hit(
+                            "credit_card",
+                            Confidence.LOW,
+                            raw,
+                            m.start(),
+                            m.end(),
+                            "13〜19桁・カード番号の語あり・Luhn 検査が合わない（打ち間違いの可能性）",
+                        )
+                    )
+                continue
+            if not card_prefix_is_plausible(digits):
                 continue
             grouped = bool(re.fullmatch(r"[0-9]{4}([ \-])[0-9]{4}\1[0-9]{4}\1[0-9]{1,7}", raw))
-            if ctx(m.start(), m.end(), CARD_KW) or category == "credit_card" or grouped:
+            rule = "Luhn一致・ブランド番号体系一致"
+            model = model_word(m.start())
+            if ctx(m.start(), m.end(), CARD_KW) or category == "credit_card":
+                conf = Confidence.HIGH
+            elif ctx(m.start(), m.end(), ORDER_KW) or model:
+                conf = Confidence.LOW  # 注文番号・品番などの偶然の一致（4桁ずつ区切ってあっても）
+                if model:
+                    rule += f"（前に「{model}」の語があり、型番などの番号とみなした）"
+            elif grouped:
                 conf = Confidence.HIGH  # 4桁ずつの区切りは注文番号などではまず見ない書き方
-            elif ctx(m.start(), m.end(), ORDER_KW):
-                conf = Confidence.LOW  # 注文番号・品番などの偶然の一致
             else:
                 conf = Confidence.MEDIUM
-            hits.append(Hit("credit_card", conf, raw, m.start(), m.end(), "Luhn一致・ブランド番号体系一致"))
+            hits.append(Hit("credit_card", conf, raw, m.start(), m.end(), rule))
         for m in RE_MOBILE.finditer(text):
             separated = not m.group(0).isdigit()
+            rule = "携帯電話番号の形"
             if separated or ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
                 conf = Confidence.MEDIUM
+                model = model_word(m.start())
+                if model and category != "phone":
+                    conf = Confidence.LOW
+                    rule += f"（前に「{model}」の語があり、型番などの番号とみなした）"
             elif ctx(m.start(), m.end(), ORDER_KW):
                 continue
             else:
                 conf = Confidence.LOW  # 区切りの無い11桁は製造番号などと区別できない
-            hits.append(Hit("phone", conf, m.group(0), m.start(), m.end(), "携帯電話番号の形"))
+            hits.append(Hit("phone", conf, m.group(0), m.start(), m.end(), rule))
         for m in RE_MOBILE_INTL.finditer(text):
             hits.append(Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "携帯電話番号（+81）"))
         for m in RE_LANDLINE_INTL.finditer(text):
@@ -600,6 +734,9 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
             if company and not personal:
                 conf = Confidence.LOW  # 会社の代表番号（レターヘッド等）
                 rule += f"（近くに「{company}」の語があり、会社の番号とみなした）"
+            elif (model := model_word(m.start())) and category != "phone":
+                conf = Confidence.LOW
+                rule += f"（前に「{model}」の語があり、型番などの番号とみなした）"
             elif ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
                 conf = Confidence.MEDIUM
                 if personal:
@@ -613,14 +750,12 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
             if (ctx(m.start(), m.end(), PHONE_KW) or category == "phone") and not _context_has(
                 context_text, m.start() + offset, m.end() + offset, COMPANY_KW, width=30
             ):
-                hits.append(
-                    Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "電話の語＋空白区切りの番号")
-                )
+                hits.append(_phone_unless_model(m, "電話の語＋空白区切りの番号", model_word, category))
         for m in RE_PHONE_BARE.finditer(text):
             if ctx(m.start(), m.end(), PHONE_KW) or category == "phone":
                 if m.group(0).startswith(NON_PERSONAL_PHONE_PREFIXES):
                     continue
-                hits.append(Hit("phone", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "電話の語＋区切りなし番号"))
+                hits.append(_phone_unless_model(m, "電話の語＋区切りなし番号", model_word, category))
         for m in RE_POSTAL_MARK.finditer(text):
             hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "〒＋7桁"))
         for m in RE_POSTAL_BEFORE_PREF.finditer(text):
@@ -638,15 +773,69 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
             if MONEY_AFTER.match(text[m.end(1) : m.end(1) + 3]) or MONEY_BEFORE.search(text[m.start() : m.start(1)]):
                 continue  # 「口座残高 1234567円」など金額
             hits.append(Hit("bank_account", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "口座の語＋7桁"))
+        for m in RE_BANK_FULL.finditer(text):
+            if MONEY_AFTER.match(text[m.end(1) : m.end(1) + 3]) or MONEY_BEFORE.search(text[m.start() : m.start(1)]):
+                continue
+            hits.append(
+                Hit(
+                    "bank_account",
+                    Confidence.HIGH,
+                    m.group(1),
+                    m.start(1),
+                    m.end(1),
+                    "口座の語＋金融機関コード-支店番号-口座番号",
+                )
+            )
         for m in RE_PENSION.finditer(text):
             hits.append(Hit("pension", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "年金番号の語＋10桁"))
         for m in RE_PASSPORT.finditer(text):
             hits.append(Hit("passport", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "旅券の語＋番号"))
-        for m in RE_INSURANCE.finditer(text):
-            if any(c.isdigit() for c in m.group(1)):
-                hits.append(
-                    Hit("health_insurance", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "保険証の語＋番号")
+        for m in RE_RESIDENCE_CARD.finditer(text):
+            hits.append(
+                Hit("residence_card", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "在留カードの語＋番号")
+            )
+        for m in RE_RESIDENT_CODE.finditer(text):
+            hits.append(
+                Hit("resident_code", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "住民票コードの語＋11桁")
+            )
+        employment_spans: list[tuple[int, int]] = []
+        for m in RE_EMPLOYMENT.finditer(text):
+            employment_spans.append((m.start(1), m.end(1)))
+            hits.append(
+                Hit(
+                    "employment_insurance",
+                    Confidence.HIGH,
+                    m.group(1),
+                    m.start(1),
+                    m.end(1),
+                    "雇用保険の番号の語＋11桁",
                 )
+            )
+        for m in RE_INSURANCE.finditer(text):
+            if not any(c.isdigit() for c in m.group(1)):
+                continue
+            if "雇用保険" in context_text[max(0, m.start() + offset - 20) : m.start(1) + offset]:
+                # 「雇用保険被保険者番号」は保険証の番号ではない。4桁-6桁-1桁の形なら上で拾っている。形が違っても
+                # 落とさず、雇用保険の番号として 中 で残す
+                if not any(s < m.end(1) and m.start(1) < e for s, e in employment_spans):
+                    hits.append(
+                        Hit(
+                            "employment_insurance",
+                            Confidence.MEDIUM,
+                            m.group(1),
+                            m.start(1),
+                            m.end(1),
+                            "雇用保険の番号の語＋番号（4桁-6桁-1桁の形ではない）",
+                        )
+                    )
+                continue
+            hits.append(
+                Hit("health_insurance", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "保険証の語＋番号")
+            )
+        for m in RE_MEMBER_ID.finditer(text):
+            hits.append(
+                Hit("member_id", Confidence.LOW, m.group(1), m.start(1), m.end(1), "会員・社員などの番号の語＋番号")
+            )
 
     # 住所は漢数字だけの番地（六丁目十番一号）もあるので、算用数字の有無に関係なく調べる
     if has_digit or any(c in text for c in "丁番号"):
@@ -679,6 +868,53 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
 
     hits = _dedupe(hits)
     _classify_addresses(hits, context_text, offset)
+    return hits
+
+
+# 本人確認書類の写しの判別（書類の名前, 書類の名前の語, 一緒に載る語）。どちらの語も空白を除いた大文字の文字列で探す
+ID_DOCUMENT_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("運転免許証", ("運転免許証",), ("公安委員会", "免許の条件", "交付")),
+    ("個人番号カード", ("個人番号カード",), ("有効期限", "個人番号", "電子証明書")),
+    ("在留カード", ("在留カード",), ("在留資格", "在留期間", "就労制限")),
+    ("健康保険証", ("被保険者証", "資格確認書"), ("保険者番号", "記号")),
+    ("旅券", ("旅券", "PASSPORT"), ("発行年月日", "有効期間満了日", "DATEOFISSUE")),
+)
+
+
+def detect_id_documents(text: str, from_ocr: bool) -> list[Hit]:
+    """OCR で読んだ1項目（画像1枚・PDF の1ページ）の文字から、本人確認書類の写しを見分ける。
+
+    書類の名前の語と、その書類に必ず載る語の組み合わせが揃えば、書類ごとに1件（値は書類の名前）を返す。
+    OCR で読んだ文字でなければ（from_ocr=False）何も返さない。普通の文書の文字（申込書の見本・説明文の
+    「運転免許証の交付を受けた…」）では写しと区別できないため。
+    text は normalize 済みであること。位置は書類の名前の語の位置（見つからなければ 0）。
+    """
+    if not from_ocr or not text:
+        return []
+    # OCR は文字のあいだに空白を挟むことがあるので、空白を除いてから探す
+    compact = re.sub(r"\s+", "", text).upper()
+    hits: list[Hit] = []
+    for doc, names, companions in ID_DOCUMENT_RULES:
+        name = next((n for n in names if n in compact), None)
+        if name is None:
+            continue
+        # 書類の名前の語そのものに含まれる語（「個人番号カード」の「個人番号」）は、名前の語を除いた残りで探す
+        rest = compact.replace(name, "\0")
+        companion = next((c for c in companions if c in rest), None)
+        if companion is None:
+            continue
+        pos = text.upper().find(name)
+        start, end = (pos, pos + len(name)) if pos >= 0 else (0, 0)
+        hits.append(
+            Hit(
+                "id_document",
+                Confidence.HIGH,
+                doc,
+                start,
+                end,
+                f"OCR の文字に「{name}」と「{companion}」があり、本人確認書類の写しとみなした",
+            )
+        )
     return hits
 
 
@@ -731,6 +967,10 @@ def mask_value(pii_type: str, value: str) -> str:
         "passport",
         "pension",
         "health_insurance",
+        "residence_card",
+        "resident_code",
+        "employment_insurance",
+        "member_id",
         "phone",
     ):
         return _mask_digits_keep_last(v, 4 if len(re.sub(r"[^0-9A-Za-z]", "", v)) > 6 else 2)
@@ -747,6 +987,8 @@ def mask_value(pii_type: str, value: str) -> str:
         return head + re.sub(r"[0-9]", "*", v[len(head) :])
     if pii_type in ("gender", "age"):
         return "＊"
+    if pii_type == "id_document":
+        return v  # 書類の名前（「運転免許証」など）で、個人の値ではない
     return v[:2] + "＊" * max(1, min(len(v) - 2, 8))
 
 
@@ -825,6 +1067,15 @@ CONTEXT_KEEP = {
     "保険証",
     "被保険者番号",
     "記号",
+    "在留カード",
+    "住民票コード",
+    "雇用保険",
+    "社員番号",
+    "職員番号",
+    "会員番号",
+    "顧客番号",
+    "学籍番号",
+    "患者番号",
     "病名",
     "本籍",
     "担当",

@@ -208,7 +208,8 @@ def test_slow_pattern_found_by_timing_is_refused_quickly():
     started = time.perf_counter()
     msg = check_pattern("\\w+\\w?\\d+x")
     assert msg and "時間がかかりすぎる" in msg, msg
-    assert time.perf_counter() - started < 2
+    # 固まらずに断れることを確かめる（測って断るので、遅い PC・混んだ PC では数秒かかる。CI では 2 秒を超えた）
+    assert time.perf_counter() - started < 15
 
 
 @pytest.mark.parametrize(

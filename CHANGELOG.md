@@ -2,6 +2,11 @@
 
 版ごとの主な変更です。配布版（zip）は [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) にあります。
 
+## 1.1.1（2026-10-19）
+
+- 配布版のコマンド版の exe の名前を `pii-checker.exe` から `PiiChecker-cmd.exe` に変えた（アプリ版の `PiiChecker.exe` と名前が似ていて、どちらを開けばよいか迷うため）。タスクスケジューラなどで前の名前を指定していたら、新しい名前に直してください
+- 配布版のフォルダに「はじめにお読みください.txt」（どの exe を開けばよいか）を添えた
+
 ## 1.1.0（2026-10-19）
 
 似た目的の道具（Presidio・sumi・Octopii、国内の有償製品の機能紹介）を参考に、考え方を自分で書き直して取り込みました。

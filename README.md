@@ -18,7 +18,7 @@
 ## すぐ使う
 
 1. [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases/latest) から `PiiChecker-<版>.zip` をダウンロードし、好きな場所に展開する（Python は要りません）
-2. 展開した `PiiChecker` フォルダの `PiiChecker.exe` をダブルクリックする
+2. 展開した `PiiChecker` フォルダの `PiiChecker.exe` をダブルクリックする（隣の `PiiChecker-cmd.exe` はコマンドで使う版で、ダブルクリックでは使いません）
 3. 調べるフォルダを入れて「検査を始める」を押す
 
 初めて起動するとき「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します（署名の無いアプリのため）。展開する前に、zip を右クリック →「プロパティ」→「許可する」にチェックを入れておくと出ません。
@@ -41,8 +41,8 @@
 | 使い方 | 起動のしかた | 向いているとき |
 | --- | --- | --- |
 | アプリ版（デスクトップアプリ） | `PiiChecker.exe` をダブルクリック | ふだんはこれ |
-| Web 版（ブラウザ） | `pii-checker.exe serve` | ブラウザで操作したいとき |
-| コマンド版 | `pii-checker.exe scan …` | 定期実行・無人実行（「コマンドで使う」の節） |
+| Web 版（ブラウザ） | `PiiChecker-cmd.exe serve` | ブラウザで操作したいとき |
+| コマンド版 | `PiiChecker-cmd.exe scan …` | 定期実行・無人実行（「コマンドで使う」の節） |
 
 - コマンド版・Web 版は、エクスプローラーで `PiiChecker` フォルダを開き、アドレス欄に `cmd` と打って Enter で出る窓から打ちます
 - アプリ版と Web 版は同じ画面です。WebView2 が無い PC では、アプリ版も同じ画面を既定のブラウザで開き、小さなメッセージの窓が出ます。**このメッセージの窓を閉じる（OK を押す）と検査が中断する**ので、検査が終わるまで閉じないでください
@@ -54,7 +54,7 @@
 ほかの PC から Web 版を使うときは、次のように起動します。
 
 ```
-pii-checker.exe serve --host 0.0.0.0 --token <推測されにくい長い合言葉>
+PiiChecker-cmd.exe serve --host 0.0.0.0 --token <推測されにくい長い合言葉>
 ```
 
 - ブラウザは自動では開きません。ほかの PC で、表示された URL の `127.0.0.1` をこの PC の名前か IP アドレス（`ipconfig` で確かめる）に置き換えて開きます（ポートは 8765）
@@ -347,33 +347,33 @@ Excel のシートと画面の対応は次のとおりです。
 
 ## コマンドで使う
 
-コマンド版 `pii-checker.exe` は、タスクスケジューラでの定期検査など、人が画面にいないときに使います。結果は画面の版と同じ場所に保存され、画面からも見られます。
+コマンド版 `PiiChecker-cmd.exe` は、タスクスケジューラでの定期検査など、人が画面にいないときに使います。結果は画面の版と同じ場所に保存され、画面からも見られます。
 
 ```
 # フォルダを検査して Excel と CSV を出す
-pii-checker.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
+PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
 
 # 分かっているパスワードをファイルで渡す（UTF-8・1行1つ）
-pii-checker.exe scan \\nas01\総務 --password-file pw.txt
+PiiChecker-cmd.exe scan \\nas01\総務 --password-file pw.txt
 
 # 無人で走らせる（最後にパスワードを聞かない）
-pii-checker.exe scan \\nas01\総務 --no-ask -o 結果.xlsx
+PiiChecker-cmd.exe scan \\nas01\総務 --no-ask -o 結果.xlsx
 
 # 接続方式で指定する（パスワードはコンソールで聞かれる）
-pii-checker.exe scan --connect smb --host nas01 --share 総務 --path 2024年度 --user taro
-pii-checker.exe scan --connect ftps --host 192.168.0.5 --path 共有/総務 --user taro
+PiiChecker-cmd.exe scan --connect smb --host nas01 --share 総務 --path 2024年度 --user taro
+PiiChecker-cmd.exe scan --connect ftps --host 192.168.0.5 --path 共有/総務 --user taro
 
 # 中断した検査の続き・一覧・レポートの出し直し
-pii-checker.exe scan --resume <ジョブID>
-pii-checker.exe jobs
-pii-checker.exe report <ジョブID> -o 結果.xlsx
+PiiChecker-cmd.exe scan --resume <ジョブID>
+PiiChecker-cmd.exe jobs
+PiiChecker-cmd.exe report <ジョブID> -o 結果.xlsx
 ```
 
 | 引数 | 意味 |
 | --- | --- |
 | `-o` / `--output` | レポート（.xlsx）の出力先。省くとドキュメントへ `個人情報チェッカー_<ジョブID>.xlsx` |
 | `--csv` | `検出明細_<ジョブID>.csv` と `全項目_<ジョブID>.csv` も、xlsx と同じフォルダへ出す |
-| `--resume <ジョブID>` | 中断した検査の続きから進める（ジョブID は `pii-checker.exe jobs` で分かる）。接続方式の検査では接続のパスワードをもう一度聞く |
+| `--resume <ジョブID>` | 中断した検査の続きから進める（ジョブID は `PiiChecker-cmd.exe jobs` で分かる）。接続方式の検査では接続のパスワードをもう一度聞く |
 | `--password-file` | 試すパスワードの一覧。`--resume` と一緒に使うと、後で分かったパスワードを要パスワードの全件に試す |
 | `--no-ask` | 最後にパスワードを聞かない（無人実行用） |
 | `--no-reuse` | 前回の結果を使わず全部読み直す |
@@ -402,7 +402,7 @@ pii-checker.exe report <ジョブID> -o 結果.xlsx
 タスクスケジューラで毎週月曜 7 時に検査する例（1行で登録します。`-o` の `{job}` はジョブ ID に置き換わります）:
 
 ```
-schtasks /Create /TN "個人情報チェッカー 週次" /SC WEEKLY /D MON /ST 07:00 /TR "\"C:\PiiChecker\pii-checker.exe\" scan \\nas01\総務 --no-ask --exit-by-verdict --csv -o D:\点検\個人情報チェッカー_{job}.xlsx"
+schtasks /Create /TN "個人情報チェッカー 週次" /SC WEEKLY /D MON /ST 07:00 /TR "\"C:\PiiChecker\PiiChecker-cmd.exe\" scan \\nas01\総務 --no-ask --exit-by-verdict --csv -o D:\点検\個人情報チェッカー_{job}.xlsx"
 ```
 
 結果はタスクスケジューラの「前回の実行結果」に出ます: 0x0 = 検出なし、0x1 = 個人情報の可能性あり（レポートを確かめる）、0x4 = 要確認・言い切れない（「要対応」シートを確かめる）、0x2 = 指定の誤り（場所・接続を直す）、0x3 = 途中で止めた（`--resume <ジョブID>` で続きから）。0x1 でもレポートが出ていなければ、実行そのものの失敗（exe の場所・実行するアカウントの権限・「開始」のフォルダなど）を疑ってください（Windows がプログラムを起動できなかったときも 0x1 になることがあります）。接続方式でユーザー名を付けて定期実行するときは `--conn-password-file` も指定します。

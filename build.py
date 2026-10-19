@@ -4,10 +4,11 @@
 
 dist/PiiChecker/ に次をまとめる:
   PiiChecker.exe       … アプリ版（窓）。引数を付ければ CLI としても動く
-  pii-checker.exe      … コマンド版（コンソール）
+  PiiChecker-cmd.exe   … コマンド版（コンソール）
   7z/                  … 7-Zip（LGPL。License.txt を同梱）。この PC の 7-Zip から写す
   python32/            … 32bit の Python 埋め込み版＋ access32_helper.py（Access 97 等を読む補助）
   LICENSE.txt / THIRD-PARTY-LICENSES.txt … このツールと、同梱する依存のライセンス文
+  はじめにお読みください.txt … どの exe を開けばよいかの短い説明
 作業用のフォルダは build/ と dist/ の下にだけ作る。
 """
 
@@ -53,7 +54,7 @@ def make(script, name, console):
     return a, exe
 
 a1, exe1 = make(r'{root}/entry_app.py', 'PiiChecker', False)
-a2, exe2 = make(r'{root}/entry_cli.py', 'pii-checker', True)
+a2, exe2 = make(r'{root}/entry_cli.py', 'PiiChecker-cmd', True)
 coll = COLLECT(exe1, a1.binaries, a1.datas, exe2, a2.binaries, a2.datas, upx=False, name='PiiChecker')
 """
 
@@ -158,6 +159,31 @@ def write_licenses() -> None:
     print(f"ライセンス文を同梱: {DIST / 'THIRD-PARTY-LICENSES.txt'}")
 
 
+FIRST_README = """個人情報チェッカー {version}
+
+■ どれを開けばよいか
+  PiiChecker.exe       … ふだんはこれをダブルクリックします（画面で操作するアプリ版）
+  PiiChecker-cmd.exe   … コマンドで使う版です。ダブルクリックでは使いません
+                          （Web 版の起動・タスクスケジューラでの定期検査などに使う）
+
+■ 中身
+  7z\\・python32\\・_internal\\ … 動かすのに要る部品です。消したり動かしたりしないでください
+  LICENSE.txt・THIRD-PARTY-LICENSES.txt … ライセンス文
+
+使い方の詳細: https://github.com/AgemameSutachi/personal-info-checker#readme
+"""
+
+
+def write_first_readme() -> None:
+    """配布フォルダに、どの exe を開けばよいかを書いた短い説明を置く（exe が2つあって迷わないように）。"""
+    from pii_checker import __version__
+
+    DIST.mkdir(parents=True, exist_ok=True)
+    # メモ帳で文字化けしないよう BOM 付きの UTF-8・CRLF で書く
+    with open(DIST / "はじめにお読みください.txt", "w", encoding="utf-8-sig", newline="\r\n") as f:
+        f.write(FIRST_README.format(version=__version__))
+
+
 def add_python32(zip_path: str | None) -> None:
     dst = DIST / "python32"
     dst.mkdir(parents=True, exist_ok=True)
@@ -208,6 +234,7 @@ def main() -> int:
     )
     copy_7zip()
     write_licenses()
+    write_first_readme()
     if not args.skip_python32:
         add_python32(args.python32_zip)
     print(f"\n完成: {DIST}")

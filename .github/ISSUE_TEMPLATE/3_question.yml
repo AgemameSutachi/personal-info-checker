@@ -17,4 +17,4 @@ body:
     id: version
     attributes:
       label: 版
-      description: "`pii-checker.exe --version` の出力"
+      description: "`PiiChecker-cmd.exe --version` の出力"

@@ -44,16 +44,16 @@ STATE_JA = {
     "created": "準備中",
 }
 EPILOG = r"""使用例:
-  pii-checker scan \\nas01\総務 -o 結果.xlsx          NAS の共有フォルダを検査して Excel にまとめる
-  pii-checker scan D:\共有 --password-file pw.txt     分かっているパスワードを全部の暗号化ファイルに試す
-  pii-checker scan --resume <ジョブID>                中断した検査の続き
-  pii-checker scan D:\共有 --allow-file 許可.txt --rules-file 規則.txt
-                                                     拾わない値・自分で足す規則を使う
-  pii-checker scan \\nas01\総務 --no-ask --exit-by-verdict
-                                                     定期検査（判定を終了コード 0/1/4 で返す）
-  pii-checker serve                                  ブラウザで操作する（Web 版）
-  pii-checker app                                    窓で操作する（アプリ版。引数なしでも起動）
-（開発環境では pii-checker の代わりに python -m pii_checker）
+  PiiChecker-cmd scan \\nas01\総務 -o 結果.xlsx          NAS の共有フォルダを検査して Excel にまとめる
+  PiiChecker-cmd scan D:\共有 --password-file pw.txt     分かっているパスワードを全部の暗号化ファイルに試す
+  PiiChecker-cmd scan --resume <ジョブID>                中断した検査の続き
+  PiiChecker-cmd scan D:\共有 --allow-file 許可.txt --rules-file 規則.txt
+                                                        拾わない値・自分で足す規則を使う
+  PiiChecker-cmd scan \\nas01\総務 --no-ask --exit-by-verdict
+                                                        定期検査（判定を終了コード 0/1/4 で返す）
+  PiiChecker-cmd serve                                  ブラウザで操作する（Web 版）
+  PiiChecker-cmd app                                    窓で操作する（アプリ版。引数なしでも起動）
+（開発環境では PiiChecker-cmd の代わりに python -m pii_checker）
 """
 
 
@@ -391,12 +391,12 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
 
     print(f"\n{cli_line(compute(store, job_id))}")
     if store.files_with_status(job_id, ["needs_password"]):
-        print(f"  パスワードが分かれば: pii-checker scan --resume {job_id} --password-file パスワード一覧.txt")
+        print(f"  パスワードが分かれば: PiiChecker-cmd scan --resume {job_id} --password-file パスワード一覧.txt")
     if store.pending_files(job_id) or store.job(job_id)["state"] in (
         "interrupted",
         "cancelled",
     ):
-        print(f"  中断した続きを調べるには: pii-checker scan --resume {job_id}")
+        print(f"  中断した続きを調べるには: PiiChecker-cmd scan --resume {job_id}")
     if store.job(job_id)["state"] in ("interrupted", "cancelled", "error"):
         # 無人で回すとき（タスクスケジューラ等）に、最後まで終わらなかったことを終了コードで分かるようにする
         return EXIT_INTERRUPTED
@@ -489,7 +489,7 @@ def cmd_app(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        prog="pii-checker",
+        prog="PiiChecker-cmd",
         description="フォルダ内の個人情報らしきものを探してレポートにする",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

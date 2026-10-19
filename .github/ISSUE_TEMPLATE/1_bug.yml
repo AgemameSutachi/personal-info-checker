@@ -30,7 +30,7 @@ body:
     id: version
     attributes:
       label: 版
-      description: "`pii-checker.exe --version` の出力（Excel のレポートの「判定」シートの「ツール」にも載っています）"
+      description: "`PiiChecker-cmd.exe --version` の出力（Excel のレポートの「判定」シートの「ツール」にも載っています）"
     validations:
       required: true
   - type: dropdown

@@ -7,6 +7,8 @@
 - Host ヘッダーを確かめ（DNS リバインディング対策）、書き込み系の API には独自ヘッダーを要求する
   （他の Web ページからのなりすまし送信を防ぐ）。
 - パスワードはメモリ上の JobRunner にだけ渡し、保存しない。
+- 保存・レポートには伏せた値だけを残す。画面の詳細では、そのファイルを読み直して検出した値そのものを
+  メモリの中だけで返す（/api/jobs/{id}/reveal。ほかの API と同じトークンの守りの内側）。
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from .. import __version__, folderacl, jobdiff, reportflags
 from ..detectors import PII_TYPES
 from ..models import STATUS_LABELS, Confidence, PasswordBook, ScanOptions, Status
 from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
+from ..reveal import RevealService
 from ..remote import ENCODINGS, KINDS, ConnectError, Connection, ftp_check, smb_connect, smb_disconnect
 from ..safeio import NETWORK_LOST_MSG, NetworkLost, output_inside_roots
 from ..store import Store
@@ -111,6 +114,8 @@ def create_app(
     app.state.token = token or secrets.token_urlsafe(24)
     app.state.store = store
     app.state.registry = registry
+    reveal_service = RevealService(store, registry)
+    app.state.reveal = reveal_service
     # ホスト名は大文字小文字を区別しない（ブラウザは小文字で送るが、gethostname() は「Office-PC」のように大文字を含む）
     # 許可する側は名前そのもの（ポートは付かない。IPv6 は「::1」とも「[::1]」とも書ける）
     hosts = {h.strip().strip("[]").lower() for h in (allowed_hosts or set(LOCAL_HOSTS))} - {""}
@@ -477,7 +482,20 @@ def create_app(
         if r and r.running:
             raise HTTPException(409, "実行中のジョブは削除できません。先に中止してください")
         store.delete_job(job_id)
+        reveal_service.forget_job(job_id)
         return {"ok": True}
+
+    @app.post("/api/jobs/{job_id}/reveal")
+    def reveal(job_id: str, payload: dict = Body(...)):
+        """ファイル1件を読み直して、検出した値そのものを返す（メモリの中だけ。保存しない）。
+
+        すぐには終わらないので、始めてから同じ呼び出しを繰り返して状態（running / done / error）を見る。
+        """
+        _job_or_404(job_id)
+        top_path = payload.get("top_path")
+        if not isinstance(top_path, str) or not top_path:
+            raise HTTPException(400, "ファイルのパスを指定してください")
+        return reveal_service.request(job_id, top_path)
 
     def _page(sql: str, args: tuple, offset: int, limit: int):
         limit = max(1, min(limit, 500))
@@ -660,7 +678,7 @@ def create_app(
     ):
         _job_or_404(job_id)
         sql = (
-            "SELECT i.path, f.pii_type, f.confidence, f.masked_value, f.location, f.context, f.rule, f.method, f.top_path "
+            "SELECT i.path, f.pii_type, f.confidence, f.masked_value, f.location, f.context, f.rule, f.method, f.top_path, f.rowid "
             "FROM findings f JOIN items i ON i.job_id=f.job_id AND i.top_path=f.top_path AND i.seq=f.item_seq "
             "WHERE f.job_id=? AND i.path LIKE ?"
         )
@@ -690,6 +708,7 @@ def create_app(
                     "rule": r[6],
                     "method": r[7],
                     "top_path": r[8],
+                    "fid": r[9],  # 読み直した値との突き合わせに使う行 ID
                 }
                 for r in rows
             ],

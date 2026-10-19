@@ -328,6 +328,8 @@ class Store:
 
     def create_job(self, roots: list[str], options: ScanOptions, name: str = "") -> str:
         job_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+        saved_options = asdict(options)
+        saved_options.pop("reveal", None)  # 読み直し専用の設定は保存しない
         with self.tx() as c:
             c.execute(
                 "INSERT INTO jobs(id, created, name, roots, options, state) VALUES (?,?,?,?,?,?)",
@@ -336,7 +338,7 @@ class Store:
                     time.time(),
                     name or self.default_job_name(roots),
                     json.dumps(roots, ensure_ascii=False),
-                    json.dumps(asdict(options), ensure_ascii=False),
+                    json.dumps(saved_options, ensure_ascii=False),
                     "created",
                 ),
             )

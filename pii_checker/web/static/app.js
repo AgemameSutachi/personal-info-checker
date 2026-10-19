@@ -463,6 +463,7 @@ function setTab(name) {
   $("#f-type").classList.toggle("hidden", name !== "findings");
   $("#f-conf").classList.toggle("hidden", name !== "findings");
   $("#sample-note").classList.toggle("hidden", name !== "findings");
+  $("#rv-mask-wrap").classList.toggle("hidden", name !== "findings");
   $("#f-diff").classList.toggle("hidden", name !== "diff");
   $("#diff-note").classList.toggle("hidden", name !== "diff");
 }
@@ -549,7 +550,7 @@ async function refreshJob(reloadTable = false) {
 
   // 最初のタブ: 検出があり要対応が無ければ「個人情報の可能性があるファイル」から見せる
   if (!state.tab) setTab(j.attention_total === 0 && s.files_with_findings > 0 ? "hits" : "attention");
-  $("#sample-note").textContent = `明細は1つの項目につき、種類と確度ごとに最大 ${j.max_samples} 件まで残します（件数は判定にすべて数えています）。同じ値は1件にまとめます。`;
+  $("#sample-note").textContent = `明細は1つの項目につき、種類と確度ごとに最大 ${j.max_samples} 件まで残します（件数は判定にすべて数えています）。同じ値は1件にまとめます。保存とレポートには伏せた値だけを残します。「値を表示」を押すと、そのファイルを読み直して検出した値を出します（保存しません）。`;
 
   // 実行中は表も更新し、終わった瞬間にも一度読み直す（数字の食い違いを残さない）
   const justFinished = state.wasRunning && !j.running;
@@ -844,8 +845,10 @@ async function loadTable() {
   } else {
     const t = encodeURIComponent($("#f-type").value), c = encodeURIComponent($("#f-conf").value);
     r = await api(`/api/jobs/${id}/findings?${base}&pii_type=${t}&confidence=${c}`);
-    head = ["ファイル", "種類", "確度", "値（マスク済み）", "場所", "前後の文脈"];
-    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<span class="mono">${esc(x.value)}</span>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small" title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
+    head = ["ファイル", "種類", "確度", "値", "場所", "前後の文脈"];
+    // 値と文脈は、はじめは伏せた値。「値を表示」でそのファイルを読み直すと、検出した値そのものに置き換える（保存はしない）
+    const rvAttr = (x, masked) => `data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(masked)}"`;
+    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<td class="nowrap"><span class="mono rv-value" ${rvAttr(x, x.value)}>${esc(x.value)}</span> <button type="button" class="rv-btn small" data-top="${esc(x.top_path)}" title="元のファイルを読み直して、検出した値を出します（保存しません）">値を表示</button></td>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small rv-ctx" ${rvAttr(x, x.context)} title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
     click = r.rows.map((x) => x.top_path);
   }
   // 作り直しの前にフォーカスしていた行を覚えて、後で戻す
@@ -859,8 +862,9 @@ async function loadTable() {
   $("#table tbody").querySelectorAll("tr[data-i]").forEach((tr) => {
     const open = () => openDetail(click[+tr.dataset.i]);
     tr.addEventListener("click", open);
-    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) open(); });
   });
+  if (state.tab === "findings") setupRevealButtons();
   if (focusIdx !== null) {
     const again = $(`#table tbody tr[data-i="${focusIdx}"]`);
     if (again) again.focus();
@@ -923,7 +927,8 @@ async function openDetail(topPath) {
       </div>`).join("") +
     (f.rows.length
       ? `<h4>検出明細（${f.total > f.rows.length ? `${fmtNum(f.total)} 件のうち ${fmtNum(f.rows.length)} 件を表示` : `全 ${fmtNum(f.total)} 件`}）</h4>
-         <div class="table-wrap"><table><thead><tr><th>種類</th><th>確度</th><th>値</th><th>場所</th><th>文脈</th></tr></thead><tbody>${f.rows.map((x) => `<tr><td class="nowrap">${esc(x.type)}</td><td>${pill(x.confidence, x.confidence_label)}</td><td class="mono">${esc(x.value)}</td><td class="loc">${esc(x.location)}</td><td class="small">${esc(x.context)}</td></tr>`).join("")}</tbody></table></div>`
+         <div class="rv-bar small"><span id="rv-status" class="muted" role="status"></span> <label><input type="checkbox" id="rv-mask"${state.maskValues ? " checked" : ""}> 伏せて表示</label></div>
+         <div class="table-wrap"><table><thead><tr><th>種類</th><th>確度</th><th>値</th><th>場所</th><th>文脈</th></tr></thead><tbody>${f.rows.map((x) => `<tr><td class="nowrap">${esc(x.type)}</td><td>${pill(x.confidence, x.confidence_label)}</td><td class="mono rv-value" data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(x.value)}">${esc(x.value)}</td><td class="loc">${esc(x.location)}</td><td class="small rv-ctx" data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(x.context)}">${esc(x.context)}</td></tr>`).join("")}</tbody></table></div>`
       : "");
   $("#btn-copy-path").addEventListener("click", async () => {
     $("#detail-msg").textContent = (await copyText(topPath.split("!")[0])) ? "コピーしました" : "コピーできませんでした";
@@ -935,6 +940,130 @@ async function openDetail(topPath) {
     $("#detail-msg").textContent = r && r.error ? r.error : "";
   });
   $("#detail-dialog").showModal();
+  const mine = ++detailToken;
+  detailReveal = null;
+  if (f.rows.length) {
+    // 開いたら自動で元のファイルを読み直し、検出した値と文脈を出す（読み直しの間は伏せた値を出しておく）
+    const big = fileRow && fileRow.size >= REVEAL_BIG_BYTES;
+    setRevealStatus({ state: "running", elapsed: 0 }, big);
+    revealFile(topPath, (r) => {
+      detailReveal = r;
+      setRevealStatus(r, big);
+      paintValues($("#detail-body"), topPath, r);
+    }, () => detailToken === mine && $("#detail-dialog").open);
+  }
+}
+
+// ---------------------------------------------------------------- 検出した値の表示（元のファイルを読み直す）
+// 保存とレポートには伏せた値だけを残す。画面では、そのファイルを読み直して検出した値そのものを出す
+// （サーバーのメモリの中だけで受け渡し、ディスクには書かない。ここでも画面の中に短時間持つだけ）。
+const REVEAL_KEEP_MS = 10 * 60 * 1000;
+const REVEAL_BIG_BYTES = 50 * 1024 * 1024; // これ以上は時間がかかる旨を出す（サーバーの BIG_FILE_BYTES と同じ）
+const revealCache = new Map(); // `${jobId}\n${top_path}` → { at, result }（読み終えたものだけ）
+state.maskValues = false; // true で伏せた値を出す。既定は検出した値そのもの
+let detailToken = 0; // 詳細を開くたびに増やす（閉じた・別のファイルを開いた後の読み直しを止める）
+let detailReveal = null;
+
+const revealKey = (jobId, topPath) => `${jobId}\n${topPath}`;
+function revealCached(topPath) {
+  const hit = revealCache.get(revealKey(state.jobId, topPath));
+  if (!hit) return null;
+  if (Date.now() - hit.at > REVEAL_KEEP_MS) { revealCache.delete(revealKey(state.jobId, topPath)); return null; }
+  return hit.result;
+}
+
+// 読み直しを始め、終わるまで1秒ごとに状態を見る。状態が変わるたびに onUpdate(結果) を呼ぶ。alive() が false なら止める
+async function revealFile(topPath, onUpdate, alive = () => true) {
+  const jobId = state.jobId;
+  const cached = revealCached(topPath);
+  if (cached) { onUpdate(cached); return cached; }
+  while (alive() && state.jobId === jobId) {
+    let r;
+    try {
+      r = await api(`/api/jobs/${encodeURIComponent(jobId)}/reveal`, { method: "POST", body: JSON.stringify({ top_path: topPath }) });
+    } catch (e) {
+      r = { state: "error", message: e.message };
+    }
+    if (!alive()) return null;
+    if (r.state === "done") revealCache.set(revealKey(jobId, topPath), { at: Date.now(), result: r });
+    onUpdate(r);
+    if (r.state !== "running") return r;
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  return null;
+}
+
+// root の中の値・文脈の欄を、読み直した結果（または伏せた値）で書き換える。topPath が null なら全部
+function paintValues(root, topPath, result) {
+  const done = result && result.state === "done";
+  root.querySelectorAll(".rv-value, .rv-ctx").forEach((el) => {
+    if (topPath !== null && el.dataset.top !== topPath) return;
+    const isValue = el.classList.contains("rv-value");
+    const v = done ? result.values[el.dataset.fid] : null;
+    if (v && !state.maskValues) {
+      el.textContent = isValue ? v.value : v.context;
+      if (isValue) el.title = "";
+    } else {
+      el.textContent = el.dataset.masked;
+      if (isValue) el.title = done && !v ? "元のファイルが変わったため表示できません" : "";
+    }
+  });
+}
+
+function setRevealStatus(r, big) {
+  const el = $("#rv-status");
+  if (!el) return;
+  if (r.state === "running") {
+    el.textContent = "検出した値を読み込み中…（元のファイルを読み直しています。伏せた値を先に出しています）"
+      + (big ? " 大きなファイルのため、時間がかかります。" : "")
+      + (r.elapsed >= 5 ? ` ${Math.floor(r.elapsed)} 秒経過` : "");
+  } else if (r.state === "done") {
+    el.textContent = r.notice
+      ? r.notice
+      : (state.maskValues ? "検出した値は伏せて表示しています。" : "検出した値を表示しています（元のファイルを読み直した結果。保存していません）。");
+  } else {
+    el.textContent = `検出した値を表示できません: ${r.message}（伏せた値を表示しています）`;
+  }
+}
+
+// 「伏せて表示」の切り替え（詳細の窓と検出明細の表で同じ設定を使う）
+function setMask(on) {
+  state.maskValues = on;
+  document.querySelectorAll("#rv-mask, #rv-mask-table").forEach((c) => { c.checked = on; });
+  if ($("#rv-status") && detailReveal) setRevealStatus(detailReveal, false);
+  const tops = new Set([...document.querySelectorAll("#table .rv-value")].map((el) => el.dataset.top));
+  tops.forEach((t) => paintValues($("#table"), t, revealCached(t)));
+  if ($("#detail-dialog").open && detailReveal) {
+    const el = $("#detail-body .rv-value");
+    if (el) paintValues($("#detail-body"), el.dataset.top, detailReveal);
+  }
+}
+$("#rv-mask-table").addEventListener("change", (e) => setMask(e.target.checked));
+$("#detail-body").addEventListener("change", (e) => { if (e.target.id === "rv-mask") setMask(e.target.checked); });
+
+// 検出明細の表: 読み直し済みのファイルは値を出し、まだのファイルには行ごとの「値を表示」を生かす
+function setupRevealButtons() {
+  const table = $("#table");
+  const done = (top, r) => {
+    paintValues(table, top, r);
+    table.querySelectorAll(".rv-btn").forEach((b) => { if (b.dataset.top === top) b.remove(); });
+  };
+  new Set([...table.querySelectorAll(".rv-value")].map((el) => el.dataset.top)).forEach((top) => {
+    const r = revealCached(top);
+    if (r) done(top, r);
+  });
+  table.querySelectorAll(".rv-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const top = btn.dataset.top;
+      const mine = [...table.querySelectorAll(".rv-btn")].filter((b) => b.dataset.top === top);
+      mine.forEach((b) => { b.disabled = true; b.textContent = "読み込み中…"; });
+      revealFile(top, (r) => {
+        if (r.state === "done") done(top, r);
+        else if (r.state === "error") mine.forEach((b) => { b.disabled = false; b.textContent = "表示できません"; b.title = r.message; });
+      }, () => table.isConnected && state.tab === "findings");
+    });
+  });
 }
 
 // 背景をクリックしてもダイアログを閉じる。閉じたら開く前にいた場所へフォーカスを戻す

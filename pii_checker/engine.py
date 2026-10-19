@@ -208,6 +208,8 @@ class Collector:
     # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
     on_tick: Callable[[], None] | None = None
     ticks: int = 0
+    # 画面の詳細のための読み直し: 明細に検出した値そのものと伏せていない文脈も入れる（メモリの中だけ。保存しない）
+    reveal: bool = False
 
     def add_text(
         self,
@@ -444,6 +446,14 @@ class Collector:
             return -1
         masked = detectors.mask_value(hit.pii_type, hit.value)
         loc = location_fn(hit.start) if location_fn else location
+        raw_value = raw_context = ""
+        if self.reveal:
+            raw_value = hit.value
+            raw_context = re.sub(
+                r"\s+",
+                " ",
+                f"{norm[max(0, hit.start - 20) : hit.start]}【{hit.value}】{norm[hit.end : hit.end + 20]}",
+            ).strip()
         self.item.findings.append(
             Finding(
                 pii_type=hit.pii_type,
@@ -453,6 +463,8 @@ class Collector:
                 context=detectors.masked_context(norm, hit.start, hit.end, masked),
                 rule=hit.rule,
                 method=method + ("（削除済み・非表示領域の残留の可能性）" if raw else ""),
+                raw_value=raw_value,
+                raw_context=raw_context,
             )
         )
         return len(self.item.findings) - 1
@@ -756,6 +768,8 @@ class ScanContext:
         壊れた状態を読ませないよう、別名で書いてから置き換える。
         """
         now = time.time()
+        if self.options.reveal:
+            return  # 値を持つ読み直しでは書かない（生の値が一時フォルダに出てしまう）
         if not self.checkpoint_file or now - self._last_checkpoint < max(CHECKPOINT_SECONDS, self._checkpoint_gap):
             return
         import pickle
@@ -785,6 +799,7 @@ class ScanContext:
             matcher=self.matcher,
             distinct_sink=self.distinct,
             on_tick=self.maybe_checkpoint,
+            reveal=self.options.reveal,
         )
         try:
             item.size = blob.size
@@ -1076,11 +1091,13 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     started = time.time()
     book = passwords or PasswordBook()
     ctx = ScanContext(path, options, book.candidates_for(path))
-    ctx.checkpoint_file = checkpoint_path(options, path)
-    try:
-        os.remove(ctx.checkpoint_file)  # 前の検査が残した途中経過を、今回の分として読ませない
-    except OSError:
-        pass
+    # 値を持つ読み直し（reveal）は途中経過を書かない・消さない（生の値を一時フォルダに出さない。検査の分を壊さない）
+    ctx.checkpoint_file = None if options.reveal else checkpoint_path(options, path)
+    if ctx.checkpoint_file:
+        try:
+            os.remove(ctx.checkpoint_file)  # 前の検査が残した途中経過を、今回の分として読ませない
+        except OSError:
+            pass
     temp_root = options.temp_dir or tempfile.gettempdir()
     source: dict | None = None
     network_lost = False
@@ -1155,7 +1172,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     finally:
         ctx.cleanup()
         # 最後まで（または例外で）終わったら途中経過は要らない。打ち切られたときだけ残り、実行器が読む
-        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp"):
+        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp") if ctx.checkpoint_file else ():
             try:
                 os.remove(p)
             except OSError:

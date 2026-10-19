@@ -53,7 +53,7 @@ LIBRARIES = (
 )
 # 結果に効かない設定（場所・道具のパス・展開の区切り方）。道具の有無は環境として別に数える
 # connection（接続方式の接続先）も検出の結果には効かない（同じファイルなら、フォルダで指定しても接続方式でも結果は同じ）
-_OPTION_EXCLUDE = {"temp_dir", "sevenzip", "access_helper32", "extract_batch_bytes", "reuse", "connection"}
+_OPTION_EXCLUDE = {"temp_dir", "sevenzip", "access_helper32", "extract_batch_bytes", "reuse", "connection", "reveal"}
 
 
 @lru_cache(maxsize=1)

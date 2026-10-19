@@ -1,7 +1,8 @@
 """検査結果を表すデータ型。
 
 ワーカープロセスとの受け渡し（pickle）と SQLite への保存に使うため、
-すべて素朴な dataclass で表す。生の個人情報の値は保持しない（マスク済みの値だけ）。
+すべて素朴な dataclass で表す。通常の検査では生の個人情報の値は保持しない（マスク済みの値だけ）。
+画面の詳細のための読み直し（ScanOptions.reveal）のときだけ、Finding の raw_* に入れてメモリの中で返す。
 """
 
 from __future__ import annotations
@@ -67,6 +68,10 @@ class Finding:
     context: str  # 前後の文脈（マスク済み）
     rule: str  # どの規則で検出したか（説明用）
     method: str = ""  # 構造解析 / 生データ走査 / OCR 等
+    # 画面で詳細を開いたときだけ、元のファイルを読み直して入れる検出した値そのもの・伏せていない前後の文脈。
+    # 通常の検査では空のまま。store は保存しない（DB・レポート・途中経過のどこにも書かない）
+    raw_value: str = ""
+    raw_context: str = ""
 
 
 @dataclass
@@ -134,6 +139,9 @@ class ScanOptions:
     allow_values: list[str] = field(default_factory=list)
     # 利用者の規則（userrules.UserRule.to_dict() の形。受け付けるときに書き方と速さを確かめてある）
     custom_rules: list[dict] = field(default_factory=list)
+    # 画面の詳細用の読み直しだけ True（Finding に raw_value・raw_context を入れ、途中経過は書かない）。
+    # ジョブの設定としては保存しない（store.create_job が外す）・検査器の版にも含めない
+    reveal: bool = False
 
 
 @dataclass

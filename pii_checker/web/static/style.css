@@ -242,6 +242,8 @@ td.nowrap, .nowrap { white-space: nowrap; }
 .table-wrap { max-height: 70vh; overflow: auto; }
 .job-list li.empty { cursor: default; }
 dialog .close { font-size: 14px; padding: 6px 12px; }
+.rv-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
+.rv-btn { padding: 1px 8px; }
 .detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
 .detail-path { flex: 1 1 100%; word-break: break-all; }
 .detail-meta { flex: 1 1 100%; }

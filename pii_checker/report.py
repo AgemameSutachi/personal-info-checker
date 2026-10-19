@@ -277,6 +277,32 @@ def file_tail_cells(r) -> list:
     ]
 
 
+def _counts_by_top(store: Store, job_id: str):
+    """ファイルごとの種類別の件数を、ファイルの並び（top_path の昇順）に合わせて少しずつ返す関数を作る。
+
+    全ファイル分の辞書を持たないよう、項目も top_path の昇順で読み、呼ばれたファイルまで読み進めて足し合わせる。
+    """
+    rows = store.iter_query(
+        "SELECT top_path, counts FROM items WHERE job_id=? AND counts != '{}' ORDER BY top_path", (job_id,)
+    )
+    pending = [next(rows, None)]
+
+    def counts_of(top_path: str) -> dict[str, int]:
+        d: dict[str, int] = {}
+        r = pending[0]
+        # SQLite の並び（BINARY）と Python の文字列の比較は同じ順なので、手前のファイルの分は読み飛ばせる
+        while r is not None and r["top_path"] < top_path:
+            r = next(rows, None)
+        while r is not None and r["top_path"] == top_path:
+            for k, n in json.loads(r["counts"]).items():
+                d[k] = d.get(k, 0) + n
+            r = next(rows, None)
+        pending[0] = r
+        return d
+
+    return counts_of
+
+
 def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     job = store.job(job_id)
     if not job:
@@ -314,7 +340,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     ws = _sheet(wb, "要対応", [16, 80, 26, 70, 11])
     _row(ws, ["区分", "パス", "形式", "理由・対処", "大きさ(KB)"], bold=True)
     order = {"needs_password": 0, "uncheckable": 1, "pending": 2, "partial": 3}
-    for r in store.query(
+    for r in store.iter_query(
         "SELECT status, path, kind, reason, size FROM items WHERE job_id=? AND status IN ('needs_password','uncheckable','pending','partial') ORDER BY path",
         (job_id,),
     ):
@@ -323,9 +349,9 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
             [STATUS_JA.get(r["status"], r["status"]), r["path"], r["kind"], r["reason"], _size(r["size"])],
             fill={"needs_password": "FFE699", "uncheckable": "F8CBAD", "partial": "DDEBF7"}.get(r["status"]),
         )
-    for r in store.query("SELECT top_path FROM files WHERE job_id=? AND state='pending'", (job_id,)):
+    for r in store.iter_query("SELECT top_path FROM files WHERE job_id=? AND state='pending'", (job_id,)):
         _row(ws, ["未検査", r["top_path"], "", "まだ検査していない（中断した等）。再開すると検査する", ""])
-    for r in store.query("SELECT path, kind, reason FROM folder_errors WHERE job_id=? ORDER BY path", (job_id,)):
+    for r in store.iter_query("SELECT path, kind, reason FROM folder_errors WHERE job_id=? ORDER BY path", (job_id,)):
         _row(
             ws,
             ["読めなかったフォルダ" if r["kind"] == "error" else "リンク", r["path"], "", r["reason"], ""],
@@ -345,13 +371,9 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         + FILE_TAIL_HEADS,
         bold=True,
     )
-    counts_by_top: dict[str, dict[str, int]] = {}
-    for r in store.query("SELECT top_path, counts FROM items WHERE job_id=? AND counts != '{}'", (job_id,)):
-        d = counts_by_top.setdefault(r["top_path"], {})
-        for k, n in json.loads(r["counts"]).items():
-            d[k] = d.get(k, 0) + n
-    for r in store.query("SELECT * FROM files WHERE job_id=? ORDER BY top_path", (job_id,)):
-        c = counts_by_top.get(r["top_path"], {})
+    counts_of = _counts_by_top(store, job_id)
+    for r in store.iter_query("SELECT * FROM files WHERE job_id=? ORDER BY top_path", (job_id,)):
+        c = counts_of(r["top_path"])
         fill = {"高": "F8CBAD", "中": "FCE4D6", "低": "FFF2CC"}.get(r["risk"] or "")
         _row(
             ws,
@@ -414,7 +436,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         ["パス（項目）", "種類", "確度", "値（マスク済み）", "場所", "前後の文脈（マスク済み）", "検出規則", "読み方"],
         bold=True,
     )
-    for r in store.query(
+    for r in store.iter_query(
         """SELECT i.path, f.pii_type, f.confidence, f.masked_value, f.location, f.context, f.rule, f.method
            FROM findings f JOIN items i ON i.job_id=f.job_id AND i.top_path=f.top_path AND i.seq=f.item_seq
            WHERE f.job_id=? ORDER BY i.path""",
@@ -430,7 +452,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         ["パス", "形式", "状態", "理由", "読み方", "補足", "大きさ(KB)", "更新日時", "入れ子の深さ", "検出件数"],
         bold=True,
     )
-    for r in store.query("SELECT * FROM items WHERE job_id=? ORDER BY top_path, seq", (job_id,)):
+    for r in store.iter_query("SELECT * FROM items WHERE job_id=? ORDER BY top_path, seq", (job_id,)):
         counts = json.loads(r["counts"])
         notes = "／".join(json.loads(r["notes"]))
         _row(
@@ -483,7 +505,7 @@ def write_csv(store: Store, job_id: str, out_dir: str) -> list[str]:
     with _atomic_text(p1) as f:
         w = csv.writer(f)
         w.writerow(["パス", "種類", "確度", "値（マスク済み）", "場所", "文脈", "検出規則", "読み方"])
-        for r in store.query(
+        for r in store.iter_query(
             """SELECT i.path, f.pii_type, f.confidence, f.masked_value, f.location, f.context, f.rule, f.method
                FROM findings f JOIN items i ON i.job_id=f.job_id AND i.top_path=f.top_path AND i.seq=f.item_seq
                WHERE f.job_id=? ORDER BY i.path""",
@@ -494,7 +516,7 @@ def write_csv(store: Store, job_id: str, out_dir: str) -> list[str]:
     with _atomic_text(p2) as f:
         w = csv.writer(f)
         w.writerow(["パス", "形式", "状態", "理由", "読み方", "大きさ(KB)", "検出件数"])
-        for r in store.query("SELECT * FROM items WHERE job_id=? ORDER BY top_path, seq", (job_id,)):
+        for r in store.iter_query("SELECT * FROM items WHERE job_id=? ORDER BY top_path, seq", (job_id,)):
             w.writerow(
                 [
                     r["path"],

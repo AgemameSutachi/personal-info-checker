@@ -162,45 +162,77 @@ def _parse_values(s: str, pos: int):
 
 
 def scan_sql_text(text: str, col: Collector, item: ItemResult) -> None:
-    """SQL 文を読む。COPY ブロックと INSERT 文は列名を見出しにした表として検査する。"""
-    lines = text.splitlines()
-    create_cols = parse_create_tables(text)
-    i = 0
+    """SQL 文を読む（メモリに読み込んだ本文）。列名の無い INSERT の見出しには、後ろにある CREATE TABLE も使う。"""
+    import io
+
+    lines = (ln.rstrip("\r\n") for ln in io.StringIO(text, newline=None))
+    scan_sql_lines(lines, col, item, create_cols=parse_create_tables(text))
+
+
+RE_CREATE_START = re.compile(r"^\s*CREATE\s+TABLE\b", re.I)
+SQL_OTHER_BLOCK = 200  # COPY・INSERT 以外の行は、この行数ずつまとめて本文として検査する
+SQL_STMT_LIMIT = 50_000_000  # 1つの INSERT 文として連結する文字数の上限（閉じない文で際限なく溜めない）
+
+
+def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | None = None) -> None:
+    """SQL 文を1行ずつ読む（巨大なダンプでも全文をメモリに載せない）。COPY ブロックと INSERT 文は列名を見出しにした表として検査する。
+
+    lines は行末の改行を除いた行の並び。CREATE TABLE は読んだところで列名を覚え、後ろの列名の無い INSERT の見出しにする。
+    """
+    create_cols = dict(create_cols or {})
+    it = enumerate(lines, start=1)
     n_copy = n_insert = 0
-    other: list[tuple[int, str]] = []
-    while i < len(lines):
-        line = lines[i]
+    block: list[str] = []
+    base = 0
+
+    def other(ln_no: int, ln: str) -> None:
+        # COPY・INSERT 以外の行（DDL・コメント等）も本文として検査する
+        nonlocal block, base
+        if not block:
+            base = ln_no
+        block.append(ln)
+        if len(block) >= SQL_OTHER_BLOCK:
+            flush()
+
+    def flush() -> None:
+        nonlocal block
+        if block:
+            col.add_lines("\n".join(block), location_prefix=f"{base}行目付近 ", method="SQL 本文")
+            block = []
+
+    for ln_no, line in it:
         m = RE_COPY.match(line)
         if m:
             table = _clean_ident(m.group(1))
             columns = [_clean_ident(c) for c in m.group(2).split(",")]
-            start = i + 1
-            j = start
-            while j < len(lines) and lines[j] != "\\.":
-                j += 1
-            block = lines[start:j]
 
-            def rows(block=block):
-                for ln in block:
+            def rows():
+                for _, ln in it:
+                    if ln == "\\.":
+                        return
                     yield [_unescape_copy(v) for v in ln.split("\t")]
 
             col.add_records(
                 columns,
                 rows(),
-                lambda r, c, table=table, columns=columns, start=start: f"表「{table}」データ{r}行目（{start + r}行目） 列「{columns[c] if c < len(columns) else c + 1}」",
+                lambda r, c, table=table, columns=columns, start=ln_no: f"表「{table}」データ{r}行目（{start + r}行目） 列「{columns[c] if c < len(columns) else c + 1}」",
                 method="COPY データ",
             )
             n_copy += 1
-            i = j + 1
             continue
         mi = RE_INSERT.search(line)
         if mi:
             # 複数行にまたがる INSERT は ; まで連結する
-            stmt = line
-            j = i
-            while not stmt.rstrip().endswith(";") and j + 1 < len(lines) and len(stmt) < 50_000_000:
-                j += 1
-                stmt += "\n" + lines[j]
+            parts = [line]
+            size = len(line)
+            while not parts[-1].rstrip().endswith(";") and size < SQL_STMT_LIMIT:
+                nxt = next(it, None)
+                if nxt is None:
+                    break
+                parts.append(nxt[1])
+                size += len(nxt[1]) + 1
+            stmt = "\n".join(parts) if len(parts) > 1 else line
+            del parts
             mi = RE_INSERT.search(stmt)
             table = _clean_ident(mi.group(1))
             columns = [_clean_ident(c) for c in mi.group(2).split(",")] if mi.group(2) else []
@@ -211,7 +243,7 @@ def scan_sql_text(text: str, col: Collector, item: ItemResult) -> None:
                 col.add_records(
                     columns,
                     values,
-                    lambda r, c, table=table, columns=columns, i=i: f"表「{table}」INSERT（{i + 1}行目〜）{r}件目 列「{columns[c] if c < len(columns) else c + 1}」",
+                    lambda r, c, table=table, columns=columns, i=ln_no: f"表「{table}」INSERT（{i}行目〜）{r}件目 列「{columns[c] if c < len(columns) else c + 1}」",
                     method="INSERT 文",
                 )
             else:
@@ -219,25 +251,24 @@ def scan_sql_text(text: str, col: Collector, item: ItemResult) -> None:
                     for c, v in enumerate(row):
                         if v:
                             col.add_text(
-                                v, f"表「{table}」INSERT（{i + 1}行目〜）{r}件目 {c + 1}番目の値", method="INSERT 文"
+                                v, f"表「{table}」INSERT（{ln_no}行目〜）{r}件目 {c + 1}番目の値", method="INSERT 文"
                             )
             n_insert += 1
-            i = j + 1
             continue
-        other.append((i + 1, line))
-        i += 1
-    # COPY・INSERT 以外の行（DDL・コメント等）も本文として検査する
-    block: list[str] = []
-    base = None
-    for ln_no, ln in other:
-        if base is None:
-            base = ln_no
-        block.append(ln)
-        if len(block) >= 200:
-            col.add_lines("\n".join(block), location_prefix=f"{base}行目付近 ", method="SQL 本文")
-            block, base = [], None
-    if block:
-        col.add_lines("\n".join(block), location_prefix=f"{base}行目付近 ", method="SQL 本文")
+        if RE_CREATE_START.match(line):
+            # CREATE TABLE は文の終わり（; を含む行）まで集めて列名を覚える。行は本文としても検査する
+            parts = [line]
+            other(ln_no, line)
+            while ";" not in parts[-1] and len(parts) < 5000:
+                nxt = next(it, None)
+                if nxt is None:
+                    break
+                parts.append(nxt[1])
+                other(*nxt)
+            create_cols.update(parse_create_tables("\n".join(parts)))
+            continue
+        other(ln_no, line)
+    flush()
     item.method += f"・SQL として読み取り（COPY {n_copy} 件・INSERT {n_insert} 文を列名つきで検査）"
 
 

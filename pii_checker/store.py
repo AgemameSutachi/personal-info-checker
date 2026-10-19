@@ -283,6 +283,25 @@ class Store:
         with self._lock:
             return self._conn.execute(sql, args).fetchall()
 
+    def iter_query(self, sql: str, args=(), batch: int = 2000):
+        """行を少しずつ返す（レポートの書き出し用。全行をメモリに載せない）。
+
+        検査中にレポートを出すこともあるので、書き込みの接続を握り続けないよう、読み取り専用の別の接続で読む（WAL なので並行して読める）。
+        """
+        conn = sqlite3.connect(
+            f"file:{Path(self.path).as_posix()}?mode=ro", uri=True, check_same_thread=False, timeout=60
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(sql, args)
+            while True:
+                rows = cur.fetchmany(batch)
+                if not rows:
+                    break
+                yield from rows
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------ ジョブ
 
     @staticmethod

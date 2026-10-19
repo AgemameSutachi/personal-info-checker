@@ -17,9 +17,15 @@ def handle_empty(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
     item.method = "空（0バイト）"
 
 
+# これより大きいテキストは丸ごと読まずに少しずつ読む。丸ごと読むと元のバイト列・文字列・行の一覧が同時に載り、
+# 大きさの数倍のメモリを使う（SQL のダンプは、ここを超えても列名つきの読み方のまま少しずつ読む）
+TEXT_READ_ALL_LIMIT = 64 * 1024 * 1024
+SQL_EXTS = (".sql", ".dump", ".pgsql", ".psql", ".ddl")
+
+
 def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     size = blob.size
-    if size > 256 * 1024 * 1024:
+    if size > TEXT_READ_ALL_LIMIT:
         return _handle_huge_text(blob, item, col)
     text, enc = decode_text(blob.read_all())
     item.method = f"テキスト（{enc}）"
@@ -31,7 +37,7 @@ def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
         scan_copy_rows(text, table, columns, col, item)
         return
 
-    if blob.ext in (".sql", ".dump", ".pgsql", ".psql", ".ddl") or looks_like_sql(text):
+    if blob.ext in SQL_EXTS or looks_like_sql(text):
         scan_sql_text(text, col, item)
     elif blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(text):
         _scan_delimited(text, col, item)
@@ -147,7 +153,22 @@ def _handle_huge_text(blob: Blob, item: ItemResult, col: Collector) -> None:
     with blob.open() as raw:
         stream = io.TextIOWrapper(raw, encoding=enc, errors="replace", newline="")
         sample = stream.read(1024 * 1024)
+        if sample and not sample.endswith(("\n", "\r")):
+            sample += stream.readline()  # 見本の終わりで行を2つに割らない
         rest = stream
+        from .dbdump import looks_like_sql, scan_sql_lines
+
+        if blob.ext in SQL_EXTS or looks_like_sql(sample):
+            item.method = f"巨大な SQL（{enc}）を少しずつ読み取り"
+
+            def sql_lines():
+                for ln in io.StringIO(sample, newline=""):
+                    yield ln.rstrip("\r\n")
+                for ln in rest:
+                    yield ln.rstrip("\r\n")
+
+            scan_sql_lines(sql_lines(), col, item)
+            return
         if blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(sample):
             delim = "\t" if sample.count("\t") > sample.count(",") else ","
             csv.field_size_limit(2**31 - 1)

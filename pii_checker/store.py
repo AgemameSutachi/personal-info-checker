@@ -295,7 +295,10 @@ class Store:
             uri = "file:" + quote(Path(self.path).as_posix(), safe="/:") + "?mode=ro"
             conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=60)
         except sqlite3.OperationalError:
-            # UNC のパスなど URI で開けないときは、ふつうの接続で読む（読むだけなので書き込みは起きない）
+            # UNC のパスなど URI で開けないときは、ふつうの接続で読む（読むだけなので書き込みは起きない）。
+            # DB が無いときは空の DB を作らないよう、元の例外のまま返す
+            if not os.path.exists(self.path):
+                raise
             conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
         conn.row_factory = sqlite3.Row
         try:

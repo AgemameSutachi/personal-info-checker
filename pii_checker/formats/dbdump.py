@@ -3,8 +3,9 @@
 - SQL 文（pg_dump のプレーン形式・mysqldump・各種 INSERT 文）: COPY と INSERT を列名つきの表として読む
 - PostgreSQL の custom 形式（PGDMP）: pg_restore があれば SQL へ戻して読む。無ければ形式を解いて
   データ部（zlib 圧縮）を自前で展開する
-- Oracle の exp / expdp（Data Pump）ダンプ: 内部形式は公開されていないため、文字列型の値だけを走査する
-  （簡易検査）。完全に確かめるには Oracle へ取り込んで表の中身を確かめる（このツールは DB へ接続しない）
+- Oracle の exp / expdp（Data Pump）ダンプ: 実物の解析で分かった形式で表の行を列名つきで読む
+  （oracle_dump.py）。読み解けない部分（未対応の型・知らない形の表・圧縮）は文字列の走査で補い、
+  その場合は簡易検査にする（このツールは DB へ接続しない）
 - SQL Server・MySQL・Oracle・PostgreSQL のデータファイル本体: 同じく文字列のみ（簡易検査）
 """
 
@@ -451,18 +452,61 @@ def _sweep_with_entropy(blob: Blob, col: Collector) -> tuple[int, int]:
     return high, total
 
 
+ORACLE_ADVICE = "言い切るには、不要なダンプなら削除・移動し、要るなら Oracle へ取り込んで表の中身を確かめること"
+ORACLE_REASON_LIMIT = 5  # 理由に並べる表・列の数の上限（多いときは「ほか N 件」にする）
+
+
+def _join_limited(items: list[str]) -> str:
+    shown = "、".join(items[:ORACLE_REASON_LIMIT])
+    return shown + (f" ほか {len(items) - ORACLE_REASON_LIMIT} 件" if len(items) > ORACLE_REASON_LIMIT else "")
+
+
 def handle_oracle_dump(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
-    high, total = _sweep_with_entropy(blob, col)
-    item.method = "Oracle ダンプの文字列走査（UTF-8 / Shift_JIS / UTF-16）"
-    if total and high / total > 0.1:
+    """Oracle の exp / expdp を、表の行を列名つきで読み、読み解けない部分は文字列の走査で補う。"""
+    from .oracle_dump import GAP_NONZERO_LIMIT, scan_oracle_tables
+
+    with blob.open() as f:
+        head = f.read(64)
+    kind = "exp" if b"EXPORT:V" in head else "expdp"
+    kind_label = "旧 exp" if kind == "exp" else "expdp（Data Pump）"
+    with blob.open() as f:
+        res = scan_oracle_tables(f, col, kind, head)
+    # 行として読めた部分がほとんど無く、表の外側が圧縮・暗号化されていそうなら、文字を取り出せていない
+    if res.chunks_total and res.chunks_high / res.chunks_total > 0.1 and res.row_bytes * 2 < res.total_bytes:
+        item.method = "Oracle ダンプの文字列走査（UTF-8 / Shift_JIS / UTF-16）"
         raise Uncheckable(
-            f"Oracle ダンプの {high}/{total} 区画が圧縮または暗号化されている（COMPRESSION/ENCRYPTION 指定の expdp 等）ため、"
+            f"Oracle ダンプの {res.chunks_high}/{res.chunks_total} 区画が圧縮または暗号化されている（COMPRESSION/ENCRYPTION 指定の expdp 等）ため、"
             "文字を取り出せない。不要なダンプなら削除・移動し、要るなら Oracle へ取り込んで表の中身を確かめること"
         )
-    raise PartialScan(
-        "Oracle ダンプ（exp/expdp）は内部形式が非公開のため、文字列型の値だけを検査した（数値型・日付型の列は読めない）。"
-        "言い切るには、不要なダンプなら削除・移動し、要るなら Oracle へ取り込んで表の中身を確かめること"
+    if res.tables == 0:
+        item.method = "Oracle ダンプの文字列走査（UTF-8 / Shift_JIS / UTF-16）"
+        detail = f"（表として読み解こうとしたが失敗: {_join_limited(res.failed)}）" if res.failed else ""
+        raise PartialScan(
+            "Oracle ダンプ（exp/expdp）の表の並びを読み解けなかったため、文字列型の値だけを検査した（数値型・日付型の列は読めない）"
+            f"{detail}。{ORACLE_ADVICE}"
+        )
+    item.method = (
+        f"Oracle ダンプ（{kind_label}）を表ごとに読み取り（表 {res.tables} 個・{res.rows:,} 行を列名つきで検査。"
+        "表の外側と読み解けない値は文字列を走査）"
     )
+    reasons: list[str] = []
+    if res.failed:
+        reasons.append(f"読み解けず文字列の走査に切り替えた表がある（{_join_limited(res.failed)}）")
+    if res.unsupported_cols:
+        cols = [f"{k}（{v}）" for k, v in res.unsupported_cols.items()]
+        reasons.append(f"未対応の型の列は文字列の走査だけで検査した（{_join_limited(cols)}）")
+    if res.truncated:
+        reasons.append(f"途中で切れているダンプで、読めたのは {_join_limited(res.truncated)} まで")
+    if res.gap_nonzero > GAP_NONZERO_LIMIT:
+        reasons.append(
+            f"表として読み解けていないデータが {res.gap_nonzero:,} バイトある（知らない形の表・LOB・圧縮など。文字列の走査だけで検査した）"
+        )
+    if reasons:
+        raise PartialScan(
+            f"Oracle ダンプ（{kind_label}）は一部しか表として読み解けなかった。"
+            + "。".join(reasons)
+            + f"。{ORACLE_ADVICE}"
+        )
 
 
 DB_FILE_ADVICE = {

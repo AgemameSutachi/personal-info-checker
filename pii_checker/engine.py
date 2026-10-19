@@ -40,6 +40,8 @@ TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目�
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
 CHECKPOINT_SECONDS = 60  # 検査の途中経過（それまでの検出）を書き出す間隔。時間切れで打ち切られても、ここまでの分は残る
 CHECKPOINT_EVERY = 5000  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
+# 住所・固定電話を「人の手がかり待ち」で値ごとに覚えておく上限（1件ごとに本文を抱える。超えた分は種類ごとの件数だけ数える）
+DEFER_LIMIT = 200_000
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:
@@ -190,6 +192,8 @@ class Collector:
     deferred: dict[int, list] = field(
         default_factory=dict
     )  # (種類, 値) の hash → [低で数えた件数, Hit, 明細を持つか, 引数]
+    # deferred が DEFER_LIMIT 件に達した後に待たせた分（値ごとには覚えず、種類ごとの件数だけ。本文を抱えないのでメモリが増えない）
+    deferred_overflow: dict[str, int] = field(default_factory=dict)
     head_chars: int = 0  # 書類の題を探すために見た本文の先頭の文字数（ファイル名は数えない）
     cue_title: str = ""  # 人の手がかりにした書類の題（「名簿」など。明細の注記を出し分ける）
     # 許可リストと利用者の規則（userrules.Matcher。どちらも無ければ None）
@@ -286,11 +290,16 @@ class Collector:
                 confidence = Confidence.LOW
                 counted = prev is None or not (raw or skip_seen)  # 数えない重複は待ちの件数にも足さない
                 d = self.deferred.get(key)
-                if d is None:
-                    # 明細がまだ無い（この呼び出しで載せる）か、施設の 低 などで既に載っているか
-                    d = self.deferred[key] = [0, hit, prev is None, (norm, location, location_fn, method, raw)]
-                if counted:
-                    d[0] += 1
+                if d is None and len(self.deferred) >= DEFER_LIMIT:
+                    # 人の手がかりの無い巨大な住所の一覧: 値ごとに本文を抱えると件数に比例してメモリが増えるので、件数だけ数える
+                    if counted:
+                        self.deferred_overflow[hit.pii_type] = self.deferred_overflow.get(hit.pii_type, 0) + 1
+                else:
+                    if d is None:
+                        # 明細がまだ無い（この呼び出しで載せる）か、施設の 低 などで既に載っているか
+                        d = self.deferred[key] = [0, hit, prev is None, (norm, location, location_fn, method, raw)]
+                    if counted:
+                        d[0] += 1
             elif key in self.deferred and confidence.rank > Confidence.LOW.rank:
                 self._resolve_deferred(key)  # 同じ住所を、手がかりつきで見直した
                 prev = self.seen.get(key)
@@ -343,6 +352,15 @@ class Collector:
         if self.person_cue:
             for key in list(self.deferred):
                 self._resolve_deferred(key)
+            # 上限を超えて件数だけ数えた分も 中 へ移す（明細は上限の内の分で足りている）
+            cc = self.item.conf_counts
+            for pii_type, n in self.deferred_overflow.items():
+                low_key, mid_key = f"{pii_type}:{Confidence.LOW.value}", f"{pii_type}:{Confidence.MEDIUM.value}"
+                moved = min(n, cc.get(low_key, 0))
+                if moved:
+                    cc[low_key] -= moved
+                    cc[mid_key] = cc.get(mid_key, 0) + moved
+            self.deferred_overflow.clear()
             return
         for _, hit, own_sample, _args in self.deferred.values():
             pos = self.seen.get(hash((hit.pii_type, hit.value)), (-1, None))[0]
@@ -355,6 +373,7 @@ class Collector:
                 if "人の手がかり" not in f.rule:
                     f.rule += "（同じファイルに氏名などの人の手がかりが無いため 低）"
         self.deferred.clear()
+        self.deferred_overflow.clear()
 
     def _resolve_deferred(self, key: int) -> None:
         """待たせていた住所を、低で数えた分すべて確度 中へ移し、明細も引き上げる。"""

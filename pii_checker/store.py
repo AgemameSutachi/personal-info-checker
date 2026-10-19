@@ -614,14 +614,36 @@ class Store:
                 (access, who, owner, job_id, top_path),
             )
 
-    def save_failure(self, job_id: str, top_path: str, reason: str, elapsed: float = 0.0) -> None:
-        """ワーカーごと失敗した（時間切れ・異常終了）ファイルを、検査不能として記録する。"""
+    def save_failure(
+        self, job_id: str, top_path: str, reason: str, elapsed: float = 0.0, partial: list[ItemResult] | None = None
+    ) -> None:
+        """ワーカーごと失敗した（時間切れ・異常終了）ファイルを、検査不能として記録する。
+
+        partial はワーカーが途中で書き出した項目（engine.ScanContext.maybe_checkpoint）。あれば、それまでの検出を残したうえで
+        検査不能にする（数 GB のダンプが時間切れになっても、見つけた個人情報が消えて「なし」に見えないように）。
+        """
+        if partial:
+            items = list(partial)
+            items[0].path = top_path
+            items[0].status = Status.UNCHECKABLE
+            items[0].reason = reason
+            for it in items[1:]:
+                if it.status == Status.PENDING:
+                    it.status = Status.UNCHECKABLE
+                    it.reason = "外側のファイルの時間切れで、途中までしか検査していない"
+            self.save_result(job_id, FileResult(top_path=top_path, items=items, elapsed=elapsed))
+            return
         item = ItemResult(path=top_path, kind="", status=Status.UNCHECKABLE, reason=reason)
         try:
             item.size = os.path.getsize(top_path)
         except OSError:
             pass
         self.save_result(job_id, FileResult(top_path=top_path, items=[item], elapsed=elapsed))
+
+    def file_size(self, job_id: str, top_path: str) -> int | None:
+        """列挙したときのファイルの大きさ（時間制限を大きさに合わせるのに使う）。"""
+        rows = self.query("SELECT size FROM files WHERE job_id=? AND top_path=?", (job_id, top_path))
+        return rows[0][0] if rows else None
 
     # ------------------------------------------------------------ 集計
 

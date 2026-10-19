@@ -38,6 +38,32 @@ IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは
 READ_ALL_LIMIT = 256 * 1024 * 1024
 TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目印）
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
+CHECKPOINT_SECONDS = 60  # 検査の途中経過（それまでの検出）を書き出す間隔。時間切れで打ち切られても、ここまでの分は残る
+CHECKPOINT_EVERY = 5000  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
+
+
+def checkpoint_path(options: ScanOptions, top_path: str) -> str:
+    """1ファイルの途中経過を書き出す場所（ワーカーと実行器が同じ名前を求める）。"""
+    import hashlib
+
+    digest = hashlib.sha1(top_path.encode("utf-8", "surrogatepass")).hexdigest()[:20]
+    return os.path.join(options.temp_dir or tempfile.gettempdir(), f"{TEMP_PREFIX}ckpt_{digest}.pkl")
+
+
+def read_checkpoint(path: str) -> list | None:
+    """途中経過（項目の一覧）を読む。無い・壊れているときは None。読んだら消す。"""
+    import pickle
+
+    try:
+        with open(path, "rb") as f:
+            items = pickle.load(f)
+    except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+        items = None
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return items if isinstance(items, list) else None
 
 
 class NeedPassword(Exception):
@@ -173,6 +199,9 @@ class Collector:
     distinct_keys: dict[int, tuple] = field(default_factory=dict)
     # ファイル全体の異なる値を集める先（(種類, 正規化した値の hash) → 見た最も高い確度の順位）。ScanContext が渡す
     distinct_sink: dict | None = None
+    # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
+    on_tick: Callable[[], None] | None = None
+    ticks: int = 0
 
     def add_text(
         self,
@@ -194,6 +223,9 @@ class Collector:
         """
         if text is None:
             return
+        self.ticks += 1
+        if self.on_tick is not None and self.ticks % CHECKPOINT_EVERY == 0:
+            self.on_tick()
         if not isinstance(text, str):
             text = str(text)
         if not text.strip() and not header:
@@ -628,6 +660,8 @@ class ScanContext:
         self.options = options
         self.passwords = passwords
         self.items: list[ItemResult] = []
+        self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
+        self._last_checkpoint = time.time()
         self.expanded_bytes = 0
         self.entries = 0
         self._tmp: str | None = None
@@ -693,6 +727,25 @@ class ScanContext:
     def password_candidates(self) -> list[str]:
         return list(self.passwords)
 
+    def maybe_checkpoint(self) -> None:
+        """前の書き出しから CHECKPOINT_SECONDS 経っていれば、それまでの項目（検出の件数・明細）を書き出す。
+
+        時間切れでワーカーごと打ち切られても、実行器がこれを読んで「途中まで検査」として検出を残す。書きかけで
+        壊れた状態を読ませないよう、別名で書いてから置き換える。
+        """
+        if not self.checkpoint_file or time.time() - self._last_checkpoint < CHECKPOINT_SECONDS:
+            return
+        import pickle
+
+        self._last_checkpoint = time.time()
+        tmp = self.checkpoint_file + ".tmp"
+        try:
+            with open(tmp, "wb") as f:
+                pickle.dump(self.items, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, self.checkpoint_file)
+        except (OSError, pickle.PickleError, TypeError, AttributeError):
+            pass  # 書き出せなくても検査は続ける（時間切れのときに途中の検出が残らないだけ）
+
     # ---------------------------------------------------------- 検査の入口
 
     def scan_blob(self, blob: Blob, depth: int) -> ItemResult:
@@ -703,7 +756,11 @@ class ScanContext:
         item.mtime = blob.mtime
         self.items.append(item)
         collector = Collector(
-            item, self.options.max_samples_per_type, matcher=self.matcher, distinct_sink=self.distinct
+            item,
+            self.options.max_samples_per_type,
+            matcher=self.matcher,
+            distinct_sink=self.distinct,
+            on_tick=self.maybe_checkpoint,
         )
         try:
             item.size = blob.size
@@ -995,6 +1052,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     started = time.time()
     book = passwords or PasswordBook()
     ctx = ScanContext(path, options, book.candidates_for(path))
+    ctx.checkpoint_file = checkpoint_path(options, path)
     temp_root = options.temp_dir or tempfile.gettempdir()
     source: dict | None = None
     network_lost = False
@@ -1068,6 +1126,12 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
             ctx.scan_blob(Blob(display=display, path=ads_local, mtime=mtime, name_hint=stream), depth=1)
     finally:
         ctx.cleanup()
+        # 最後まで（または例外で）終わったら途中経過は要らない。打ち切られたときだけ残り、実行器が読む
+        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     return FileResult(
         top_path=path,
         items=ctx.items,

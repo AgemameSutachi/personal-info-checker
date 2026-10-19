@@ -16,7 +16,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import fields
 
-from .engine import scan_file, split_siblings
+from .engine import checkpoint_path, read_checkpoint, scan_file, split_siblings
 from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
@@ -29,6 +29,9 @@ from .walker import walk
 
 DEFAULT_TIMEOUT = 30 * 60  # 1ファイルあたりの時間制限（秒）。巨大な DB・イメージは設定で延ばす
 GIT_PACK_TIMEOUT_FACTOR = 4  # git の pack は過去の全版を検査するので、時間制限を通常の4倍にする
+# 巨大なファイルは、この速さ（遅めに見積もった読み取り速度）で読み切れるだけの時間を最低限あげる。
+# 一律 30 分では、数 GB の DB のダンプが読み切れずに時間切れになっていた（3.3GB の Oracle ダンプで実測）
+TIMEOUT_MIN_BYTES_PER_SEC = 512 * 1024
 HEARTBEAT_SECONDS = 10  # 生存記録の間隔（Store.reconcile_running の既定 120 秒より十分短く）
 DB_MIN_FREE = 256 * 1024**2  # 結果の保存先のドライブにこれだけ空きが無くなったら、満杯になる前に止める
 DISK_FULL_MESSAGE = (
@@ -296,11 +299,19 @@ class JobRunner:
             pass
 
     def _timeout_for(self, path: str) -> int:
-        """1ファイルの時間制限。git の pack は全部の版を検査するので長くする（中身は読まずにパスだけで決める）。"""
+        """1ファイルの時間制限。git の pack は全部の版を検査するので長くする（中身は読まずにパスだけで決める）。
+
+        巨大なファイルは、大きさを遅めの読み取り速度で割った時間を下回らないようにする（設定の時間制限は最低限の値）。
+        """
         p = path.replace("\\", "/").lower()
-        if "/objects/pack/" in p and p.endswith(".pack"):
-            return self.timeout * GIT_PACK_TIMEOUT_FACTOR
-        return self.timeout
+        limit = (
+            self.timeout * GIT_PACK_TIMEOUT_FACTOR if "/objects/pack/" in p and p.endswith(".pack") else self.timeout
+        )
+        try:
+            size = self.store.file_size(self.job_id, path) or 0
+        except Exception:  # noqa: BLE001  大きさが分からなければ設定の値のまま
+            size = 0
+        return max(limit, int(size / TIMEOUT_MIN_BYTES_PER_SEC))
 
     def _heartbeat_loop(self, done: threading.Event) -> None:
         """動いている間は10秒ごとに生存を記録する（1ファイルの検査が長くても、別の窓や CLI から「中断」にされない）。"""
@@ -459,22 +470,34 @@ class JobRunner:
                 # 検査中にパスワードを受け取っていたら、新しいパスワードでもう一度試す
                 self.store.mark_pending(self.job_id, [path])
         except FutureTimeout:
+            # ワーカーが途中で書き出した項目を先に読む（それまでの検出を残す）。そのあと一時フォルダを片付ける
+            partial = read_checkpoint(checkpoint_path(self.options, path))
             cleanup_stale_temp([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダをすぐ片付ける
-            self.store.save_failure(
-                self.job_id,
-                path,
-                f"時間切れ（{self._timeout_for(path) // 60}分）で打ち切った。巨大なファイルは設定で時間制限を延ばして再検査",
-                elapsed,
-            )
+            minutes = self._timeout_for(path) // 60
+            if partial and any(i.finding_counts for i in partial):
+                reason = (
+                    f"時間切れ（{minutes}分）で打ち切った。途中までに見つけた分は記録した（残りは未検査）。"
+                    "巨大なファイルは設定で時間制限を延ばして再検査"
+                )
+            else:
+                reason = f"時間切れ（{minutes}分）で打ち切った。巨大なファイルは設定で時間制限を延ばして再検査"
+            self.store.save_failure(self.job_id, path, reason, elapsed, partial=partial)
         except process_expired as e:
+            partial = read_checkpoint(checkpoint_path(self.options, path))
             cleanup_stale_temp([self.options.temp_dir])
             limit_gb = self.memory_limit / 1024**3
+            kept = (
+                "途中までに見つけた分は記録した（残りは未検査）。"
+                if partial and any(i.finding_counts for i in partial)
+                else ""
+            )
             self.store.save_failure(
                 self.job_id,
                 path,
                 f"読み取り中に検査プロセスが異常終了した（1プロセスのメモリ上限 {limit_gb:.1f}GB を超えた・"
-                f"壊れたファイルの可能性）: {e}",
+                f"壊れたファイルの可能性）。{kept}{e}",
                 elapsed,
+                partial=partial,
             )
         except Exception as e:
             if is_disk_full(e):
@@ -511,6 +534,11 @@ def cleanup_stale_temp(extra_dirs: list[str | None] | tuple = (), no_mark_grace:
             p = os.path.join(base, name)
             try:
                 if not os.path.isdir(p):
+                    # 途中経過のファイル（engine.checkpoint_path）は検査中なら1分ごとに書き直される。1日更新の無いものは
+                    # 持ち主のジョブが電源断などで消えた残り
+                    if name.startswith(f"{TEMP_PREFIX}ckpt_") and now - os.path.getmtime(p) > 86400:
+                        os.remove(p)
+                        removed += 1
                     continue
                 mark = os.path.join(p, OWNER_MARK)
                 if os.path.exists(mark):

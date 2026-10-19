@@ -80,9 +80,13 @@ def pg_toc_mapping(toc: bytes) -> dict[str, tuple[str, list[str]]]:
     return out
 
 
-def scan_copy_rows(text: str, table: str, columns: list[str], col: Collector, item: ItemResult) -> None:
-    """COPY 形式（タブ区切り・\\N は NULL）のデータを列名つきで読む。"""
-    rows = ([_unescape_copy(v) for v in ln.split("\t")] for ln in text.splitlines() if ln != "\\.")
+def scan_copy_rows(text, table: str, columns: list[str], col: Collector, item: ItemResult) -> None:
+    """COPY 形式（タブ区切り・\\N は NULL）のデータを列名つきで読む。
+
+    text は文字列か、行（改行を除いたもの）の並び。巨大なデータファイルは行の並びで渡して少しずつ読む。
+    """
+    lines = text.splitlines() if isinstance(text, str) else text
+    rows = ([_unescape_copy(v) for v in ln.split("\t")] for ln in lines if ln != "\\.")
     col.add_records(
         columns,
         rows,
@@ -175,13 +179,32 @@ SQL_OTHER_BLOCK = 200  # COPY・INSERT 以外の行は、この行数ずつま�
 SQL_STMT_LIMIT = 50_000_000  # 1つの INSERT 文として連結する文字数の上限（閉じない文で際限なく溜めない）
 
 
+class _Pushback:
+    """読んだ行を1つ戻せる並び（先読みした行を、for の次の回で読み直す）。"""
+
+    def __init__(self, it):
+        self._it = it
+        self._back: list = []
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._back:
+            return self._back.pop()
+        return next(self._it)
+
+    def push(self, x) -> None:
+        self._back.append(x)
+
+
 def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | None = None) -> None:
     """SQL 文を1行ずつ読む（巨大なダンプでも全文をメモリに載せない）。COPY ブロックと INSERT 文は列名を見出しにした表として検査する。
 
     lines は行末の改行を除いた行の並び。CREATE TABLE は読んだところで列名を覚え、後ろの列名の無い INSERT の見出しにする。
     """
     create_cols = dict(create_cols or {})
-    it = enumerate(lines, start=1)
+    it = _Pushback(enumerate(lines, start=1))
     n_copy = n_insert = 0
     block: list[str] = []
     base = 0
@@ -260,13 +283,19 @@ def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | 
             # CREATE TABLE は文の終わり（; を含む行）まで集めて列名を覚える。行は本文としても検査する
             parts = [line]
             other(ln_no, line)
+            pending = None  # 「;」の無い CREATE の後ろの COPY・INSERT の行（本文として飲み込まずに戻す）
             while ";" not in parts[-1] and len(parts) < 5000:
                 nxt = next(it, None)
                 if nxt is None:
                     break
+                if RE_COPY.match(nxt[1]) or RE_INSERT.search(nxt[1]):
+                    pending = nxt
+                    break
                 parts.append(nxt[1])
                 other(*nxt)
             create_cols.update(parse_create_tables("\n".join(parts)))
+            if pending is not None:
+                it.push(pending)
             continue
         other(ln_no, line)
     flush()

@@ -26,7 +26,7 @@ SQL_EXTS = (".sql", ".dump", ".pgsql", ".psql", ".ddl")
 def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     size = blob.size
     if size > TEXT_READ_ALL_LIMIT:
-        return _handle_huge_text(blob, item, col)
+        return _handle_huge_text(ctx, blob, item, col)
     text, enc = decode_text(blob.read_all())
     item.method = f"テキスト（{enc}）"
     from .dbdump import looks_like_sql, scan_copy_rows, scan_sql_text
@@ -143,8 +143,11 @@ def scan_embedded_base64(ctx: ScanContext, blob: Blob, item: ItemResult, text: s
         item.notes.append(f"base64 で埋め込まれた中身 {n} 件を取り出して検査した")
 
 
-def _handle_huge_text(blob: Blob, item: ItemResult, col: Collector) -> None:
-    """巨大なテキストを、文字コードを先頭で判定してから少しずつ読む（表なら列見出しつきで）。"""
+def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector) -> None:
+    """巨大なテキストを、文字コードを先頭で判定してから少しずつ読む（表なら列見出しつきで）。
+
+    丸ごと読む経路と違い、埋め込まれた base64（添付など）は見ない（README の「できないこと」に書いてある）。
+    """
     import csv
     import io
 
@@ -154,10 +157,26 @@ def _handle_huge_text(blob: Blob, item: ItemResult, col: Collector) -> None:
         stream = io.TextIOWrapper(raw, encoding=enc, errors="replace", newline="")
         sample = stream.read(1024 * 1024)
         if sample and not sample.endswith(("\n", "\r")):
-            sample += stream.readline()  # 見本の終わりで行を2つに割らない
+            sample += stream.readline(
+                4 * 1024 * 1024
+            )  # 見本の終わりで行を2つに割らない（改行の無い巨大な1行は打ち切る）
         rest = stream
-        from .dbdump import looks_like_sql, scan_sql_lines
+        from .dbdump import looks_like_sql, scan_copy_rows, scan_sql_lines
 
+        base = (blob.name_hint or blob.display).replace("\\", "/").rsplit("/", 1)[-1].rsplit("!", 1)[-1]
+        if base in ctx.pg_columns:
+            # pg_dump のディレクトリ形式のデータファイル（toc.dat で列名が分かっている）
+            table, columns = ctx.pg_columns[base]
+            item.method = f"巨大なテキスト（{enc}）を少しずつ読み取り"
+
+            def copy_lines():
+                for ln in io.StringIO(sample, newline=""):
+                    yield ln.rstrip("\r\n")
+                for ln in rest:
+                    yield ln.rstrip("\r\n")
+
+            scan_copy_rows(copy_lines(), table, columns, col, item)
+            return
         if blob.ext in SQL_EXTS or looks_like_sql(sample):
             item.method = f"巨大な SQL（{enc}）を少しずつ読み取り"
 

@@ -38,8 +38,10 @@ IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは
 READ_ALL_LIMIT = 256 * 1024 * 1024
 TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目印）
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
-CHECKPOINT_SECONDS = 60  # 検査の途中経過（それまでの検出）を書き出す間隔。時間切れで打ち切られても、ここまでの分は残る
-CHECKPOINT_EVERY = 5000  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
+# 検査の途中経過（それまでの検出）を書き出す最短の間隔。時間切れで打ち切られても、ここまでの分は残る。
+# 書き出しに時間がかかる（内側の項目が多い書庫など）ときは、検査の時間の 2% 以下に収まるよう間隔を広げる
+CHECKPOINT_SECONDS = 10
+CHECKPOINT_EVERY = 500  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
 # 住所・固定電話を「人の手がかり待ち」で値ごとに覚えておく上限（1件ごとに本文を抱える。超えた分は種類ごとの件数だけ数える）
 DEFER_LIMIT = 200_000
 
@@ -59,7 +61,7 @@ def read_checkpoint(path: str) -> list | None:
     try:
         with open(path, "rb") as f:
             items = pickle.load(f)
-    except (OSError, pickle.PickleError, EOFError, AttributeError, ValueError):
+    except Exception:  # 壊れた・古い版の途中経過で、打ち切りの記録そのものを落とさない
         items = None
     try:
         os.remove(path)
@@ -681,6 +683,7 @@ class ScanContext:
         self.items: list[ItemResult] = []
         self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
         self._last_checkpoint = time.time()
+        self._checkpoint_gap = 0.0  # 書き出しの重さから決めた間隔（CHECKPOINT_SECONDS より短くはしない）
         self.expanded_bytes = 0
         self.entries = 0
         self._tmp: str | None = None
@@ -752,11 +755,11 @@ class ScanContext:
         時間切れでワーカーごと打ち切られても、実行器がこれを読んで「途中まで検査」として検出を残す。書きかけで
         壊れた状態を読ませないよう、別名で書いてから置き換える。
         """
-        if not self.checkpoint_file or time.time() - self._last_checkpoint < CHECKPOINT_SECONDS:
+        now = time.time()
+        if not self.checkpoint_file or now - self._last_checkpoint < max(CHECKPOINT_SECONDS, self._checkpoint_gap):
             return
         import pickle
 
-        self._last_checkpoint = time.time()
         tmp = self.checkpoint_file + ".tmp"
         try:
             with open(tmp, "wb") as f:
@@ -764,6 +767,8 @@ class ScanContext:
             os.replace(tmp, self.checkpoint_file)
         except (OSError, pickle.PickleError, TypeError, AttributeError):
             pass  # 書き出せなくても検査は続ける（時間切れのときに途中の検出が残らないだけ）
+        self._last_checkpoint = time.time()
+        self._checkpoint_gap = (self._last_checkpoint - now) * 50
 
     # ---------------------------------------------------------- 検査の入口
 
@@ -1072,6 +1077,10 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     book = passwords or PasswordBook()
     ctx = ScanContext(path, options, book.candidates_for(path))
     ctx.checkpoint_file = checkpoint_path(options, path)
+    try:
+        os.remove(ctx.checkpoint_file)  # 前の検査が残した途中経過を、今回の分として読ませない
+    except OSError:
+        pass
     temp_root = options.temp_dir or tempfile.gettempdir()
     source: dict | None = None
     network_lost = False

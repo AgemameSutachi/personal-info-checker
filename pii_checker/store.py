@@ -288,9 +288,15 @@ class Store:
 
         検査中にレポートを出すこともあるので、書き込みの接続を握り続けないよう、読み取り専用の別の接続で読む（WAL なので並行して読める）。
         """
-        conn = sqlite3.connect(
-            f"file:{Path(self.path).as_posix()}?mode=ro", uri=True, check_same_thread=False, timeout=60
-        )
+        from urllib.parse import quote
+
+        try:
+            # % や # を含むパスでも開けるよう URI の形に符号化する
+            uri = "file:" + quote(Path(self.path).as_posix(), safe="/:") + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=60)
+        except sqlite3.OperationalError:
+            # UNC のパスなど URI で開けないときは、ふつうの接続で読む（読むだけなので書き込みは起きない）
+            conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.execute(sql, args)

@@ -473,14 +473,15 @@ class JobRunner:
             # ワーカーが途中で書き出した項目を先に読む（それまでの検出を残す）。そのあと一時フォルダを片付ける
             partial = read_checkpoint(checkpoint_path(self.options, path))
             cleanup_stale_temp([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダをすぐ片付ける
-            minutes = self._timeout_for(path) // 60
+            limit = self._timeout_for(path)
+            minutes = f"{limit // 60}分" if limit >= 60 else f"{limit}秒"  # 1分未満を「0分」と出さない
             if partial and any(i.finding_counts for i in partial):
                 reason = (
-                    f"時間切れ（{minutes}分）で打ち切った。途中までに見つけた分は記録した（残りは未検査）。"
+                    f"時間切れ（{minutes}）で打ち切った。途中までに見つけた分は記録した（残りは未検査）。"
                     "巨大なファイルは設定で時間制限を延ばして再検査"
                 )
             else:
-                reason = f"時間切れ（{minutes}分）で打ち切った。巨大なファイルは設定で時間制限を延ばして再検査"
+                reason = f"時間切れ（{minutes}）で打ち切った。巨大なファイルは設定で時間制限を延ばして再検査"
             self.store.save_failure(self.job_id, path, reason, elapsed, partial=partial)
         except process_expired as e:
             partial = read_checkpoint(checkpoint_path(self.options, path))

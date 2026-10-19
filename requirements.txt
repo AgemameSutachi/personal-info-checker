@@ -5,7 +5,7 @@ xlrd
 pyxlsb
 python-docx
 python-pptx
-pymupdf
+pymupdf<2  # 2.0 は pymupdf-layout と onnxruntime を連れてきて、読み込み時にアクセス違反で落ちることがある（CI で実測）
 olefile
 extract-msg
 msoffcrypto-tool

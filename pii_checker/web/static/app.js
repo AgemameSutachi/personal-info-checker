@@ -3,6 +3,8 @@
 
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get("token") || sessionStorage.getItem("piichk_token") || "";
+// アプリ版の exe へフォルダ・ファイルを落として開いたとき、そのパスを検査の対象の欄に入れておく（下でアドレスから消える）
+const INITIAL_ROOTS = params.getAll("root").filter((r) => r.trim());
 if (params.get("token")) {
   sessionStorage.setItem("piichk_token", params.get("token"));
   history.replaceState(null, "", location.pathname + location.hash); // アドレス欄から合言葉を消す（#job= は残す）
@@ -1096,6 +1098,11 @@ $("#rep-xlsx").addEventListener("click", () => download("xlsx"));
   if (!state.info) return;
   await loadUserRuleSettings();
   await loadJobs();
+  if (INITIAL_ROOTS.length) {
+    $("#roots").value = INITIAL_ROOTS.join("\n");
+    showView("new");
+    return;
+  }
   const m = location.hash.match(/^#(job|report)=([\w-]+)$/);
   if (m) {
     await openJob(m[2]); // ブックマークや再読み込みで同じ検査結果・レポートを開ける

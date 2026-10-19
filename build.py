@@ -2,13 +2,14 @@
 
   python build.py [--python32-zip <python-3.12.x-embed-win32.zip>]
 
-dist/PiiChecker/ に次をまとめる:
-  PiiChecker.exe       … アプリ版（窓）。引数を付ければ CLI としても動く
-  PiiChecker-cmd.exe   … コマンド版（コンソール）
-  7z/                  … 7-Zip（LGPL。License.txt を同梱）。この PC の 7-Zip から写す
-  python32/            … 32bit の Python 埋め込み版＋ access32_helper.py（Access 97 等を読む補助）
+dist/PiiChecker/ に次をまとめる（一番上でダブルクリックできる exe はアプリ版の1つだけにする）:
+  PiiChecker.exe               … アプリ版（窓）。引数にパスがあれば、それを対象に入れて窓を開く
+  cmd/PiiChecker-cmd.exe       … コマンド版（コンソール）。親の _internal を使う
+  _internal/                   … PyInstaller の部品と、次の同梱物
+  _internal/7z/                … 7-Zip（LGPL。License.txt を同梱）。この PC の 7-Zip から写す
+  _internal/python32/          … 32bit の Python 埋め込み版＋ access32_helper.py（Access 97 等を読む補助）
   LICENSE.txt / THIRD-PARTY-LICENSES.txt … このツールと、同梱する依存のライセンス文
-  はじめにお読みください.txt … どの exe を開けばよいかの短い説明
+  はじめにお読みください.txt   … 画面の版とコマンド版の使い方（配布の zip に README は入れない）
 作業用のフォルダは build/ と dist/ の下にだけ作る。
 """
 
@@ -25,6 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist" / "PiiChecker"
+INTERNAL = DIST / "_internal"
+CMD_DIR = DIST / "cmd"
+CMD_EXE = "PiiChecker-cmd.exe"
 WORK = ROOT / "build"
 PY32_URL = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-win32.zip"
 
@@ -46,15 +50,19 @@ for pkg in ('winrt', 'pymupdf', 'webview', 'extract_msg', 'msoffcrypto', 'py7zr'
     except Exception:
         pass
 
-def make(script, name, console):
+def make(script, name, console, options=(), **kw):
     a = Analysis([script], pathex=[r'{root}'], binaries=binaries, datas=datas, hiddenimports=hiddenimports,
                  excludes=['tkinter'], noarchive=False)
     pyz = PYZ(a.pure)
-    exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=name, console=console, upx=False)
+    exe = EXE(pyz, a.scripts, list(options), exclude_binaries=True, name=name, console=console, upx=False, **kw)
     return a, exe
 
 a1, exe1 = make(r'{root}/entry_app.py', 'PiiChecker', False)
-a2, exe2 = make(r'{root}/entry_cli.py', 'PiiChecker-cmd', True)
+# コマンド版は build.py が cmd/ へ移すので、部品は親の _internal から読ませる。PyInstaller の
+# contents_directory は1階層の名前しか受け付けないため、"." で既定の設定を止め、起動部が読む設定を直接埋める
+a2, exe2 = make(r'{root}/entry_cli.py', 'PiiChecker-cmd', True,
+                options=[('pyi-contents-directory ..\\_internal', '', 'OPTION')], contents_directory='.')
+# COLLECT は最初の EXE（アプリ版）の contents_directory（_internal）でフォルダを組む
 coll = COLLECT(exe1, a1.binaries, a1.datas, exe2, a2.binaries, a2.datas, upx=False, name='PiiChecker')
 """
 
@@ -76,7 +84,7 @@ def copy_7zip() -> None:
     if not src:
         print("! 7-Zip が見つからないため同梱しない（rar・lzh・ディスクイメージ等は配布先に 7-Zip が要る）")
         return
-    dst = DIST / "7z"
+    dst = INTERNAL / "7z"
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("7z.exe", "7z.dll", "License.txt", "readme.txt"):
         if (src / name).is_file():
@@ -123,7 +131,8 @@ def write_licenses() -> None:
         "個人情報チェッカーの配布版に含まれる第三者のソフトウェアと、そのライセンス文です。\n"
         "PyMuPDF（AGPL-3.0）・extract-msg（GPL-3.0）を含むため、配布版の全体は AGPL-3.0 の条件に従います。\n"
         "ソース: https://github.com/AgemameSutachi/personal-info-checker\n"
-        "7-Zip のライセンスは 7z/License.txt、32bit の Python 埋め込み版のライセンスは python32/LICENSE.txt にあります。\n",
+        "7-Zip のライセンスは _internal/7z/License.txt、32bit の Python 埋め込み版のライセンスは "
+        "_internal/python32/LICENSE.txt にあります。\n",
         # PyMuPDF の配布物の COPYING は1行だけで本文を含まないので、AGPL-3.0 の全文はリポジトリの写しから入れる
         "=" * 78
         + "\nGNU Affero General Public License v3.0（PyMuPDF と、それを含む配布版の全体に適用）\n"
@@ -161,21 +170,23 @@ def write_licenses() -> None:
 
 FIRST_README = """個人情報チェッカー {version}
 
-■ どれを開けばよいか
-  PiiChecker.exe       … ふだんはこれをダブルクリックします（画面で操作するアプリ版）
-  PiiChecker-cmd.exe   … コマンドで使う版です。ダブルクリックでは使いません
-                          （Web 版の起動・タスクスケジューラでの定期検査などに使う）
+■ 画面で使う
+  PiiChecker.exe をダブルクリックします。調べたいフォルダを PiiChecker.exe に重ねて離しても開けます。
 
-■ 中身
-  7z\\・python32\\・_internal\\ … 動かすのに要る部品です。消したり動かしたりしないでください
-  LICENSE.txt・THIRD-PARTY-LICENSES.txt … ライセンス文
+■ コマンドで使う（定期検査・Web 版）
+  cmd\\PiiChecker-cmd.exe を、コマンドプロンプトや PowerShell から使います。例:
+    cmd\\PiiChecker-cmd.exe scan \\\\nas01\\総務 -o 結果.xlsx
+    cmd\\PiiChecker-cmd.exe serve
+  引数の一覧は cmd\\PiiChecker-cmd.exe --help で出ます。
 
-使い方の詳細: https://github.com/AgemameSutachi/personal-info-checker#readme
+■ そのほか
+  _internal と cmd は動かすのに要る部品です。中身を消したり、PiiChecker フォルダの外へ動かしたりしないでください。
+  使い方の詳細: https://github.com/AgemameSutachi/personal-info-checker#readme
 """
 
 
 def write_first_readme() -> None:
-    """配布フォルダに、どの exe を開けばよいかを書いた短い説明を置く（exe が2つあって迷わないように）。"""
+    """配布フォルダに、画面の版とコマンド版の使い方を書いた短い説明を置く（配布の zip に README は入れないため）。"""
     from pii_checker import __version__
 
     DIST.mkdir(parents=True, exist_ok=True)
@@ -185,7 +196,7 @@ def write_first_readme() -> None:
 
 
 def add_python32(zip_path: str | None) -> None:
-    dst = DIST / "python32"
+    dst = INTERNAL / "python32"
     dst.mkdir(parents=True, exist_ok=True)
     if not zip_path:
         zip_path = str(WORK / "python32-embed.zip")
@@ -232,13 +243,36 @@ def main() -> int:
             str(spec),
         ]
     )
+    move_cmd_exe()
     copy_7zip()
     write_licenses()
     write_first_readme()
     if not args.skip_python32:
         add_python32(args.python32_zip)
+    check_layout()
     print(f"\n完成: {DIST}")
     return 0
+
+
+def move_cmd_exe() -> None:
+    """コマンド版を cmd/ へ移し、一番上でダブルクリックできる exe をアプリ版の1つだけにする。"""
+    CMD_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(DIST / CMD_EXE), str(CMD_DIR / CMD_EXE))
+
+
+def check_layout() -> None:
+    """できた配布フォルダの置き方を確かめる（親の _internal を読む設定は PyInstaller の文書に無い使い方なので、毎回実物で起動する）。"""
+    top_exes = sorted(p.name for p in DIST.glob("*.exe"))
+    if top_exes != ["PiiChecker.exe"]:
+        raise SystemExit(f"! 一番上の exe がアプリ版の1つだけになっていない: {top_exes}")
+    from pii_checker import __version__
+
+    out = subprocess.run(
+        [str(CMD_DIR / CMD_EXE), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
+    if out.returncode != 0 or __version__ not in out.stdout:
+        raise SystemExit(f"! cmd/{CMD_EXE} が起動しない（終了コード {out.returncode}）: {out.stdout}{out.stderr}")
+    print(f"cmd/{CMD_EXE} の起動を確認: {out.stdout.strip()}")
 
 
 if __name__ == "__main__":

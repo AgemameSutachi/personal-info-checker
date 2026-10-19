@@ -104,7 +104,15 @@ class DesktopApi:
         return {"path": path}
 
 
-def run_app(db: str | None = None) -> None:
+def app_url(port: int, token: str, roots: list[str] | None = None) -> str:
+    """窓で開く URL。roots は検査の対象の欄へ最初から入れておくパス（画面が読んだあとアドレスから消す）。"""
+    from urllib.parse import urlencode
+
+    query = [("token", token)] + [("root", r) for r in roots or [] if r]
+    return f"http://127.0.0.1:{port}/?{urlencode(query)}"
+
+
+def run_app(db: str | None = None, roots: list[str] | None = None) -> None:
     try:
         import uvicorn
         import webview
@@ -125,7 +133,7 @@ def run_app(db: str | None = None) -> None:
         if server.started:
             break
         time.sleep(0.05)
-    url = f"http://127.0.0.1:{port}/?token={app.state.token}"
+    url = app_url(port, app.state.token, roots)
     if not webview2_available():
         return _browser_fallback(url, server, t, "Microsoft Edge WebView2 ランタイムが入っていない")
     api = DesktopApi(app)

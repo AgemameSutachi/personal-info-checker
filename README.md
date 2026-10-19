@@ -18,7 +18,7 @@
 ## すぐ使う
 
 1. [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases/latest) から `PiiChecker-<版>.zip` をダウンロードし、好きな場所に展開する（Python は要りません）
-2. 展開した `PiiChecker` フォルダの `PiiChecker.exe` をダブルクリックする（隣の `PiiChecker-cmd.exe` はコマンドで使う版で、ダブルクリックでは使いません）
+2. 展開した `PiiChecker` フォルダの `PiiChecker.exe` をダブルクリックする
 3. 調べるフォルダを入れて「検査を始める」を押す
 
 初めて起動するとき「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します（署名の無いアプリのため）。展開する前に、zip を右クリック →「プロパティ」→「許可する」にチェックを入れておくと出ません。
@@ -40,11 +40,11 @@
 
 | 使い方 | 起動のしかた | 向いているとき |
 | --- | --- | --- |
-| アプリ版（デスクトップアプリ） | `PiiChecker.exe` をダブルクリック | ふだんはこれ |
-| Web 版（ブラウザ） | `PiiChecker-cmd.exe serve` | ブラウザで操作したいとき |
-| コマンド版 | `PiiChecker-cmd.exe scan …` | 定期実行・無人実行（「コマンドで使う」の節） |
+| アプリ版（デスクトップアプリ） | `PiiChecker.exe` をダブルクリック（調べたいフォルダを重ねて離すと、それを入れた状態で開く） | ふだんはこれ |
+| Web 版（ブラウザ） | `cmd\PiiChecker-cmd.exe serve` | ブラウザで操作したいとき |
+| コマンド版 | `cmd\PiiChecker-cmd.exe scan …` | 定期実行・無人実行（「コマンドで使う」の節） |
 
-- コマンド版・Web 版は、エクスプローラーで `PiiChecker` フォルダを開き、アドレス欄に `cmd` と打って Enter で出る窓から打ちます
+- コマンド版・Web 版の exe は、`PiiChecker` フォルダの中の `cmd` フォルダにあります（ダブルクリックではなく、コマンドで使います）。エクスプローラーで `PiiChecker` フォルダを開き、アドレス欄に `cmd` と打って Enter で出る窓から、上の表のとおり `cmd\PiiChecker-cmd.exe …` と打ちます
 - アプリ版と Web 版は同じ画面です。WebView2 が無い PC では、アプリ版も同じ画面を既定のブラウザで開き、小さなメッセージの窓が出ます。**このメッセージの窓を閉じる（OK を押す）と検査が中断する**ので、検査が終わるまで閉じないでください
 - **アプリ版は、検査中に窓を閉じると検査が中断します**（閉じる前に確認が出ます。あとで「再開」で続きから進められます）。Web 版はブラウザを閉じても検査は続き、コマンドの窓で Ctrl+C を押してサーバーを止めると中断します
 - Web 版は起動すると合言葉入りの URL（`http://127.0.0.1:8765/?token=…`）を表示してブラウザを開きます。既定では自分の PC からしか開けません。IPv6 で待ち受けるときは `--host ::1` を付けます（URL は `http://[::1]:8765/?token=…`）
@@ -54,7 +54,7 @@
 ほかの PC から Web 版を使うときは、次のように起動します。
 
 ```
-PiiChecker-cmd.exe serve --host 0.0.0.0 --token <推測されにくい長い合言葉>
+cmd\PiiChecker-cmd.exe serve --host 0.0.0.0 --token <推測されにくい長い合言葉>
 ```
 
 - ブラウザは自動では開きません。ほかの PC で、表示された URL の `127.0.0.1` をこの PC の名前か IP アドレス（`ipconfig` で確かめる）に置き換えて開きます（ポートは 8765）
@@ -347,33 +347,33 @@ Excel のシートと画面の対応は次のとおりです。
 
 ## コマンドで使う
 
-コマンド版 `PiiChecker-cmd.exe` は、タスクスケジューラでの定期検査など、人が画面にいないときに使います。結果は画面の版と同じ場所に保存され、画面からも見られます。
+コマンド版 `cmd\PiiChecker-cmd.exe`（`PiiChecker` フォルダの中の `cmd` フォルダにあります）は、タスクスケジューラでの定期検査など、人が画面にいないときに使います。結果は画面の版と同じ場所に保存され、画面からも見られます。
 
 ```
 # フォルダを検査して Excel と CSV を出す
-PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
+cmd\PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
 
 # 分かっているパスワードをファイルで渡す（UTF-8・1行1つ）
-PiiChecker-cmd.exe scan \\nas01\総務 --password-file pw.txt
+cmd\PiiChecker-cmd.exe scan \\nas01\総務 --password-file pw.txt
 
 # 無人で走らせる（最後にパスワードを聞かない）
-PiiChecker-cmd.exe scan \\nas01\総務 --no-ask -o 結果.xlsx
+cmd\PiiChecker-cmd.exe scan \\nas01\総務 --no-ask -o 結果.xlsx
 
 # 接続方式で指定する（パスワードはコンソールで聞かれる）
-PiiChecker-cmd.exe scan --connect smb --host nas01 --share 総務 --path 2024年度 --user taro
-PiiChecker-cmd.exe scan --connect ftps --host 192.168.0.5 --path 共有/総務 --user taro
+cmd\PiiChecker-cmd.exe scan --connect smb --host nas01 --share 総務 --path 2024年度 --user taro
+cmd\PiiChecker-cmd.exe scan --connect ftps --host 192.168.0.5 --path 共有/総務 --user taro
 
 # 中断した検査の続き・一覧・レポートの出し直し
-PiiChecker-cmd.exe scan --resume <ジョブID>
-PiiChecker-cmd.exe jobs
-PiiChecker-cmd.exe report <ジョブID> -o 結果.xlsx
+cmd\PiiChecker-cmd.exe scan --resume <ジョブID>
+cmd\PiiChecker-cmd.exe jobs
+cmd\PiiChecker-cmd.exe report <ジョブID> -o 結果.xlsx
 ```
 
 | 引数 | 意味 |
 | --- | --- |
 | `-o` / `--output` | レポート（.xlsx）の出力先。省くとドキュメントへ `個人情報チェッカー_<ジョブID>.xlsx` |
 | `--csv` | `検出明細_<ジョブID>.csv` と `全項目_<ジョブID>.csv` も、xlsx と同じフォルダへ出す |
-| `--resume <ジョブID>` | 中断した検査の続きから進める（ジョブID は `PiiChecker-cmd.exe jobs` で分かる）。接続方式の検査では接続のパスワードをもう一度聞く |
+| `--resume <ジョブID>` | 中断した検査の続きから進める（ジョブID は `cmd\PiiChecker-cmd.exe jobs` で分かる）。接続方式の検査では接続のパスワードをもう一度聞く |
 | `--password-file` | 試すパスワードの一覧。`--resume` と一緒に使うと、後で分かったパスワードを要パスワードの全件に試す |
 | `--no-ask` | 最後にパスワードを聞かない（無人実行用） |
 | `--no-reuse` | 前回の結果を使わず全部読み直す |
@@ -402,7 +402,7 @@ PiiChecker-cmd.exe report <ジョブID> -o 結果.xlsx
 タスクスケジューラで毎週月曜 7 時に検査する例（1行で登録します。`-o` の `{job}` はジョブ ID に置き換わります）:
 
 ```
-schtasks /Create /TN "個人情報チェッカー 週次" /SC WEEKLY /D MON /ST 07:00 /TR "\"C:\PiiChecker\PiiChecker-cmd.exe\" scan \\nas01\総務 --no-ask --exit-by-verdict --csv -o D:\点検\個人情報チェッカー_{job}.xlsx"
+schtasks /Create /TN "個人情報チェッカー 週次" /SC WEEKLY /D MON /ST 07:00 /TR "\"C:\PiiChecker\cmd\PiiChecker-cmd.exe\" scan \\nas01\総務 --no-ask --exit-by-verdict --csv -o D:\点検\個人情報チェッカー_{job}.xlsx"
 ```
 
 結果はタスクスケジューラの「前回の実行結果」に出ます: 0x0 = 検出なし、0x1 = 個人情報の可能性あり（レポートを確かめる）、0x4 = 要確認・言い切れない（「要対応」シートを確かめる）、0x2 = 指定の誤り（場所・接続を直す）、0x3 = 途中で止めた（`--resume <ジョブID>` で続きから）。0x1 でもレポートが出ていなければ、実行そのものの失敗（exe の場所・実行するアカウントの権限・「開始」のフォルダなど）を疑ってください（Windows がプログラムを起動できなかったときも 0x1 になることがあります）。接続方式でユーザー名を付けて定期実行するときは `--conn-password-file` も指定します。
@@ -504,5 +504,5 @@ python -m pii_checker scan \\nas01\総務 -o 結果.xlsx  # コマンド版
 このリポジトリのコードは MIT License です（[LICENSE](LICENSE)）。依存パッケージはそれぞれのライセンスに従います。Python で動かす場合も、配布版を使う場合も、次の条件がかかります。
 
 - PyMuPDF（PDF の読み取り）は GNU AGPL-3.0、extract-msg（Outlook の msg）は GNU GPL-3.0 です。これらを含む形（配布版の exe など）で配るときは、全体として AGPL-3.0 の条件（対応するソースの提供など）に従ってください。ソースはこのリポジトリです
-- 配布版に同梱する 7-Zip は GNU LGPL ほか（`7z/License.txt` に従う）、py7zr・pyxlsb・pebble などは LGPL、32bit の Python 埋め込み版は PSF License です
+- 配布版に同梱する 7-Zip は GNU LGPL ほか（`_internal/7z/License.txt` に従う）、py7zr・pyxlsb・pebble などは LGPL、32bit の Python 埋め込み版は PSF License です
 - 上は主なものです。配布版に含まれるすべての依存とそのライセンス文は、配布版の `THIRD-PARTY-LICENSES.txt` にあります（AGPL-3.0 の全文は [licenses/AGPL-3.0.txt](licenses/AGPL-3.0.txt)）

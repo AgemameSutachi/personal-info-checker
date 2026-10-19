@@ -483,8 +483,57 @@ def cmd_serve(args) -> int:
 def cmd_app(args) -> int:
     from .desktop import run_app
 
-    run_app(db=args.db)
+    run_app(db=args.db, roots=getattr(args, "paths", None) or [])
     return 0
+
+
+def ensure_std_streams() -> None:
+    """標準出力・標準エラーが無いとき（窓の exe・pythonw）は捨て先へ向け、表示のための書き込みで落ちないようにする。"""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+
+
+def _alert(message: str) -> None:
+    """コンソールの無いアプリ版で、知らせたいことを窓で出す（Windows 以外や窓を出せないときは何もしない）。"""
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, "個人情報チェッカー", 0x10)
+    except Exception:
+        pass
+
+
+COMMANDS = ("scan", "report", "jobs", "serve")
+
+
+def app_main(argv: list[str]) -> int:
+    """アプリ版（PiiChecker.exe）の入口。引数があっても窓を開き、コマンドの処理へは入らない。
+
+    エクスプローラーでフォルダやファイルを exe へドラッグして離す・「送る」から開くと、そのパスが引数で渡るので、
+    それを検査の対象に入れた状態で窓を開く。受け付けるのは保存先の指定（--db）とパスだけ。
+    """
+    ensure_std_streams()
+    ap = argparse.ArgumentParser(prog="PiiChecker", add_help=False)
+    ap.add_argument("--db")
+    ap.add_argument("paths", nargs="*")
+    args, _unknown = ap.parse_known_args(argv)
+    # ドライブの直下を落とすと "D:\" の末尾の \" が引用符の逃がしと読まれ、D:" で届くので戻す
+    paths = [p[:-1] + "\\" if len(p) == 3 and p.endswith(':"') else p for p in args.paths]
+    if paths and paths[0] == "app":
+        paths = paths[1:]
+    command = next((p for p in paths if p in COMMANDS), None)
+    if command or _unknown:
+        _alert(
+            f"「{command or _unknown[0]}」はコマンド版の指定です。PiiChecker.exe は画面で使う版なので、コマンドでは使えません。\n\n"
+            "コマンドで使うときは、PiiChecker.exe と同じ場所にある cmd フォルダの PiiChecker-cmd.exe を使ってください。"
+        )
+        return 2
+    try:
+        return cmd_app(argparse.Namespace(db=args.db, paths=paths))
+    except StoreOpenError as e:
+        _alert(str(e))
+        return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -613,11 +662,13 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_serve)
 
     a = sub.add_parser("app", help="アプリ版を起動する（窓で操作）")
+    a.add_argument("paths", nargs="*", help="検査の対象に入れておくフォルダ・ファイル")
     a.set_defaults(func=cmd_app)
     return ap
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_std_streams()
     ap = build_parser()
     if argv is None:
         argv = sys.argv[1:]
@@ -637,11 +688,6 @@ def main(argv: list[str] | None = None) -> int:
     except StoreOpenError as e:
         print(e, file=sys.stderr)
         if args.cmd == "app":
-            # アプリ版（PiiChecker.exe）はコンソールが無く、上の表示が見えないので窓でも知らせる
-            try:
-                import ctypes
-
-                ctypes.windll.user32.MessageBoxW(None, str(e), "個人情報チェッカー", 0x10)
-            except Exception:
-                pass
+            # 窓で開くときは、上の表示が見えないこともあるので窓でも知らせる
+            _alert(str(e))
         return 2

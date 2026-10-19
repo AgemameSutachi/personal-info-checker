@@ -227,3 +227,73 @@ def test_cli_prints_diff_line_and_totals(tmp_path, capsys):
 def test_rules_file_help_names_the_format():
     text = cli.build_parser()._subparsers._group_actions[0].choices["scan"].format_help()
     assert "名前 | 探す語か正規表現 | 確度" in text
+
+
+def test_scan_without_console_streams_does_not_crash(tmp_path, monkeypatch):
+    """標準出力・標準エラーが無い（窓の exe・pythonw）ときも、進み具合の表示で落ちずに最後まで検査する。
+
+    再現: 窓の exe（PiiChecker.exe）へ scan の引数を渡すと、sys.stdout が None のため進み具合の表示で
+    'NoneType' object has no attribute 'write' で落ち、エラーの窓が出ていた（不具合の修正）。
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("顧客 携帯 090-1234-5678\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    assert _scan(tmp_path, root, "nostream", "--exit-by-verdict") == cli.EXIT_FOUND
+    assert (tmp_path / "out" / "nostream.xlsx").is_file()
+
+
+def _capture_app_main(monkeypatch):
+    seen = {"alerts": []}
+    monkeypatch.setattr(cli, "_alert", lambda m: seen["alerts"].append(m))
+    monkeypatch.setattr(cli, "cmd_app", lambda a: seen.update(db=a.db, paths=a.paths) or 0)
+
+    def no_scan(args):
+        raise AssertionError("アプリ版の入口からコマンドの処理へ入った")
+
+    monkeypatch.setattr(cli, "cmd_scan", no_scan)
+    return seen
+
+
+def test_app_exe_with_dropped_paths_opens_window(monkeypatch):
+    """アプリ版へフォルダ・ファイルをドラッグして離す／「送る」で開くと、そのパスを対象に入れて窓を開く。"""
+    seen = _capture_app_main(monkeypatch)
+    assert cli.app_main([r"D:\共有 1", r"E:\名簿.xlsx"]) == 0
+    assert seen["paths"] == [r"D:\共有 1", r"E:\名簿.xlsx"] and seen["db"] is None
+    assert cli.app_main(["--db", "D:/x/jobs.sqlite3"]) == 0
+    assert seen["paths"] == [] and seen["db"] == "D:/x/jobs.sqlite3"
+    assert cli.app_main([]) == 0 and seen["paths"] == []
+    assert not seen["alerts"]
+
+
+def test_app_exe_with_command_args_does_not_scan(monkeypatch):
+    """アプリ版にコマンドの指定（scan 等）が渡っても検査へは入らず、コマンド版を使うよう窓で知らせる。"""
+    seen = _capture_app_main(monkeypatch)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    assert cli.app_main(["--db", "D:/x.sqlite3", "scan", r"D:\共有", "--no-ask", "-o", "r.xlsx"]) == 2
+    assert "paths" not in seen
+    assert len(seen["alerts"]) == 1 and "PiiChecker-cmd.exe" in seen["alerts"][0]
+    # コマンドの語やオプションが先頭に無くても、パスと取り違えて窓を開かない
+    assert cli.app_main(["-o", "r.xlsx", "scan", r"D:\共有"]) == 2
+    assert cli.app_main([r"D:\共有", "--no-ask"]) == 2
+    assert "paths" not in seen and len(seen["alerts"]) == 3
+
+
+def test_app_exe_with_dropped_drive_root(monkeypatch):
+    """ドライブの直下（"D:\\"）を落とすと Windows の引数の読み方で D:" で届くので、D:\\ に戻して対象に入れる。"""
+    seen = _capture_app_main(monkeypatch)
+    assert cli.app_main(['D:"']) == 0
+    assert seen["paths"] == ["D:\\"]
+
+
+def test_app_url_carries_dropped_paths():
+    """窓で開く URL に、対象に入れておくパスを載せる（空白・日本語・円記号も崩さない）。"""
+    from urllib.parse import parse_qs, urlparse
+
+    from pii_checker.desktop import app_url
+
+    q = parse_qs(urlparse(app_url(1234, "tok", [r"D:\共有 1", r"\nas01\総務&経理"])).query)
+    assert q["token"] == ["tok"] and q["root"] == [r"D:\共有 1", r"\nas01\総務&経理"]
+    assert "root" not in parse_qs(urlparse(app_url(1234, "tok")).query)

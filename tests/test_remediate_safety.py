@@ -340,6 +340,29 @@ def test_one_line_create_table_columns_are_dropped_and_dump_loads(tmp_path, tras
     assert r["remaining"]["total"] == 0
 
 
+@pytest.mark.parametrize("one_line", [True, False], ids=["1行の CREATE", "1行に1列の CREATE"])
+def test_columns_named_like_constraint_words_are_columns(tmp_path, trash, one_line):
+    """「key_note」「index_no」「check_date」のような列名を制約の行と見なさない（別の列を消して食い違うダンプを作った不具合）。"""
+    cols = ["id INTEGER", "key_note TEXT", "index_no INTEGER", "check_date TEXT", "email TEXT", "other TEXT"]
+    body = ", ".join(cols) if one_line else "\n  " + ",\n  ".join(cols) + "\n"
+    rows = "\n".join(
+        f"INSERT INTO people VALUES({i},'メモ{i}',{i},'2020-01-0{i % 9 + 1}','user{i}@example.com','x{i}');"
+        for i in range(1, 31)
+    )
+    p = tmp_path / "src" / "people.sql"
+    p.parent.mkdir()
+    p.write_text(f"CREATE TABLE people ({body});\n{rows}\n", encoding="utf-8", newline="\n")
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_columns", confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    mem = sqlite3.connect(":memory:")
+    mem.executescript(p.read_text(encoding="utf-8"))  # CREATE と INSERT の列の数が合っている
+    names = [row[1] for row in mem.execute("PRAGMA table_info(people)")]
+    assert "email" not in names and names == ["id", "key_note", "index_no", "check_date", "other"], names
+    assert mem.execute("SELECT key_note, other FROM people WHERE id=3").fetchone() == ("メモ3", "x3")
+    mem.close()
+
+
 def test_dropping_a_column_missing_from_create_is_refused(tmp_path, trash):
     """CREATE の列の並びを読み取れず、INSERT だけ列が減る形になるなら、断って元を残す。"""
     text = "CREATE TABLE people (id INTEGER, memo TEXT, email TEXT);\n" + "".join(

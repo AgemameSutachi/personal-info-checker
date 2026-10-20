@@ -47,6 +47,27 @@ CONSTRAINT_WORDS = (
     "SPATIAL",
     "EXCLUDE",
 )
+# 制約の行（列ではない項目）。先頭の語だけで見ると「key_note」「index_no」「check_date」のような列名まで制約と見なすので、
+# 語の区切りと後ろの形（KEY 名前 ( ／ CHECK ( ／ PRIMARY KEY など）まで見る。引用符で囲んだ列名には当たらない
+RE_CONSTRAINT_ITEM = re.compile(
+    r"""^(?:
+        PRIMARY\s+KEY\b
+      | FOREIGN\s+KEY\b
+      | CONSTRAINT\s+\S+
+      | CHECK\s*\(
+      | UNIQUE\s*(?:\(|(?:KEY|INDEX)\b)
+      | (?:FULLTEXT|SPATIAL)\s+(?:KEY|INDEX)\b
+      | (?:KEY|INDEX)\s+(?:[`"\[\]\w.]+\s*)?\(
+      | (?:KEY|INDEX)\s*\(
+      | EXCLUDE\s+(?:USING\b|\()
+    )""",
+    re.I | re.X,
+)
+
+
+def is_constraint_item(text: str) -> bool:
+    """CREATE TABLE の本体の1項目が、列ではなく制約（主キー・索引・外部キー・検査など）か。"""
+    return bool(RE_CONSTRAINT_ITEM.match(text.strip()))
 
 
 def split_top_level(text: str) -> list[str]:
@@ -96,7 +117,7 @@ def parse_create_tables(text: str) -> dict[str, list[str]]:
             # 1 行に複数の列がある形（sqlite3 の .dump は表を 1 行で出す）も、コンマで分けて列ごとに見る
             for line in split_top_level(raw_line):
                 line = line.strip().rstrip(",")
-                if not line or line.upper().startswith(CONSTRAINT_WORDS):
+                if not line or is_constraint_item(line):
                     continue
                 mm = re.match(r'([`"\[]?)([^`"\]\s]+)\1?\]?\s+\w', line)
                 if mm:

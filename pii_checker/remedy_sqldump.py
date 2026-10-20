@@ -18,7 +18,7 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 
 from .formats.dbdump import (
-    CONSTRAINT_WORDS,
+    is_constraint_item,
     RE_COPY,
     RE_CREATE,
     RE_CREATE_START,
@@ -747,7 +747,7 @@ class DumpRewriter:
             if not st:
                 kept.append(piece)
                 continue
-            if st.upper().startswith(CONSTRAINT_WORDS):
+            if is_constraint_item(st):
                 if any(re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", st) for n in names):
                     continue
                 kept.append(piece)
@@ -791,7 +791,7 @@ class DumpRewriter:
                 # 1 行に複数の列・制約がある（sqlite3 の .dump は表を 1 行で出す）。行ごとには扱えないので、項目ごとに組み直す
                 return DumpRewriter._edit_create_inline(text, m, names)
             alone = not text[ls:a].strip() and not text[b:le].strip()
-            if st.upper().startswith(CONSTRAINT_WORDS):
+            if is_constraint_item(st):
                 elements.append((li, "constraint", st, alone))
                 continue
             mm = RE_COLUMN_LINE.match(st)

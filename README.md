@@ -16,11 +16,13 @@
 
 ## すぐ使う
 
-1. [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases/latest) から `PiiChecker-<版>.zip` をダウンロードし、好きな場所に展開する
+1. [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) から、一番上（いちばん新しい版）の `PiiChecker-<版>.zip` をダウンロードし、好きな場所に展開する
 2. 展開した `PiiChecker` フォルダの `PiiChecker.exe` をダブルクリックする
 3. 調べるフォルダを入れて「検査を始める」を押す
 
 動作環境は Windows 10・11 の 64bit です。Python などを入れる必要はありません（zip は約 120MB、展開後は約 220MB）。初めて起動するとき「Windows によって PC が保護されました」と出たら、「詳細情報」→「実行」を押します。
+
+いまの配布版はすべて**実験版**（Releases で「Pre-release」の印）です。まだ動作を保証できる段階ではないので、大事なファイルに対処する前は写しを取ってください。
 
 ## 検査のしかた
 

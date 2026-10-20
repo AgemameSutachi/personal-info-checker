@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import re
 from bisect import bisect_left
 import unicodedata
@@ -978,6 +979,8 @@ def _guard_ranges_for(ext) -> list[tuple[int, int]]:
             return [tuple(r) for r in _rust_guard.RANGES]
     except ImportError:
         pass
+    except Exception:  # noqa: BLE001 - 表が途中で切れた・項目が無いなど。その場で求め直せば正しい
+        pass
     return _rust_guard_ranges(ext)
 
 
@@ -985,19 +988,27 @@ def _load_rust():
     """Rust 拡張を読み込んで、使える状態にして返す。使えなければ None（Python 版で動く）。"""
     import os
 
+    global _RUST_NOTE
     if os.environ.get("PII_CHECKER_NO_RUST"):
+        _RUST_NOTE = "環境変数 PII_CHECKER_NO_RUST により使っていない"
         return None
     try:
         import pii_rs_detect as ext
     except ImportError:
+        _RUST_NOTE = "拡張が入っていない"
         return None
     try:
         ext.set_mismatch_ranges(_guard_ranges_for(ext))
-    except Exception:  # noqa: BLE001 - 拡張が壊れていても、検出は Python 版で続ける
+    except Exception as exc:  # noqa: BLE001 - 拡張が壊れていても、検出は Python 版で続ける
+        _RUST_NOTE = f"拡張の読み込みに失敗した（{exc!r}）"
+        _log.warning("Rust 拡張を使えないため、Python の経路で検出します: %r", exc)
         return None
     return ext
 
 
+# Rust 拡張を使っていないときの理由（使っていれば空）。--version などで利用者に見せる
+_RUST_NOTE = ""
+_log = logging.getLogger(__name__)
 _RUST = _load_rust()
 
 
@@ -1006,10 +1017,23 @@ def rust_enabled() -> bool:
     return _RUST is not None
 
 
+def rust_status() -> str:
+    """検出エンジンの説明（利用者向け）。Rust を使っていないときは理由を添える。"""
+    if _RUST is not None:
+        return "Rust 拡張"
+    return f"Python（Rust 拡張なし: {_RUST_NOTE}）" if _RUST_NOTE else "Python（Rust 拡張なし）"
+
+
 def _disable_rust(error: BaseException) -> None:
-    """拡張が想定外の失敗をした（panic など）ので、以後は使わず Python 版で検出する。"""
-    global _RUST
+    """拡張が想定外の失敗をした（panic など）ので、以後は使わず Python 版で検出する。
+
+    結果は Python 版で同じものが出るので検査は続く。遅くなった理由を後から追えるよう、ログ（logging）にも残す。
+    画面の版や作業用プロセスでは標準エラーが無いことがあるので、warnings だけには頼らない。
+    """
+    global _RUST, _RUST_NOTE
     _RUST = None
+    _RUST_NOTE = f"検査の途中で拡張が失敗した（{error!r}）"
+    _log.warning("Rust 拡張が失敗したため、以後は Python の経路で検出します: %r", error)
     import warnings
 
     warnings.warn(f"Rust 拡張が失敗したため、以後は Python の経路で検出します: {error!r}", RuntimeWarning, stacklevel=3)

@@ -526,7 +526,7 @@ class _VersionAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         from . import detectors
 
-        engine = "Rust 拡張" if detectors.rust_enabled() else "Python（Rust 拡張なし）"
+        engine = detectors.rust_status()
         print(f"個人情報チェッカー {__version__}\n検出エンジン: {engine}")
         parser.exit()
 

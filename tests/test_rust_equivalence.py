@@ -383,10 +383,21 @@ def test_rust_failure_disables_rust_and_falls_back(monkeypatch, error):
             raise error
 
     monkeypatch.setattr(detectors, "_RUST", Broken())
+    monkeypatch.setattr(detectors, "_RUST_NOTE", "")
     with pytest.warns(RuntimeWarning):
         hits = detectors.detect("電話 090-1234-5678")
     assert rows(hits) == rows(detectors._detect_py("電話 090-1234-5678"))
     assert not detectors.rust_enabled()  # 以後は使わない
+    # 遅くなった理由を利用者が --version で追えるよう、理由を残す（画面の版では警告が見えないため）
+    assert "検査の途中で拡張が失敗した" in detectors.rust_status()
+
+
+def test_broken_guard_table_is_recomputed(monkeypatch):
+    """同梱の範囲の表が壊れている（項目が無いなど）ときは、拡張を止めずにその場で求め直す。"""
+    import types
+
+    monkeypatch.setitem(sys.modules, "pii_checker._rust_guard", types.ModuleType("pii_checker._rust_guard"))
+    assert detectors._guard_ranges_for(detectors._RUST) == detectors._rust_guard_ranges(detectors._RUST)
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(3)])
@@ -403,7 +414,9 @@ def test_keyboard_interrupt_is_not_swallowed(monkeypatch, error):
 
 def test_guard_table_matches_computation():
     """ビルド時に作って同梱する表(_rust_guard.py)が、その場で求めた範囲と一致する。"""
-    from pii_checker import _rust_guard
+    _rust_guard = pytest.importorskip(
+        "pii_checker._rust_guard", reason="範囲の表が無い（tools/build_rust_ext.py で作る）"
+    )
 
     ext = detectors._RUST
     assert list(_rust_guard.KEY) == detectors._guard_key(ext), "表の鍵が古い。python tools/build_rust_ext.py で作り直す"

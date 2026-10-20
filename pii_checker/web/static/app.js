@@ -843,17 +843,15 @@ async function loadTable() {
     const q0 = $("#q").value.trim().toLowerCase();
     const list = all.rows.filter((x) => !q0 || x.top_path.toLowerCase().includes(q0));
     r = { total: list.length, rows: list.slice(state.offset, state.offset + state.limit) };
-    head = ["日時", "ファイル", "方法", "変わった数", "残った検出", "退避先", "状態"];
+    head = ["日時", "ファイル", "方法", "変わった数", "元のファイル", "残った検出", "状態"];
     rows = r.rows.map((x) => [
       `<td class="nowrap">${esc(fmtTime(x.at))}</td>`,
-      pathCell(x.top_path),
-      `<td>${esc(x.method_label)}</td>`,
+      pathCell(x.top_path).replace(/<\/td>$/, `${x.item_path ? `<div class="small muted">書庫の中: ${esc(x.item_path.slice(x.top_path.length + 1))}</div>` : ""}</td>`),
+      `<td>${esc(x.method_label)}${x.converted_to ? `<div class="small muted">→ ${esc(leafName(x.converted_to))} に作り直し</div>` : ""}</td>`,
       `<td class="small">${esc(changedText(x.changed))}</td>`,
+      `<td class="small">${esc(originalText(x))}</td>`,
       `<td class="small">${esc(remainingText(x.remaining))}</td>`,
-      `<td class="small mono">${esc(x.backup_path || "")}</td>`,
-      x.state === "applied"
-        ? `<td class="nowrap"><span class="pill medium">対処済み</span> <button type="button" class="rm-undo small" data-id="${esc(x.id)}" title="退避の写しを元の場所へ戻します（対処のあとにファイルが変わっていれば断ります）">元に戻す</button></td>`
-        : `<td class="nowrap"><span class="pill scanned">戻した（${esc(fmtTime(x.restored_at))}）</span></td>`,
+      remedyStateCell(x),
     ]);
     click = r.rows.map((x) => x.top_path);
   } else if (state.tab === "items") {
@@ -884,7 +882,6 @@ async function loadTable() {
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) open(); });
   });
   if (state.tab === "findings") setupRevealButtons();
-  if (state.tab === "remedy") setupUndoButtons();
   if (focusIdx !== null) {
     const again = $(`#table tbody tr[data-i="${focusIdx}"]`);
     if (again) again.focus();
@@ -929,7 +926,7 @@ async function openDetail(topPath) {
       <div class="mono small detail-path">${esc(topPath)}</div>
       ${fileInfo}
       <button type="button" id="btn-copy-path">パスをコピー</button>
-      ${fileRow && fileRow.n_findings ? '<button type="button" id="btn-remedy" title="検出した個人情報を削除・置き換えます（元は退避に写します。自動では何も変わりません）">対処する…</button>' : ""}
+      ${fileRow && fileRow.n_findings ? '<button type="button" id="btn-remedy" title="検出した個人情報を削除・置き換えます（元はごみ箱へ送ります。自動では何も変わりません）">対処する…</button>' : ""}
       ${state.desktop ? '<button type="button" id="btn-reveal">エクスプローラーで場所を開く</button>' : ""}
       <span id="detail-msg" class="msg small" role="status"></span>
     </div>
@@ -945,6 +942,7 @@ async function openDetail(topPath) {
         ${it.method ? `<div class="small muted">読み方: ${esc(it.method)}</div>` : ""}
         ${it.notes.length ? `<div class="small muted">補足: ${it.notes.map(esc).join("／")}</div>` : ""}
         ${Object.keys(it.counts).length ? `<div class="small">検出: ${Object.entries(it.counts).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
+        ${idx > 0 && Object.keys(it.counts).length && fileRow && fileRow.n_findings ? `<div><button type="button" class="rm-item small" data-item="${esc(it.path)}" title="この書庫の中のファイルだけを対処します（書庫を作り直します。元の書庫はごみ箱へ送ります）">書庫の中のこのファイルを対処する…</button></div>` : ""}
         ${it.distinct && Object.keys(it.distinct).length && !(idx === 0 && marks) ? `<div class="small">異なる値（確度 中以上）: ${Object.entries(it.distinct).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
       </div>`).join("") +
     (f.rows.length
@@ -958,7 +956,12 @@ async function openDetail(topPath) {
   });
   rmToken++; // 前のファイルの対処の画面の状態確認を止める
   const remedyBtn = $("#btn-remedy");
-  if (remedyBtn) remedyBtn.addEventListener("click", () => { remedyBtn.disabled = true; startRemedy(topPath); });
+  if (remedyBtn) remedyBtn.addEventListener("click", () => { remedyBtn.disabled = true; startRemedy(topPath, "", remedyBtn); });
+  // 書庫の中のファイル（外!内 のパスの項目）を対象にした対処
+  $("#detail-body").querySelectorAll(".rm-item").forEach((b) => b.addEventListener("click", () => {
+    b.disabled = true;
+    startRemedy(topPath, b.dataset.item, b);
+  }));
   const reveal = $("#btn-reveal");
   if (reveal) reveal.addEventListener("click", async () => {
     const r = await window.pywebview.api.reveal(topPath);
@@ -1106,15 +1109,40 @@ $("#show-secret").addEventListener("change", (e) => {
 
 
 // ---------------------------------------------------------------- 対処（検出した個人情報を消す・置き換える）
-// 検査は何も書き込まない。ここで選んで実行したときだけ、そのファイルを書き換える（元は退避に写す・削除はごみ箱）。
+// 検査は何も書き込まない。ここで選んで実行したときだけ、そのファイルを書き換える（退避の写しは作らず、元はごみ箱へ送る）。
 // 流れ: 分析（ファイルを読み直して検出の位置を全部集める）→ 選ぶ → 下見 → 確認 → 実行 → 結果（元に戻す）
 let rmToken = 0; // 対処の画面を開き直すたびに増やす（閉じた・別のファイルを開いた後の状態確認を止める）
 const rmSleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const RM_CONF = [["high", "高", 3], ["medium", "中", 2], ["low", "低", 1]];
 
+// 元のファイルの行き先（退避の写しは作らない）。ごみ箱へ送った／完全に削除した／入れ替えた（元は残らない）
+function disposalText(d) {
+  if (d === "recycle_bin") return "ごみ箱へ送った";
+  if (d === "permanent") return "完全に削除した（ごみ箱の無い場所）";
+  if (d === "replaced") return "残っていない（ごみ箱の無い場所で、中身を入れ替えた）";
+  return "";
+}
+// 「元に戻す」の代わりの案内（このアプリは退避の写しを持たない。ごみ箱へ送ったものは、ごみ箱から戻す）
+function guideText(d, preName) {
+  if (d === "recycle_bin") return preName ? `元に戻すには、エクスプローラーのごみ箱から「${preName}」を戻してください（この名前で戻ります）。` : "元に戻すには、エクスプローラーのごみ箱から戻してください。";
+  if (d === "permanent" || d === "replaced") return "元に戻せません（ごみ箱の無い場所のため）。";
+  return "";
+}
+function originalText(x) {
+  const t = disposalText(x.disposal);
+  return t ? (x.disposal === "recycle_bin" && x.pre_name ? `${t}（ごみ箱から「${x.pre_name}」を戻す）` : t) : "";
+}
+// 記録の表の「状態」の欄（元に戻すボタンは無い。途中で止まったものと立て直したものを分けて出す）
+function remedyStateCell(x) {
+  if (x.state === "recovered") return `<td><span class="pill needs_password">立て直した</span><div class="small">${esc(x.recovery)}</div></td>`;
+  if (x.state === "started" || x.state === "renamed" || x.state === "swapped") return `<td><span class="pill needs_password">途中で止まっている</span><div class="small muted">次にアプリを開くときか、同じファイルを対処する前に、元の名前のファイルを立て直します。${esc(x.recovery)}</div></td>`;
+  return `<td class="nowrap"><span class="pill medium">対処済み</span>${x.recovery ? `<div class="small">${esc(x.recovery)}</div>` : ""}</td>`;
+}
+
 function changedText(c) {
   if (!c) return "";
   const parts = [];
+  if (c.entries) parts.push(`書庫の中のファイル ${fmtNum(c.entries)} を取り除き`);
   if (c.files) parts.push(`ファイル ${fmtNum(c.files)}`);
   if (c.rows) parts.push(`行 ${fmtNum(c.rows)}`);
   if (c.cols) parts.push(`列 ${fmtNum(c.cols)}`);
@@ -1128,7 +1156,7 @@ function remainingText(r) {
   return `全体 ${fmtNum(r.total)} 件（選んだ分 ${fmtNum(r.selected)} 件）`;
 }
 
-async function startRemedy(topPath) {
+async function startRemedy(topPath, itemPath = "", btn = null) {
   const area = $("#rm-area");
   const mine = ++rmToken;
   const alive = () => rmToken === mine && $("#detail-dialog").open;
@@ -1137,7 +1165,7 @@ async function startRemedy(topPath) {
   let a;
   for (;;) {
     try {
-      a = await api(`/api/jobs/${id}/remedy/analyze`, { method: "POST", body: JSON.stringify({ top_path: topPath }) });
+      a = await api(`/api/jobs/${id}/remedy/analyze`, { method: "POST", body: JSON.stringify({ top_path: topPath, item_path: itemPath }) });
     } catch (e) {
       a = { state: "error", message: e.message };
     }
@@ -1147,30 +1175,35 @@ async function startRemedy(topPath) {
     if (st) st.textContent = `ファイルを読み直して、検出した位置を全部集めています…${a.elapsed >= 5 ? ` ${Math.floor(a.elapsed)} 秒経過` : ""}`;
     await rmSleep(1000);
   }
-  const btn = $("#btn-remedy");
   if (a.state !== "done") {
     area.innerHTML = `<div class="item-card rm-card"><strong>対処する</strong><p class="msg error">対処を始められません: ${esc(a.message)}</p><button type="button" id="rm-close">閉じる</button></div>`;
     $("#rm-close").addEventListener("click", () => { area.innerHTML = ""; if (btn) btn.disabled = false; });
     return;
   }
-  renderRemedyForm(topPath, a, btn);
+  renderRemedyForm(topPath, a, btn, itemPath);
 }
 
-function renderRemedyForm(topPath, a, btn) {
+function renderRemedyForm(topPath, a, btn, itemPath = "") {
   const area = $("#rm-area");
   const id = encodeURIComponent(state.jobId);
   const types = state.info.pii_types || {};
-  const methods = Object.entries(a.methods);
+  // 「zip に作り直す」は方法ではなく、書けない形式（rar・cab・iso など）のときに添える指定（チェックボックス）
+  const methods = Object.entries(a.methods).filter(([k]) => k !== "convert_zip");
+  const arch = a.archive || null;
+  const needConvert = !!(arch && !arch.can_write && a.methods.convert_zip && a.methods.convert_zip.available);
+  const innerName = itemPath ? itemPath.slice(topPath.length + 1) : "";
   const total = (c) => Object.values(c).reduce((p, q) => p + q, 0);
   const typeRows = Object.entries(a.counts).sort((x, y) => total(y[1]) - total(x[1]));
   const confCount = (k) => RM_CONF.map(([, label, rank]) => (k[rank] ? `${label} ${fmtNum(k[rank])}` : "")).filter(Boolean).join("・");
   area.innerHTML = `
     <div class="item-card rm-card">
-      <h4>対処する <span class="small muted">（${esc(leafName(topPath))}）</span></h4>
-      <p class="small muted">自動では何も変わりません。ここで選んで実行したときだけ書き換えます。元のファイルは先に退避の場所へ写し（${esc(a.backup_root)}）、あとから「元に戻す」で戻せます。ファイルの削除はごみ箱へ送ります。</p>
+      <h4>対処する <span class="small muted">（${esc(leafName(topPath))}${innerName ? ` の中の ${esc(innerName)}` : ""}）</span></h4>
+      <p class="small muted">自動では何も変わりません。ここで選んで実行したときだけ書き換えます。退避の写しは作りません（個人情報のファイルを手元のディスクへ写さないため）。元のファイル（書庫の中のファイルなら書庫）は、ごみ箱のある場所ではごみ箱へ送ります（同じフォルダの中で「元の名前（対処前 日時）」に名前を変えてから送るので、ごみ箱からその名前で戻せます）。ごみ箱が無い場所（ネットワーク・外付けなど）では、元のファイルは残らず、元に戻せません。</p>
+      ${arch ? `<p class="small">書庫: ${esc(arch.top_label)}${arch.levels.length > 1 ? `（入れ子 ${arch.levels.length} 段）` : ""}。${arch.can_write ? "書庫全体を作り直します。ほかの項目は中身を変えずに写します。" : arch.can_convert ? "この形式は書き換えられません。「zip に作り直す」と、形式が変わります（元の書庫は削除します）。" : esc(arch.convert_reason)}${arch.signed ? " 署名つきです（作り直すと署名が壊れます）。" : ""}${arch.encrypted && arch.can_write ? ` パスワードつきです（検査のとき入れたパスワードで暗号化し直します）。` : ""}</p>` : ""}
       <fieldset class="rm-set"><legend>方法</legend>
         ${methods.map(([k, m]) => `<label class="check rm-method${m.available ? "" : " disabled"}"><input type="radio" name="rm-method" value="${esc(k)}"${m.available ? "" : " disabled"}> ${esc(m.label)}${m.available ? "" : `<span class="small muted"> — 選べません: ${esc(m.reason)}</span>`}</label>`).join("")}
       </fieldset>
+      ${needConvert ? `<fieldset class="rm-set" id="rm-convert-set"><legend>形式</legend><label class="check"><input type="checkbox" id="rm-convert" checked disabled> ${esc(a.methods.convert_zip.label)} <span class="small muted">— この形式は書き換えられないため、書庫ごとの削除以外の方法は、zip に作り直して行います（元の書庫は削除します）</span></label></fieldset>` : ""}
       <div id="rm-filters" class="hidden">
         <fieldset class="rm-set"><legend>対象にする種類（実行の時点で見つけた全部の検出が対象です）</legend>
           ${typeRows.map(([k, c]) => `<label class="check"><input type="checkbox" name="rm-type" value="${esc(k)}" checked> ${esc(types[k] || k)} <span class="small muted">（${esc(confCount(c))}）</span></label>`).join("")}
@@ -1195,7 +1228,7 @@ function renderRemedyForm(topPath, a, btn) {
   const checks = (name) => [...area.querySelectorAll(`input[name="${name}"]:checked`)].map((x) => x.value);
   area.querySelectorAll('input[name="rm-method"]').forEach((r) => r.addEventListener("change", () => {
     const m = chosen();
-    $("#rm-filters").classList.toggle("hidden", m === "delete_file");
+    $("#rm-filters").classList.toggle("hidden", m === "delete_file" || m === "remove_entry");
     $("#rm-dummy-set").classList.toggle("hidden", m !== "dummy");
     $("#rm-preview").disabled = false;
     $("#rm-preview-out").innerHTML = ""; // 選び直したら、前の下見は無効
@@ -1207,7 +1240,9 @@ function renderRemedyForm(topPath, a, btn) {
   $("#rm-preview").addEventListener("click", async () => {
     const method = chosen();
     const body = { top_path: topPath, method };
-    if (method !== "delete_file") {
+    if (itemPath) body.item_path = itemPath;
+    if (needConvert && method !== "delete_file") body.convert_zip = true;
+    if (method !== "delete_file" && method !== "remove_entry") {
       body.types = checks("rm-type");
       body.confidences = checks("rm-conf");
       if (a.sheets.length) body.sheets = checks("rm-sheet");
@@ -1247,9 +1282,9 @@ function renderRemedyPreview(topPath, body, pv, btn) {
     $("#rm-run").disabled = true;
     $("#rm-confirm").innerHTML = `
       <div class="rm-confirm" role="alertdialog" aria-label="実行の確認">
-        <p>ファイル <strong class="mono">${esc(pv.file_name)}</strong> に対して、次を実行します。</p>
+        <p>${pv.item_name ? "書庫" : "ファイル"} <strong class="mono">${esc(pv.file_name)}</strong>${pv.item_name ? ` の中の <strong class="mono">${esc(pv.item_name)}</strong>` : ""} に対して、次を実行します。</p>
         <p><strong>${esc(pv.method_label)}</strong>: ${esc(pv.summary)}</p>
-        <p class="small muted">元のファイルは先に退避へ写します。よろしければ「実行する」を押してください。</p>
+        <p class="small muted">${pv.disposal === "permanent" || pv.disposal === "replaced" ? "退避の写しは作りません。この場所にはごみ箱が無いため、元のファイルは残らず、元に戻せません。" : "退避の写しは作りません（元のファイルはごみ箱へ送ります。ごみ箱から戻せます）。"}よろしければ「実行する」を押してください。</p>
         <div class="row"><button type="button" id="rm-go" class="danger">実行する</button> <button type="button" id="rm-back">やめる</button></div>
       </div>`;
     $("#rm-back").addEventListener("click", () => { $("#rm-confirm").innerHTML = ""; $("#rm-run").disabled = false; });
@@ -1268,7 +1303,7 @@ async function runRemedy(topPath, body, btn) {
   const alive = () => rmToken === mine && $("#detail-dialog").open;
   const id = encodeURIComponent(state.jobId);
   const box = $("#rm-confirm");
-  box.innerHTML = `<p class="small" id="rm-run-status" role="status">実行しています…（元のファイルを退避へ写し、新しいファイルを書いて置き換え、検査し直します）</p>`;
+  box.innerHTML = `<p class="small" id="rm-run-status" role="status">${body.method === "delete_file" ? "実行しています…" : "実行しています…（新しいファイルを一時の名前で書き、検査し直してから、元の名前へ置き換えます）"}</p>`;
   let r;
   try {
     const started = await api(`/api/jobs/${id}/remedy/run`, { method: "POST", body: JSON.stringify(body) });
@@ -1292,42 +1327,17 @@ async function runRemedy(topPath, body, btn) {
   area.innerHTML = `
     <div class="item-card rm-card rm-done" role="status">
       <h4>対処しました</h4>
-      <p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}（${esc(r.file_name)}）</p>
+      <p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}（${esc(r.file_name)}${r.item_name ? ` の中の ${esc(r.item_name)}` : ""}）</p>
+      ${r.disposal ? `<p><strong>${esc((r.disposal === "recycle_bin" ? "元のファイルは、ごみ箱へ送りました。" : r.disposal === "permanent" ? "ごみ箱の無い場所のため、完全に削除しました。" : "ごみ箱の無い場所のため、中身を入れ替えました。元のファイルは残っていません。") + " " + guideText(r.disposal, r.pre_name))}</strong></p>` : ""}
+      ${r.converted_to ? `<p>zip に作り直しました: <span class="mono">${esc(r.converted_to)}</span></p>` : ""}
+      ${r.notes && r.notes.length ? `<ul class="small rm-warn">${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       <p>残った検出: ${rem ? `全体 <strong>${fmtNum(rem.total)}</strong> 件（選んだ種類・確度の分は <strong>${fmtNum(rem.selected)}</strong> 件）` : "検査し直していません（ファイルの削除、または検査し直せませんでした）"}</p>
       ${rem && rem.selected === 0 && rem.total > 0 ? `<p class="small muted">残りは、選ばなかった種類・確度か、行や列の位置を持たない場所（コメント・内側のファイルなど）の検出です。</p>` : ""}
-      <p class="small">退避先: <span class="mono">${esc(r.backup_path)}</span></p>
+      <p class="small muted">退避の写しは作っていません（個人情報のファイルを手元のディスクへ写さないため）。</p>
       <p class="small muted">この検査の結果（検出の一覧）は対処の前のままです。反映するには検査し直してください。ダミーにした値そのものは、残りの数に入れていません。</p>
-      <div class="row"><button type="button" id="rm-undo">元に戻す</button> <button type="button" id="rm-done-close">閉じる</button> <span id="rm-undo-msg" class="msg small" role="status"></span></div>
+      <div class="row"><button type="button" id="rm-done-close">閉じる</button></div>
     </div>`;
   $("#rm-done-close").addEventListener("click", () => { area.innerHTML = ""; if (btn) btn.disabled = false; });
-  $("#rm-undo").addEventListener("click", async () => {
-    $("#rm-undo").disabled = true;
-    try {
-      const u = await api(`/api/jobs/${id}/remediations/${encodeURIComponent(r.remediation_id)}/undo`, { method: "POST", body: "{}" });
-      $("#rm-undo-msg").textContent = u.message;
-    } catch (e) {
-      $("#rm-undo-msg").textContent = e.message;
-      $("#rm-undo").disabled = false;
-    }
-  });
-}
-
-// 「対処の記録」の表の「元に戻す」
-function setupUndoButtons() {
-  const table = $("#table");
-  const id = encodeURIComponent(state.jobId);
-  table.querySelectorAll(".rm-undo").forEach((b) => b.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    b.disabled = true;
-    try {
-      const u = await api(`/api/jobs/${id}/remediations/${encodeURIComponent(b.dataset.id)}/undo`, { method: "POST", body: "{}" });
-      b.parentElement.innerHTML = `<span class="pill scanned">${esc(u.message)}</span>`;
-    } catch (err) {
-      b.disabled = false;
-      b.textContent = "戻せません";
-      b.parentElement.insertAdjacentHTML("beforeend", `<div class="small msg error">${esc(err.message)}</div>`);
-    }
-  }));
 }
 
 // ---------------------------------------------------------------- レポート（結果をまとめたページ）

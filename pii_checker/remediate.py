@@ -1,29 +1,37 @@
-"""検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm）。
+"""検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル）。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
 - 対象は「実行の時点でファイルを読み直して集めた、全部の検出の位置」（明細の上限 20 件ではない）。
   位置の集め直しと書き換えは別プロセス（検査と同じ pebble・メモリ上限・時間制限）で行う。生の値は位置に入れない。
-- 流れ: 分析（位置を集める）→ 選ぶ → 下見（変わる行・列・シートの数）→ 実行。
-  実行は (1) 元のファイルを退避の場所へ写して SHA-256 を確かめる (2) 同じフォルダに一時の名前で新しいファイルを書く
-  (3) os.replace で置き換える (4) そのファイルを検査し直して、残った検出の数を返す (5) 記録（生の値は書かない）。
-  途中で失敗したときは元のファイルを変えない。
-- 「元に戻す」: 退避の写しを元の場所へ戻す。今のファイルが対処の直後から変わっていれば、上書きせずに断る。
-- 「ファイルを削除」はごみ箱へ送る（SHFileOperationW）。送る前にも退避へ写す。
+- 退避の写しは作らない（個人情報のファイルを手元のディスクへ写さないため）。元のファイルはごみ箱へ送る。
+- 書き換えの流れ（途中で落ちても、元か新のどちらかが必ず元の名前か「対処前」の名前で残る）:
+  (1) 元と同じフォルダの一時の名前（~piichk-new-…）へ新しい中身を書く（flush・fsync）→ (2) 新しいファイルを検査し直して開けると
+  確かめる（ここまで元に触らない）→ (3) 記録（remediations）に「始めた」と段取り（一時の新ファイル・改名後の元の名前）を書く →
+  (4) ごみ箱のある場所: 元を「元の名前（対処前 日時）」に改名 → 新を元の名前へ改名 → 改名した元をごみ箱へ。各段のあとで記録の状態を進める／
+  (5) ごみ箱の無い場所: os.replace で入れ替える（元は残らない。下見に出す）。
+  (1)(2) は別プロセス（apply_task）、(3)〜(5) は親のプロセス（commit_rewrite）。
+- 途中で止まった記録は、起動時と、同じファイルに対処を始める前に立て直す（recover_record）。「元に戻す」（退避の写しから戻す）は無い。
+  ごみ箱へ送った場合は、ごみ箱から「元の名前（対処前 …）」を戻してもらう。ごみ箱の無い場所は戻せない。
+- 「ファイルを削除」も退避しない。ごみ箱のある場所はごみ箱へ送り（SHFileOperationW）、無い場所（ネットワーク・外付け）はそのまま消す。
+  どちらにしたかを結果・記録に残す。書庫ごとの削除・zip に作り直すときの元の書庫の削除も同じ扱い。
+- 書庫の中のファイル（T2-a2）: item_path（検査のパス「外!内」）を対象に、取り出して同じ書き換えを当て、書庫全体を作り直す
+  （archive_write.py）。rar など書けない形式は zip に作り直す（元の書庫は削除）。
 """
 
 from __future__ import annotations
 
 import ctypes
+import json
 import multiprocessing
 import os
-import shutil
+import secrets
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
-from pathlib import Path
 
+from .archive_write import zip_target_for
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
 from .remedy_write import (
@@ -40,19 +48,24 @@ from .remedy_write import (
 from .reveal import BYTES_PER_SEC, MAX_TIMEOUT, MIN_TIMEOUT
 
 METHOD_LABELS = {
-    "delete_file": "ファイルを削除（ごみ箱へ送る）",
+    "delete_file": "ファイルを削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）",
     "delete_rows": "該当する行を削除",
     "delete_columns": "該当する列を削除",
     "dummy": "ダミー化（該当する値だけを置き換える）",
     "delete_sheet": "該当するシートを削除",
+    # 書庫の中のファイルに対する方法（T2-a2）
+    "remove_entry": "書庫から取り除く（中のファイルを削除）",
+    "convert_zip": "zip に作り直す（形式が変わる）",
 }
+# 書庫の中のファイルにだけ使える方法
+ARCHIVE_ONLY_METHODS = ("remove_entry", "convert_zip")
+ARCHIVE_DELETE_LABEL = "書庫ごとファイルを削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）"
 CONF_RANKS = {"high": 3, "medium": 2, "low": 1}
 RANK_LABELS = {3: "高", 2: "中", 1: "低"}
 ANALYSIS_KEEP_SECONDS = 600  # 分析（位置の集まり）をメモリに持つ時間
 MAX_ANALYSES = 4
 MAX_RUNS_KEPT = 20
 SAMPLE_ROWS = 20  # 下見に出す、変わる行の番号の数
-TMP_SUFFIX = ".piichk-tmp"
 FILE_ATTRIBUTE_READONLY = 0x1
 # 形式（検査のときに決まる位置の意味）ごとに、できる方法
 LAYOUT_METHODS = {
@@ -61,17 +74,8 @@ LAYOUT_METHODS = {
     "xlsx": ("delete_rows", "delete_columns", "dummy", "delete_sheet"),
 }
 XLSX_EXTS = (".xlsx", ".xlsm")
-# 退避の置き場を環境変数で変える（試験・特別な運用用。設定の画面は無い）
-BACKUP_ENV = "PII_CHECKER_BACKUP_DIR"
-
-
-def default_backup_root() -> str:
-    """退避の置き場の既定（%LOCALAPPDATA%\\個人情報チェッカー\\退避）。環境変数 PII_CHECKER_BACKUP_DIR で変えられる。"""
-    env = os.environ.get(BACKUP_ENV)
-    if env:
-        return env
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    return str(Path(base) / "個人情報チェッカー" / "退避")
+NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
+STATES_UNFINISHED = ("started", "renamed", "swapped")  # 途中で止まった記録の状態（立て直しの対象）
 
 
 # ---------------------------------------------------------------- ごみ箱
@@ -102,12 +106,14 @@ def send_to_recycle_bin(path: str) -> None:
 
     FO_DELETE = 3
     FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 0x4, 0x10, 0x40, 0x400
+    # ごみ箱の容量より大きくて完全に削除になるときだけ、Windows の確かめの窓を出す（黙って完全に消さない。取りやめれば中止）
+    FOF_WANTNUKEWARNING = 0x4000
     op = SHFILEOPSTRUCTW()
     op.hwnd = None
     op.wFunc = FO_DELETE
     op.pFrom = abs_path + "\0"  # 二重の NUL で終える（ctypes が文字列の終わりにもう1つ付ける）
     op.pTo = None
-    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING
     ret = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     if ret != 0 or op.fAnyOperationsAborted:
         raise RemedyError(
@@ -129,34 +135,36 @@ def has_recycle_bin(path: str) -> bool:
         return True
 
 
-# ---------------------------------------------------------------- 退避
+def disposal_text(noun: str, name: str, recycle: bool) -> tuple[str, str]:
+    """ファイル・書庫を消すときの、下見の1行目と警告（ごみ箱の有無で2通り）。警告が要らなければ空。"""
+    if recycle:
+        return f"{noun}「{name}」をごみ箱へ送ります（ごみ箱から戻せます）", ""
+    msg = f"{noun}「{name}」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
+    return msg, msg + "。退避の写しも作りません"
+
+
+def delete_original(path: str) -> str:
+    """元のファイルを消す（退避はしない）。ごみ箱のある場所ならごみ箱へ送り、無い場所（ネットワーク・外付けなど）は、
+    ごみ箱を経由せずにそのまま消す。どちらにしたかを "recycle_bin" / "permanent" で返す。失敗しても元のファイルは消えていない。"""
+    if has_recycle_bin(path):
+        send_to_recycle_bin(path)
+        if os.path.exists(_long(path)):
+            raise RemedyError("ごみ箱へ送ったはずのファイルが残っています。元のファイルは変えていません")
+        return "recycle_bin"
+    try:
+        os.remove(_long(path))
+    except OSError as e:
+        raise RemedyError(f"ファイルを削除できませんでした（{e}）。元のファイルは変えていません") from None
+    return "permanent"
+
+
+# ---------------------------------------------------------------- 書き換えの確定（途中で落ちても、元か新のどちらかが必ず残る手順）
 
 
 def _long(path: str) -> str:
     from .engine import long_path
 
     return long_path(path)
-
-
-def make_backup(path: str, backup_dir: str) -> tuple[str, str]:
-    """元のファイルを退避の場所へ写し、写しの SHA-256 が元と同じことを確かめる。（退避先のパス, SHA-256）を返す。"""
-    os.makedirs(_long(backup_dir), exist_ok=True)
-    dest = os.path.join(backup_dir, os.path.basename(path))
-    try:
-        before = sha256_file(path)
-        shutil.copy2(_long(path), _long(dest))
-        after = sha256_file(dest)
-    except OSError as e:
-        _discard(dest)
-        _rmdir_quiet(backup_dir)
-        raise RemedyError(f"元のファイルを退避の場所へ写せませんでした（{e}）。何も変えていません") from None
-    if before != after:
-        _discard(dest)
-        _rmdir_quiet(backup_dir)
-        raise RemedyError(
-            "退避の写しが元のファイルと一致しませんでした（写している間に元が変わった可能性）。何も変えていません"
-        )
-    return dest, before
 
 
 def _discard(path: str) -> None:
@@ -167,25 +175,61 @@ def _discard(path: str) -> None:
         pass
 
 
-def _rmdir_quiet(path: str) -> None:
-    try:
-        os.rmdir(_long(path))
-    except OSError:
-        pass
+def _exists(path: str | None) -> bool:
+    return bool(path) and os.path.exists(_long(path))
 
 
-def new_backup_dir(root: str, job_id: str) -> str:
-    """退避先のフォルダ名（<root>\\<ジョブ ID>\\<時刻>）。同じ秒に重なったら番号を足す。"""
-    base = os.path.join(root, job_id, time.strftime("%Y%m%d-%H%M%S"))
-    cand, n = base, 1
+def new_tmp_path(path: str) -> str:
+    """書き換えた新しいファイルを一時に置く名前（元と同じフォルダの「~piichk-new-<英字8字>-元の名前」）。"""
+    folder, name = os.path.split(path)
+    while True:
+        tag = "".join(secrets.choice("abcdefghijklmnop") for _ in range(8))
+        cand = os.path.join(folder, f"{NEW_PREFIX}{tag}-{name}")
+        if not os.path.exists(_long(cand)):
+            return cand
+
+
+def pre_rename_path(path: str) -> str:
+    """ごみ箱へ送る前に、元のファイルを同じフォルダの中で改名する名前（元の名前（対処前 YYYYMMDD-HHMMSS）.拡張子）。"""
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    cand, n = os.path.join(folder, f"{stem}（対処前 {stamp}）{ext}"), 1
     while os.path.exists(_long(cand)):
         n += 1
-        cand = f"{base}-{n}"
+        cand = os.path.join(folder, f"{stem}（対処前 {stamp}-{n}）{ext}")
     return cand
 
 
+def fsync_path(path: str) -> None:
+    """書き終えたファイルをディスクへ確実に書き出す（途中で電源が落ちても、新しいファイルが中途半端にならないように）。"""
+    with open(_long(path), "r+b") as f:
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _fs_rename(src: str, dst: str) -> None:
+    """名前を変える（dst が既にあれば失敗する。上書きしない）。試験は、落ちた状態を作るためにこれを差し替える。"""
+    os.rename(_long(src), _long(dst))
+
+
+def rename_with_retry(src: str, dst: str, tries: int = 5) -> None:
+    """名前を変える。他のプログラムが開いていて変えられないときは、少し待って数回試す。"""
+    last: OSError | None = None
+    for i in range(tries):
+        try:
+            _fs_rename(src, dst)
+            return
+        except PermissionError as e:
+            last = e
+            time.sleep(0.5 * (i + 1))
+    raise RemedyError(
+        f"ファイルの名前を変えられませんでした（他のプログラムが開いている・権限が無い可能性: {last}）。元のファイルは変えていません"
+    )
+
+
 def replace_with_retry(src: str, dst: str, tries: int = 5) -> None:
-    """os.replace。他のプログラムが開いていて置き換えられないときは、少し待って数回試す。"""
+    """os.replace（中身の入れ替えが1回で起きる。元か新のどちらかが必ず残る）。開いていて置き換えられないときは、少し待って数回試す。"""
     last: OSError | None = None
     for i in range(tries):
         try:
@@ -197,6 +241,198 @@ def replace_with_retry(src: str, dst: str, tries: int = 5) -> None:
     raise RemedyError(
         f"ファイルを置き換えられませんでした（他のプログラムが開いている・権限が無い可能性: {last}）。元のファイルは変えていません"
     )
+
+
+def _as_remedy(e: Exception) -> RemedyError:
+    return e if isinstance(e, RemedyError) else RemedyError(f"{type(e).__name__}: {e}")
+
+
+def make_commit_plan(path: str, convert: bool) -> dict:
+    """書き換えの確定の段取り（方法・一時の新ファイル・確定後の名前・改名後の元の名前）を決める。
+
+    方法: recycle = ごみ箱のある場所（元を「対処前」の名前に改名 → 新を元の名前へ → 改名した元をごみ箱へ）／
+    replace = ごみ箱の無い場所（os.replace で入れ替える。元は残らない）／convert = 別の名前の zip に作り直す（元の書庫は消す）。
+    """
+    if convert:
+        from .archive_write import zip_target_for
+
+        dest = zip_target_for(path)
+        return {"mode": "convert", "tmp_new": new_tmp_path(dest), "dest": dest, "pre_path": None}
+    if has_recycle_bin(path):
+        return {"mode": "recycle", "tmp_new": new_tmp_path(path), "dest": path, "pre_path": pre_rename_path(path)}
+    return {"mode": "replace", "tmp_new": new_tmp_path(path), "dest": path, "pre_path": None}
+
+
+def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> dict:
+    """出来上がって検査も済んだ一時の新ファイルを、元の名前へ確定する（親のプロセスで動く）。
+
+    各段のあとで記録（remediations）の状態を進める。途中で落ちても、元の中身か新しい中身のどちらかが、必ず元の名前
+    （か「対処前」の名前）で残る（立て直しは recover_record）。普通の失敗（Exception）は、その場で元の状態へ戻す。
+    プロセスの強制終了のように Exception でないものは、わざと捕まえない（落ちた状態を、立て直しが読めるようにそのまま残す）。
+    戻り値: {"disposal": "recycle_bin" | "replaced" | 元の書庫の扱い, "pre_name": 改名した元の名前（ごみ箱から戻すときの名前）}
+    """
+    mode, tmp_new, dest, pre = plan["mode"], plan["tmp_new"], plan["dest"], plan.get("pre_path")
+
+    def state(s: str) -> None:
+        store.update_remediation(rid, state=s)
+
+    def cancel() -> None:  # 元に触る前の失敗: 一時の新ファイルを消して、記録も残さない
+        _discard(tmp_new)
+        store.delete_remediation(rid)
+
+    def stuck(msg: str) -> RemedyError:  # 戻し切れなかった: 記録を残す（次の起動・次の対処の前に立て直す）
+        return RemedyError(f"{msg}。途中の状態を記録に残しました（次に開くときに立て直します）")
+
+    if sha256_file(path) != orig_sha256:
+        cancel()
+        raise RemedyError("対処している間に元のファイルが変わりました。何も変えていません")
+
+    if mode == "replace":
+        try:
+            replace_with_retry(tmp_new, path)
+        except Exception as e:
+            cancel()
+            raise _as_remedy(e) from None
+        state("applied")
+        return {"disposal": "replaced", "pre_name": None}
+
+    if mode == "convert":
+        try:
+            _fs_rename(tmp_new, dest)
+        except Exception as e:
+            cancel()
+            raise _as_remedy(e) from None
+        state("swapped")
+        try:
+            disposal = delete_original(path)
+        except Exception as e:
+            try:
+                _discard(dest)  # 元を消せなかったので、作った zip は片付けて、元を残す
+                store.delete_remediation(rid)
+            except Exception:  # noqa: BLE001
+                raise stuck("元の書庫を消せず、作った zip も片付けられませんでした") from None
+            raise _as_remedy(e) from None
+        state("applied")
+        return {"disposal": disposal, "pre_name": None}
+
+    # recycle: 元を同じフォルダで改名 → 新を元の名前へ → 改名した元をごみ箱へ
+    try:
+        rename_with_retry(path, pre)
+    except Exception as e:
+        cancel()
+        raise _as_remedy(e) from None
+    state("renamed")
+    try:
+        _fs_rename(tmp_new, path)
+    except Exception as e:
+        try:
+            _fs_rename(pre, path)
+            cancel()
+        except Exception:  # noqa: BLE001
+            raise stuck("新しいファイルを置けず、元の名前にも戻せませんでした") from None
+        raise _as_remedy(e) from None
+    state("swapped")
+    try:
+        send_to_recycle_bin(pre)
+        if _exists(pre):
+            raise RemedyError("ごみ箱へ送ったはずのファイルが残っています")
+    except Exception as e:
+        try:
+            _fs_rename(path, tmp_new)
+            _fs_rename(pre, path)
+            cancel()
+        except Exception:  # noqa: BLE001
+            raise stuck("元のファイルをごみ箱へ送れず、元の状態にも戻せませんでした") from None
+        raise RemedyError(f"元のファイルをごみ箱へ送れなかったため、元の状態に戻しました（{_as_remedy(e)}）") from None
+    state("applied")
+    return {"disposal": "recycle_bin", "pre_name": os.path.basename(pre)}
+
+
+def recover_record(rec: dict) -> tuple[str, str]:
+    """途中で止まった対処の記録（始めた・元を改名した・新を置いた）を、ファイルの今の状態から立て直す。
+
+    どの状態からでも、元の中身か新しい中身のどちらかが、元の名前（か「対処前」の名前）で必ず残るようにする。
+    戻り値: （記録の新しい状態 "applied"=最後まで済んでいた／"recovered"=元の状態に戻した・そのまま, 利用者向けの説明）。
+    """
+    plan = rec.get("plan") or {}
+    path = rec["top_path"]
+    mode, tmp_new, dest, pre = plan.get("mode"), plan.get("tmp_new"), plan.get("dest") or path, plan.get("pre_path")
+    new_sha = rec.get("new_sha256")
+
+    def is_new(p: str) -> bool:
+        try:
+            return bool(new_sha) and sha256_file(p) == new_sha
+        except OSError:
+            return False
+
+    if mode == "replace":
+        # os.replace は1回で起きる。元の名前には元か新のどちらかがある（無ければ、残っている新を元の名前へ置く）
+        if _exists(tmp_new):
+            if _exists(path):
+                _discard(tmp_new)
+            else:
+                _fs_rename(tmp_new, path)
+                return (
+                    "recovered",
+                    "元の名前のファイルが無かったため、書き換え済みの新しいファイルを元の名前に置きました",
+                )
+        if _exists(path) and is_new(path):
+            return "applied", "新しい中身への入れ替えは済んでいました"
+        return "recovered", "入れ替えの前に止まっていました（元のファイルのまま。一時の新ファイルは消しました）"
+    if mode == "convert":
+        if _exists(tmp_new):
+            _discard(tmp_new)
+        if _exists(dest) and _exists(path):
+            return (
+                "recovered",
+                "zip は作り終えていますが、元の書庫を消せていません（元の書庫と zip の両方が残っています）",
+            )
+        if _exists(dest):
+            return "applied", "zip への作り直しと元の書庫の削除は済んでいました"
+        return "recovered", "zip を作る前に止まっていました（元の書庫のまま）"
+    # recycle
+    if not _exists(path) and _exists(pre):
+        _fs_rename(pre, path)
+        if _exists(tmp_new):
+            _discard(tmp_new)
+        return "recovered", f"元の名前のファイルが無かったため、「{os.path.basename(pre)}」を元の名前に戻しました"
+    if not _exists(path) and _exists(tmp_new):
+        _fs_rename(tmp_new, path)
+        return (
+            "recovered",
+            "元の名前のファイルが無く、対処前の名前のファイルも見つからなかったため、新しいファイルを元の名前に置きました",
+        )
+    if _exists(path) and _exists(pre):
+        if is_new(path):
+            _discard(tmp_new)
+            try:
+                send_to_recycle_bin(pre)
+                if not _exists(pre):
+                    return "applied", f"元のファイル（「{os.path.basename(pre)}」）をごみ箱へ送り直しました"
+            except Exception:  # noqa: BLE001
+                pass
+            return (
+                "recovered",
+                f"新しいファイルは置けていますが、「{os.path.basename(pre)}」をごみ箱へ送れていません（不要なら削除してください）",
+            )
+        if _exists(tmp_new):
+            _discard(tmp_new)
+        return (
+            "recovered",
+            f"元の名前のファイルと「{os.path.basename(pre)}」の両方が残っています（どちらも消していません）",
+        )
+    if _exists(path):
+        # 改名の前に止まっていた、またはごみ箱へ送り終えていた
+        if _exists(tmp_new):
+            _discard(tmp_new)
+            return (
+                "recovered",
+                "元のファイルを変える前に止まっていました（元のファイルのまま。一時の新ファイルは消しました）",
+            )
+        if is_new(path):
+            return "applied", "新しい中身への入れ替えと、元のファイルをごみ箱へ送るところまで済んでいました"
+        return "recovered", "元のファイルを変える前に止まっていました（元のファイルのまま）"
+    return "recovered", "元のファイルが見つかりません（移動・削除された可能性）。何も変えていません"
 
 
 # ---------------------------------------------------------------- 別プロセスで動く部分
@@ -218,10 +454,44 @@ def _count_conf(items) -> dict:
     return total
 
 
+def _archive_env(options: ScanOptions, book: PasswordBook, top_path: str, workdir: str):
+    """書庫を扱う環境（7-Zip の場所・検査のときにメモリにあるパスワード・作業フォルダ）。"""
+    from .archive_write import ArchiveEnv
+    from .formats.archive import find_7z
+
+    return ArchiveEnv(find_7z(options.sevenzip), book.candidates_for(top_path), workdir)
+
+
+def collect_inner_task(args: dict) -> dict:
+    """書庫の中のファイル（item_path）だけを取り出して読み直し、位置を集める（別プロセスで動く）。
+
+    戻り値は collect_task と同じ形（位置・形式は取り出したファイルのもの）に、書庫の情報（archive）を足したもの。
+    source の SHA-256 は書庫ファイル全体のもの（下見のあとに書庫が変わったかの照合に使う）。
+    """
+    from . import archive_write as aw
+
+    options = args["options"]
+    book = args.get("book") or PasswordBook()
+    top_path, item_path = args["path"], args["item_path"]
+    workdir, owner = aw.make_workdir(options.temp_dir)
+    try:
+        env = _archive_env(options, book, top_path, workdir)
+        res = aw.extract_target(top_path, item_path, env)
+        got = collect_task({"path": res.leaf_path, "options": options, "book": book})
+        got["archive"] = res.describe()
+        got["leaf_name"] = res.leaf_name
+        got["source"] = {"sha256": sha256_file(top_path)}
+        return got
+    finally:
+        aw.remove_workdir(workdir, owner)
+
+
 def collect_task(args: dict) -> dict:
     """ファイルを読み直して、構造の位置を全部集める（別プロセスで動く）。生の値は返さない。"""
     from .engine import scan_file
 
+    if args.get("item_path"):
+        return collect_inner_task(args)
     options = replace(args["options"], collect_positions=True, reveal=False)
     result = scan_file(args["path"], options, args.get("book") or PasswordBook())
     top = _top_item(result, args["path"])
@@ -256,35 +526,46 @@ def select_from_args(positions: dict, args: dict) -> Selection:
 
 
 def apply_task(args: dict) -> dict:
-    """対処を実行する（別プロセスで動く）。退避 → 新しいファイルを書く → 置き換え → 検査し直し。
+    """対処の実行のうち、別プロセスで動く部分。
 
-    args: path・method・options（検査の設定）・backup_dir・types・ranks・sheets・dummy_mode・expected_sha256
-    戻り値: 変わった数・退避先・元と新の SHA-256・残った検出の数。失敗は RemedyError（元のファイルは変えない）。
+    - ファイルの削除はここで済ませる（退避はしない。ごみ箱のある場所はごみ箱へ・無い場所はそのまま消す）。
+    - 書き換えは、一時の新ファイルを書き（flush・fsync）、検査し直して開けると確かめるところまで（prepare）。
+      元の名前への確定（改名・置き換え・ごみ箱）と記録の更新は、親のプロセスが行う（commit_rewrite）。
+      ここまでは元のファイルに触らない。失敗したら一時の新ファイルを消して終わる。
+
+    args: path・method・options（検査の設定）・tmp_new（一時の新ファイルの名前）・types・ranks・sheets・dummy_mode・expected_sha256
     """
     path = args["path"]
     method = args["method"]
     if not os.path.isfile(_long(path)):
         raise RemedyError("ファイルが見つかりません（移動・削除された可能性）")
     if method == "delete_file":
-        backup, sha = make_backup(path, args["backup_dir"])
-        try:
-            send_to_recycle_bin(path)
-        except RemedyError:
-            _discard(backup)
-            _rmdir_quiet(os.path.dirname(backup))
-            raise
-        if os.path.exists(_long(path)):
-            _discard(backup)
-            _rmdir_quiet(os.path.dirname(backup))
-            raise RemedyError("ごみ箱へ送ったはずのファイルが残っています。元のファイルは変えていません")
-        return {
-            "changed": {"files": 1},
-            "backup_path": backup,
-            "orig_sha256": sha,
-            "new_sha256": None,
-            "remaining": None,
-        }
+        # 個人情報を含むファイルを手元のディスクへ写さないため、削除は退避しない（ごみ箱から戻す・戻せない場合は下見で知らせる）
+        disposal = delete_original(path)
+        return {"deleted": True, "changed": {"files": 1, "disposal": disposal}}
+    if args.get("item_path"):
+        return prepare_inner(args)
+    return prepare_plain(args)
 
+
+def _verify_new_file(tmp_new: str, options: ScanOptions, args: dict, dummies: list[str], book=None) -> dict:
+    """出来上がった新ファイルを検査し直して、開けること・残った検出の数を確かめる（元には触らない）。"""
+    try:
+        summary = rescan_summary(tmp_new, options, args, dummies, book)
+    except Exception as e:  # noqa: BLE001
+        raise RemedyError(
+            f"書き換えたファイルを検査し直せませんでした（{type(e).__name__}）。元のファイルは変えていません"
+        ) from None
+    if not summary["opened"]:
+        raise RemedyError(
+            "書き換えたファイルを開けなかったため、置き換えません（検査し直しで読めませんでした）。元のファイルは変えていません"
+        )
+    return summary
+
+
+def prepare_plain(args: dict) -> dict:
+    """実ファイル（csv・tsv・txt・xlsx・xlsm）の書き換えを、一時の新ファイルまで作って検査し直す。"""
+    path, method, tmp_new = args["path"], args["method"], args["tmp_new"]
     # 実行の時点でファイルを読み直して、位置を集める
     got = collect_task({"path": path, "options": args["options"]})
     problem = unsupported_reason(method, path, got)
@@ -298,37 +579,112 @@ def apply_task(args: dict) -> dict:
     if not sel.detections:
         raise RemedyError("選んだ種類・確度の検出が、ファイルに見つかりませんでした（何も変えていません）")
     maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
-    backup, orig_sha = make_backup(path, args["backup_dir"])
-    tmp = path + TMP_SUFFIX
+    orig_sha = sha256_file(path)
     try:
         if got["layout"] == "xlsx":
-            stats = rewrite_xlsx_file(path, tmp, method, sel, maker, keep_vba=path.lower().endswith(".xlsm"))
+            stats = rewrite_xlsx_file(path, tmp_new, method, sel, maker, keep_vba=path.lower().endswith(".xlsm"))
         else:
-            stats = rewrite_text_file(path, tmp, got["layout"], method, sel, maker)
+            stats = rewrite_text_file(path, tmp_new, got["layout"], method, sel, maker)
+        fsync_path(tmp_new)
         if sha256_file(path) != orig_sha:
             raise RemedyError("書き換えている間に元のファイルが変わりました。何も変えていません")
-        replace_with_retry(tmp, path)
+        remaining = _verify_new_file(tmp_new, args["options"], args, sorted(maker.produced) if maker else [])
+        new_sha = sha256_file(tmp_new)
     except BaseException:
-        _discard(tmp)
-        _discard(backup)
-        _rmdir_quiet(os.path.dirname(backup))
+        _discard(tmp_new)
         raise
-    new_sha = sha256_file(path)
-    remaining = None
-    try:
-        remaining = rescan_summary(path, args["options"], args, sorted(maker.produced) if maker else [])
-    except Exception:  # noqa: BLE001  書き換えは済んでいる。検査し直せなかっただけなので、残りは「不明」にして返す
-        remaining = None
     return {
-        "changed": stats,
-        "backup_path": backup,
+        "tmp_new": tmp_new,
         "orig_sha256": orig_sha,
         "new_sha256": new_sha,
+        "changed": stats,
         "remaining": remaining,
     }
 
 
-def rescan_summary(path: str, options: ScanOptions, args: dict, dummies: list[str] | None = None) -> dict:
+def prepare_inner(args: dict) -> dict:
+    """書庫の中のファイルへの対処を、一時の新しい書庫まで作って検査し直す（別プロセスで動く）。
+
+    流れ: 対象の項目だけを取り出す → T2-a と同じ書き換えを当てる（または取り除く）→ 書庫を作り直す（一時の名前）→
+    書庫を検査し直す。入れ子は内側から作り直す。形式が rar・cab・iso など書けないものは、convert_zip=True のときだけ、
+    同じフォルダの「元の名前.zip」に作り直す（元の書庫は確定のときに消す）。
+    """
+    from . import archive_write as aw
+
+    path, item_path, method, tmp_new = args["path"], args["item_path"], args["method"], args["tmp_new"]
+    options = args["options"]
+    book = args.get("book") or PasswordBook()
+    workdir, owner = aw.make_workdir(options.temp_dir)
+    try:
+        env = _archive_env(options, book, path, workdir)
+        res = aw.extract_target(path, item_path, env)
+        arch = res.describe()
+        if args.get("expected_sha256") and sha256_file(path) != args["expected_sha256"]:
+            raise RemedyError(
+                "下見のあとに書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
+            )
+        convert = bool(args.get("convert_zip")) and not arch["can_write"]
+        if not arch["can_write"] and not convert:
+            raise RemedyError(
+                "この書庫は、そのままでは書き換えられません。「zip に作り直す」を選んでください（形式が変わります）"
+            )
+        new_leaf = None
+        stats: dict = {"entries": 1}
+        maker = None
+        if method == "remove_entry":
+            problem = unsupported_reason(method, res.leaf_name, {"archive": arch})
+            if problem:
+                raise RemedyError(problem)
+        else:
+            got = collect_task({"path": res.leaf_path, "options": options, "book": book})
+            got["archive"] = arch
+            problem = unsupported_reason(method, res.leaf_name, got)
+            if problem:
+                raise RemedyError(problem)
+            sel = select_from_args(got["positions"], args)
+            if not sel.detections:
+                raise RemedyError("選んだ種類・確度の検出が、ファイルに見つかりませんでした（何も変えていません）")
+            maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
+            new_leaf = os.path.join(env.new_dir(), res.leaf_name)
+            if got["layout"] == "xlsx":
+                stats = rewrite_xlsx_file(
+                    res.leaf_path, new_leaf, method, sel, maker, keep_vba=res.leaf_name.lower().endswith(".xlsm")
+                )
+            else:
+                stats = rewrite_text_file(res.leaf_path, new_leaf, got["layout"], method, sel, maker)
+        dest = aw.zip_target_for(path) if convert else path
+        if convert and os.path.exists(_long(dest)):
+            raise RemedyError(
+                f"同じ場所に「{os.path.basename(dest)}」があるため、zip に作り直せません。"
+                "そのファイルの名前を変えるか移してから、もう一度お試しください（何も変えていません）"
+            )
+        orig_sha = sha256_file(path)
+        try:
+            notes = aw.rebuild_target(res, new_leaf, env, tmp_new, convert)
+            fsync_path(tmp_new)
+            if sha256_file(path) != orig_sha:
+                raise RemedyError("作り直している間に元の書庫が変わりました。何も変えていません")
+            remaining = _verify_new_file(tmp_new, options, args, sorted(maker.produced) if maker else [], book)
+            new_sha = sha256_file(tmp_new)
+        except BaseException:
+            _discard(tmp_new)
+            raise
+        return {
+            "tmp_new": tmp_new,
+            "orig_sha256": orig_sha,
+            "new_sha256": new_sha,
+            "changed": stats,
+            "remaining": remaining,
+            "converted_to": dest if convert else None,
+            "notes": notes,
+        }
+    finally:
+        aw.remove_workdir(workdir, owner)
+
+
+def rescan_summary(
+    path: str, options: ScanOptions, args: dict, dummies: list[str] | None = None, book: PasswordBook | None = None
+) -> dict:
     """書き換えたファイルを検査し直し、残った検出の数（全体と、選んだ種類・確度の分）を返す。
 
     ダミーにした値そのもの（dummies。この回で自分が作った文字列）は数えない。列見出しが「メール」「氏名」などの列は、
@@ -343,7 +699,7 @@ def rescan_summary(path: str, options: ScanOptions, args: dict, dummies: list[st
         reveal=False,
         allow_values=list(options.allow_values) + list(dummies or []),
     )
-    result = scan_file(path, options, PasswordBook())
+    result = scan_file(path, options, book or PasswordBook())
     counts = _count_conf(result.items)
     types = set(args["types"]) if args.get("types") is not None else None
     ranks = _rank_filter(args.get("ranks"))
@@ -355,7 +711,10 @@ def rescan_summary(path: str, options: ScanOptions, args: dict, dummies: list[st
         if (types is None or pii_type in types) and (ranks is None or CONF_RANKS[conf] in ranks):
             selected += n
     statuses = {it.status.value for it in result.items}
+    top = _top_item(result, path)
     return {
+        # 書庫・ファイルそのものが開けたか（中の項目の一部が読めないのは、元からそうだったかもしれないので数えない）
+        "opened": top is not None and top.status.value not in (Status.UNCHECKABLE.value, Status.NEEDS_PASSWORD.value),
         "total": sum(counts.values()),
         "selected": selected,
         "by_type": by_type,
@@ -368,6 +727,24 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     """この方法を選べない理由（選べるなら空）。info は分析の結果（status・layout・overflow）。"""
     if method == "delete_file":
         return ""
+    arch = info.get("archive")
+    if method in ARCHIVE_ONLY_METHODS:
+        if not arch:
+            return "書庫の中のファイルにだけ使える方法です"
+        if method == "convert_zip":
+            if arch["can_write"]:
+                return "この形式は、書庫のまま書き換えられるため、作り直す必要はありません"
+            return "" if arch["can_convert"] else arch["convert_reason"]
+        if not (arch["can_write"] or arch["can_convert"]):
+            return arch["convert_reason"] + "。書庫ごとの削除（ごみ箱）はできます"
+        if arch["single"]:
+            return (
+                "1ファイルを包んだだけの形式（gz・bz2・xz など）では、中のファイルだけを取り除けません。"
+                "書庫ごとの削除を選んでください"
+            )
+        return ""
+    if arch and not (arch["can_write"] or arch["can_convert"]):
+        return arch["convert_reason"] + "。書庫ごとの削除（ごみ箱）はできます"
     status = info.get("status")
     if status == Status.NEEDS_PASSWORD.value:
         return "パスワードが必要な（暗号化された）ファイルは、中身を書き換えられません。ファイルの削除はできます"
@@ -418,9 +795,10 @@ def inline_runner(kind: str, args: dict, timeout: int) -> dict:
 class Analysis:
     """1ファイルの分析（位置の集まりと、使える方法）。メモリの中だけに持つ。"""
 
-    def __init__(self, job_id: str, top_path: str):
+    def __init__(self, job_id: str, top_path: str, item_path: str = ""):
         self.job_id = job_id
         self.top_path = top_path
+        self.item_path = item_path  # 書庫の中のファイルが対象のとき、その検査のパス（外!内）。実ファイルなら空
         self.state = "running"
         self.started = time.time()
         self.finished = 0.0
@@ -462,11 +840,12 @@ class RunState:
 
 
 class RemedyService:
-    """分析・下見・実行・元に戻すの窓口。重い処理は別プロセス（runner_fn）。"""
+    """分析・下見・実行・途中で止まった対処の立て直しの窓口。重い処理は別プロセス（runner_fn）。"""
 
-    def __init__(self, store, backup_root: str | None = None, runner_fn=None):
+    def __init__(self, store, runner_fn=None, registry=None):
         self.store = store
-        self.backup_root = backup_root or default_backup_root()
+        # 検査を動かしているメモリのパスワード（書庫の中のファイルを取り出すときに使う。保存しない）を引く先
+        self.registry = registry
         self._runner_fn = runner_fn or _run_in_process
         self._lock = threading.Lock()
         self._analyses: dict[tuple[str, str], Analysis] = {}
@@ -476,27 +855,30 @@ class RemedyService:
 
     # ------------------------------------------------------------ 分析
 
-    def request_analysis(self, job_id: str, top_path: str) -> dict:
-        """分析を始める（結果がメモリにあれば使い回す）。いまの状態を返す。始める前に分かる理由は error で返す。"""
-        key = (job_id, top_path)
+    def request_analysis(self, job_id: str, top_path: str, item_path: str = "") -> dict:
+        """分析を始める（結果がメモリにあれば使い回す）。いまの状態を返す。始める前に分かる理由は error で返す。
+
+        item_path は書庫の中のファイルが対象のときの検査のパス（外!内）。分析の鍵は（ジョブ, 対象のパス）。
+        """
+        key = (job_id, item_path or top_path)
         with self._lock:
             self._purge()
             a = self._analyses.get(key)
             if a is not None:
                 return a.view()
             try:
-                plan = self._plan(job_id, top_path)
+                plan = self._plan(job_id, top_path, item_path)
             except RemedyError as e:
                 return {"state": "error", "message": str(e)}
-            a = self._analyses[key] = Analysis(job_id, top_path)
+            a = self._analyses[key] = Analysis(job_id, top_path, item_path)
             a.size = plan["size"]
         threading.Thread(target=self._analyze, args=(a, plan), daemon=True, name="pii-remedy-analyze").start()
         return a.view()
 
-    def get_analysis(self, job_id: str, top_path: str) -> Analysis:
+    def get_analysis(self, job_id: str, top_path: str, item_path: str = "") -> Analysis:
         with self._lock:
             self._purge()
-            a = self._analyses.get((job_id, top_path))
+            a = self._analyses.get((job_id, item_path or top_path))
         if a is None or a.state != "done":
             raise RemedyError(
                 "分析の結果が見つかりません（時間が経って捨てました）。もう一度「対処する」から始めてください"
@@ -525,7 +907,19 @@ class RemedyService:
             for k in [k for k in self._analyses if k[0] == job_id]:
                 del self._analyses[k]
 
-    def _plan(self, job_id: str, top_path: str) -> dict:
+    def _book_for(self, job_id: str) -> PasswordBook:
+        """検査を動かしているメモリのパスワードのコピー（書庫の中のファイルを取り出すときだけ使う。保存しない）。"""
+        runner = self.registry.get(job_id, create=False) if self.registry is not None else None
+        if runner is None:
+            return PasswordBook()
+        pw = runner.passwords
+        return PasswordBook(
+            common=list(pw.common),
+            per_file={k: list(v) for k, v in pw.per_file.items()},
+            connection_password=pw.connection_password,
+        )
+
+    def _plan(self, job_id: str, top_path: str, item_path: str = "") -> dict:
         """対処の前提を確かめ、検査の設定と時間制限を決める。できないときは RemedyError。"""
         from .remote import is_ftp_path
         from .runner import options_from_dict
@@ -553,17 +947,38 @@ class RemedyService:
         options = replace(options, reveal=False, collect_positions=True, temp_dir=temp_dir, reuse=False)
         size = int(rows[0]["size"] or 0)
         timeout = min(MAX_TIMEOUT, max(MIN_TIMEOUT, size // BYTES_PER_SEC))
-        return {"options": options, "size": size, "timeout": timeout, "roots": job["roots"]}
+        plan = {"options": options, "size": size, "timeout": timeout, "roots": job["roots"], "book": None}
+        if item_path:
+            if not item_path.startswith(top_path + "!"):
+                raise RemedyError("書庫の中のパスが正しくありません")
+            if not self.store.query(
+                "SELECT 1 FROM items WHERE job_id=? AND top_path=? AND path=?", (job_id, top_path, item_path)
+            ):
+                raise RemedyError("その項目は、この検査の結果に見つかりません")
+            plan["book"] = self._book_for(job_id)
+        return plan
+
+    def _collect_args(self, a: Analysis, plan: dict) -> dict:
+        args = {"path": a.top_path, "options": plan["options"]}
+        if a.item_path:
+            args["item_path"] = a.item_path
+            args["book"] = plan["book"]
+        return args
 
     def _analyze(self, a: Analysis, plan: dict) -> None:
         try:
             with self._slots:
-                got = self._runner_fn("collect", {"path": a.top_path, "options": plan["options"]}, plan["timeout"])
+                got = self._runner_fn("collect", self._collect_args(a, plan), plan["timeout"])
             a.positions = got["positions"]
+            inner = bool(a.item_path)
+            leaf_name = got.get("leaf_name") or a.top_path
             methods = {}
             for m in METHOD_LABELS:
-                reason = unsupported_reason(m, a.top_path, got)
-                methods[m] = {"label": METHOD_LABELS[m], "available": not reason, "reason": reason}
+                if m in ARCHIVE_ONLY_METHODS and not inner:
+                    continue  # 実ファイルには出さない（書庫の中のファイルにだけ使える方法）
+                reason = unsupported_reason(m, leaf_name, got)
+                label = ARCHIVE_DELETE_LABEL if (inner and m == "delete_file") else METHOD_LABELS[m]
+                methods[m] = {"label": label, "available": not reason, "reason": reason}
             a.info = {
                 "layout": got["layout"],
                 "kind": got["kind"],
@@ -573,8 +988,10 @@ class RemedyService:
                 "other_findings": got["other_findings"],
                 "dummy_modes": DUMMY_MODES,
                 "recycle_bin": has_recycle_bin(a.top_path),
-                "backup_root": self.backup_root,
             }
+            if inner:
+                a.info["archive"] = got["archive"]
+                a.info["leaf_name"] = leaf_name
             self._finish(a, "done")
         except RemedyError as e:
             self._finish(a, "error", str(e))
@@ -592,8 +1009,18 @@ class RemedyService:
     def normalize(self, a: Analysis, params: dict) -> dict:
         """画面から来た選びを確かめて、使う形にする。誤りは RemedyError。"""
         method = params.get("method")
-        if method not in METHOD_LABELS:
+        if method not in METHOD_LABELS or method not in a.info["methods"]:
             raise RemedyError("方法が正しくありません")
+        if method == "convert_zip":
+            raise RemedyError("「zip に作り直す」は、ほかの方法と一緒に選びます（単独の方法ではありません）")
+        arch = a.info.get("archive")
+        convert = bool(params.get("convert_zip")) and bool(arch) and not arch["can_write"] and method != "delete_file"
+        if arch and not arch["can_write"] and method != "delete_file" and not convert:
+            raise RemedyError(
+                "この書庫は、そのままでは書き換えられません。「zip に作り直す」も選んでください（形式が変わります）"
+            )
+        if convert and not a.info["methods"]["convert_zip"]["available"]:
+            raise RemedyError(a.info["methods"]["convert_zip"]["reason"] or "zip に作り直せません")
         spec = a.info["methods"][method]
         if not spec["available"]:
             raise RemedyError(spec["reason"] or "この方法は選べません")
@@ -620,33 +1047,43 @@ class RemedyService:
             "ranks": sorted({CONF_RANKS[c] for c in confs}),
             "sheets": sheets,
             "dummy_mode": mode if method == "dummy" else None,
+            "convert_zip": convert,
         }
-        if method != "delete_file" and not select_from_args(a.positions, out).detections:
+        if method not in ("delete_file", "remove_entry") and not select_from_args(a.positions, out).detections:
             raise RemedyError("選んだ種類・確度の検出がありません")
         return out
 
     def preview(self, job_id: str, top_path: str, params: dict) -> dict:
         """変わる行・列・シートの数と例、注意を返す（何も書き換えない）。"""
-        a = self.get_analysis(job_id, top_path)
+        a = self.get_analysis(job_id, top_path, params.get("item_path") or "")
         p = self.normalize(a, params)
         method = p["method"]
         leaf = os.path.basename(top_path)
+        arch = a.info.get("archive")
         out = {
             "method": method,
-            "method_label": METHOD_LABELS[method],
+            "method_label": ARCHIVE_DELETE_LABEL if (arch and method == "delete_file") else METHOD_LABELS[method],
             "file_name": leaf,
-            "backup_root": self.backup_root,
             "warnings": [],
             "expected_sha256": a.info.get("sha256"),
         }
+        if arch:
+            out["item_name"] = arch["item"]
+            out["convert_zip"] = p["convert_zip"]
+        recycle = bool(a.info.get("recycle_bin", True))
         if method == "delete_file":
             out["changes"] = {"files": 1}
-            out["summary"] = f"ファイル「{leaf}」をごみ箱へ送ります"
-            if not a.info.get("recycle_bin", True):
-                out["warnings"].append(
-                    "この場所（ネットワーク・外付けなど）にはごみ箱が無いため、ごみ箱を経由せずに消えます。"
-                    "退避の写しは残るので、「元に戻す」で戻せます"
-                )
+            out["disposal"] = "recycle_bin" if recycle else "permanent"
+            out["summary"], note = disposal_text("書庫" if arch else "ファイル", leaf, recycle)
+            if note:
+                out["warnings"].append(note)
+            out["can_run"] = True
+            return out
+        if method == "remove_entry":
+            out["changes"] = {"entries": 1}
+            out["summary"] = f"書庫「{leaf}」の中のファイル「{arch['item']}」を取り除きます（書庫を作り直します）"
+            self._archive_warnings(out, arch, top_path, p["convert_zip"], recycle)
+            self._original_warning(out, leaf, recycle, bool(arch), p["convert_zip"])
             out["can_run"] = True
             return out
         sel = select_from_args(a.positions, p)
@@ -697,23 +1134,93 @@ class RemedyService:
                 f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
                 "それらはこの対処では変わらず、実行のあとの検査し直しで残りとして出ます"
             )
+        if arch:
+            out["summary"] = f"書庫の中の「{arch['item']}」: {out['summary']}"
+            self._archive_warnings(out, arch, top_path, p["convert_zip"], recycle)
+        self._original_warning(out, leaf, recycle, bool(arch), p["convert_zip"])
         out["can_run"] = True
         return out
 
+    @staticmethod
+    def _original_warning(out: dict, leaf: str, recycle: bool, is_archive: bool, convert: bool) -> None:
+        """書き換えのとき、元のファイルがどうなるか（退避の写しは作らない）を下見の最初に出す。zip への作り直しは別の文面。"""
+        if convert:
+            return  # _archive_warnings が、元の書庫の行き先を含めて出す
+        noun = "書庫" if is_archive else "ファイル"
+        if recycle:
+            out["disposal"] = "recycle_bin"
+            stem, ext = os.path.splitext(leaf)
+            out["warnings"].insert(
+                0,
+                f"元の{noun}は、同じフォルダの中で「{stem}（対処前 年月日-時分秒）{ext}」の名前に変えてからごみ箱へ送ります"
+                "（ごみ箱から戻すと、この名前で戻ります）。退避の写しは作らないので、このアプリの「元に戻す」はありません",
+            )
+        else:
+            out["disposal"] = "replaced"
+            out["warnings"].insert(
+                0,
+                f"元の{noun}は残りません（この場所にはごみ箱がありません）。中身を新しいものに入れ替えます。元に戻せません",
+            )
+
+    def _archive_warnings(self, out: dict, arch: dict, top_path: str, convert: bool, recycle: bool = True) -> None:
+        """書庫の中のファイルへの対処の注意（書庫全体を作り直す・形式が変わる・署名・暗号など）を下見に足す。"""
+        leaf = os.path.basename(top_path)
+        kind = arch["top_kind"]
+        if convert:
+            new_name = os.path.basename(zip_target_for(top_path))
+            out["disposal"] = "recycle_bin" if recycle else "permanent"
+            gone = (
+                f"元の「{leaf}」はごみ箱へ送ります（退避の写しは作りません。ごみ箱から戻せます）"
+                if recycle
+                else f"元の「{leaf}」は完全に削除します（この場所にはごみ箱がありません。退避もしないので、元に戻せません）"
+            )
+            out["warnings"].insert(
+                0,
+                f"形式が変わります: {arch['top_label']} → zip。「{leaf}」の代わりに同じフォルダへ「{new_name}」を作り、"
+                f"{gone}。拡張子が変わるので、元の名前を参照しているものは見つからなくなります。"
+                "ほかの項目は取り出して zip に詰め直します（日時は取り出した時点のもの・権限や所有者の情報は引き継がれません）",
+            )
+        else:
+            same = "ほかの項目は、中身を変えずにそのまま写します"
+            if kind == "zip":
+                same += "（圧縮したままのデータ・日時・圧縮方式・属性・コメント・並び順を保ちます）"
+            elif kind == "7z":
+                same = "7-Zip の更新で作り直します。ほかの項目の中身は変わりません（まとめて圧縮した書庫は、含まれる塊を圧縮し直します）"
+            elif kind == "tar":
+                same += "（日時・権限・所有者などのメタデータも保ちます）"
+            elif arch["levels"][-1]["single"]:
+                same = "中身を書き換えて、同じ形式で包み直します"
+            out["warnings"].insert(0, f"書庫「{leaf}」全体を作り直します。{same}")
+        if len(arch["levels"]) > 1:
+            names = " → ".join([leaf] + [lv["name"] for lv in arch["levels"]])
+            out["warnings"].append(f"入れ子になっています（{names}）。内側の書庫から順に作り直します")
+        out["warnings"].append(
+            "同じ書庫の中の別の項目も対処するときは、1項目ずつ実行します（そのたびに書庫を作り直します）"
+        )
+        if arch["signed"]:
+            out["warnings"].append(
+                "署名つきの書庫（jar の署名など）です。作り直すと、署名の検証に通らなくなります（署名し直しが要ります）"
+            )
+        if arch["encrypted"] and not convert:
+            out["warnings"].append(
+                "パスワードつきです。検査のときに入れたパスワードで、同じ暗号方式（"
+                + (arch["encryption"] or "元と同じ")
+                + "）に暗号化し直します"
+            )
+
     # ------------------------------------------------------------ 実行
 
-    def start_run(self, job_id: str, top_path: str, params: dict, confirmed: bool, expected_sha256: str | None) -> dict:
-        """対処の実行を始める（確認済みのときだけ）。run_id を返し、画面は状態を見に来る。"""
+    def _begin_run(
+        self, job_id: str, top_path: str, params: dict, confirmed: bool, expected_sha256: str | None
+    ) -> tuple[str, RunState, tuple]:
+        """実行の準備（確認・前提の確かめ・途中で止まった対処の立て直し・書き換えなら記録の作成）。
+        （run_id, RunState, _apply の引数）を返す。"""
         if confirmed is not True:
             raise RemedyError("確認の操作が必要です")
-        a = self.get_analysis(job_id, top_path)
+        item_path = params.get("item_path") or ""
+        a = self.get_analysis(job_id, top_path, item_path)
         p = self.normalize(a, params)
-        plan = self._plan(job_id, top_path)  # 実行の時点でも前提（ファイルの有無・読み取り専用）を確かめる
-        from .safeio import output_inside_roots
-
-        msg = output_inside_roots(self.backup_root, plan["roots"], "退避の置き場")
-        if msg:
-            raise RemedyError(msg)
+        plan = self._plan(job_id, top_path, item_path)  # 実行の時点でも前提（ファイルの有無・読み取り専用）を確かめる
         key = (job_id, top_path)
         with self._lock:
             if key in self._busy:
@@ -721,20 +1228,53 @@ class RemedyService:
             self._busy.add(key)
             rid = f"{int(time.time() * 1000)}-{len(self._runs)}"
             run = self._runs[rid] = RunState(job_id, top_path, p["method"])
-        args = {
-            "path": top_path,
-            "method": p["method"],
-            "options": plan["options"],
-            "backup_dir": new_backup_dir(self.backup_root, job_id),
-            "types": p["types"],
-            "ranks": p["ranks"],
-            "sheets": p["sheets"],
-            "dummy_mode": p["dummy_mode"],
-            "expected_sha256": expected_sha256 or a.info.get("sha256"),
-        }
-        run.thread = threading.Thread(
-            target=self._apply, args=(run, a, args, p, plan["timeout"]), daemon=True, name="pii-remedy-apply"
-        )
+        try:
+            # 同じファイルに、前に途中で止まった対処が残っていれば、先に立て直す
+            self._recover(top_path, ignore_busy=True)
+            args = {
+                "path": top_path,
+                "method": p["method"],
+                "options": plan["options"],
+                "types": p["types"],
+                "ranks": p["ranks"],
+                "sheets": p["sheets"],
+                "dummy_mode": p["dummy_mode"],
+                "expected_sha256": expected_sha256 or a.info.get("sha256"),
+            }
+            if item_path and p["method"] != "delete_file":
+                args["item_path"] = item_path
+                args["convert_zip"] = p["convert_zip"]
+                args["book"] = plan["book"]
+            filters = {k: p[k] for k in ("types", "ranks", "sheets", "dummy_mode")}
+            if a.item_path:
+                filters["item_path"] = a.item_path  # 書庫の中の対象（パスだけ。生の値は入れない）
+                filters["convert_zip"] = p["convert_zip"]
+            commit, record_id = None, None
+            if p["method"] != "delete_file":
+                # 書き換えは、元に触る前に「始めた」記録を作る（途中で落ちたとき、立て直しがこれを読む）
+                commit = make_commit_plan(top_path, p["convert_zip"])
+                args["tmp_new"] = commit["tmp_new"]
+                if commit["dest"] != top_path:
+                    filters["converted_to"] = commit["dest"]
+                record_id = self.store.add_remediation(
+                    job_id,
+                    top_path,
+                    p["method"],
+                    filters,
+                    {},
+                    state="started",
+                    note=json.dumps(commit, ensure_ascii=False),
+                )
+        except BaseException:
+            with self._lock:
+                self._busy.discard(key)
+            raise
+        return rid, run, (run, a, args, p, plan["timeout"], commit, record_id, filters)
+
+    def start_run(self, job_id: str, top_path: str, params: dict, confirmed: bool, expected_sha256: str | None) -> dict:
+        """対処の実行を始める（確認済みのときだけ）。run_id を返し、画面は状態を見に来る。"""
+        rid, run, ctx = self._begin_run(job_id, top_path, params, confirmed, expected_sha256)
+        run.thread = threading.Thread(target=self._apply, args=ctx, daemon=True, name="pii-remedy-apply")
         run.thread.start()
         return {"run_id": rid, **run.view()}
 
@@ -745,83 +1285,122 @@ class RemedyService:
             raise RemedyError("その実行は見つかりません")
         return run.view()
 
-    def _apply(self, run: RunState, a: Analysis, args: dict, p: dict, timeout: int) -> None:
+    def _apply(
+        self,
+        run: RunState,
+        a: Analysis,
+        args: dict,
+        p: dict,
+        timeout: int,
+        commit: dict | None,
+        record_id: int | None,
+        filters: dict,
+    ) -> None:
+        committing = False
         try:
             with self._slots:
                 got = self._runner_fn("apply", args, timeout * 2)
-            filters = {k: p[k] for k in ("types", "ranks", "sheets", "dummy_mode")}
-            rid = self.store.add_remediation(
-                run.job_id,
-                run.top_path,
-                p["method"],
-                filters,
-                got["changed"],
-                remaining=got["remaining"],
-                backup_path=got["backup_path"],
-                orig_sha256=got["orig_sha256"],
-                new_sha256=got["new_sha256"],
-            )
+            if got.get("deleted"):
+                # ファイル・書庫ごとの削除（退避しない）。済んだあとに記録を残す
+                changed, remaining, extra = got["changed"], None, {}
+                rid = self.store.add_remediation(
+                    run.job_id, run.top_path, p["method"], filters, changed, remaining=None, state="applied"
+                )
+            else:
+                rid, remaining = record_id, got["remaining"]
+                self.store.update_remediation(
+                    rid,
+                    changed=got["changed"],
+                    remaining=remaining,
+                    orig_sha256=got["orig_sha256"],
+                    new_sha256=got["new_sha256"],
+                )
+                committing = True
+                outcome = commit_rewrite(self.store, rid, run.top_path, commit, got["orig_sha256"])
+                changed = {**got["changed"], "disposal": outcome["disposal"]}
+                if outcome.get("pre_name"):
+                    changed["pre_name"] = outcome["pre_name"]
+                self.store.update_remediation(rid, changed=changed)
+                extra = {"converted_to": got.get("converted_to"), "notes": got.get("notes") or []}
             with self._lock:
-                self._analyses.pop((run.job_id, run.top_path), None)  # ファイルが変わったので、古い分析は捨てる
+                # ファイルが変わったので、古い分析は捨てる（同じ書庫の中の別の項目の分析も）
+                for k in [
+                    k for k, an in self._analyses.items() if an.job_id == run.job_id and an.top_path == run.top_path
+                ]:
+                    del self._analyses[k]
                 run.result = {
                     "remediation_id": rid,
                     "method": p["method"],
-                    "method_label": METHOD_LABELS[p["method"]],
-                    "changed": got["changed"],
-                    "remaining": got["remaining"],
-                    "backup_path": got["backup_path"],
+                    "method_label": (
+                        ARCHIVE_DELETE_LABEL
+                        if (a.item_path and p["method"] == "delete_file")
+                        else METHOD_LABELS[p["method"]]
+                    ),
+                    "changed": changed,
+                    "remaining": remaining,
                     "file_name": os.path.basename(run.top_path),
+                    "item_name": (a.info.get("archive") or {}).get("item", ""),
+                    # 元のファイルの行き先: recycle_bin=ごみ箱へ送った（ごみ箱から戻す）／permanent=完全に削除した／
+                    # replaced=中身を入れ替えた（元は残らない）。退避の写しは作らないので、このアプリの「元に戻す」は無い
+                    "disposal": changed.get("disposal"),
+                    "pre_name": changed.get("pre_name"),
+                    **extra,
                 }
                 run.state = "done"
         except RemedyError as e:
+            self._abandon(run, commit, record_id, committing)
             run.error, run.state = str(e), "error"
         except Exception as e:  # noqa: BLE001
+            self._abandon(run, commit, record_id, committing)
             run.error, run.state = (
-                f"実行に失敗しました（{type(e).__name__}）。元のファイルは、置き換える前なら変わっていません",
+                f"実行に失敗しました（{type(e).__name__}）。元のファイルは、名前を変える前なら変わっていません",
                 "error",
             )
         finally:
             with self._lock:
                 self._busy.discard((run.job_id, run.top_path))
 
-    # ------------------------------------------------------------ 元に戻す
+    def _abandon(self, run: RunState, commit: dict | None, record_id: int | None, committing: bool) -> None:
+        """元に触る前（確定の前）に失敗した実行の後片付け（一時の新ファイルと、始めた記録を消す）。
 
-    def undo(self, job_id: str, rid: int) -> dict:
-        """退避の写しを元の場所へ戻す。今のファイルが対処の直後から変わっていれば、上書きせずに断る。"""
-        rec = self.store.remediation(job_id, rid)
-        if rec is None:
-            raise RemedyError("その対処の記録が見つかりません")
-        if rec["state"] != "applied":
-            raise RemedyError("この対処は、すでに元に戻しています")
-        path, backup = rec["top_path"], rec["backup_path"]
-        if not backup or not os.path.isfile(_long(backup)):
-            raise RemedyError("退避の写しが見つかりません（退避の置き場から消えた可能性）。戻せません")
-        if sha256_file(backup) != rec["orig_sha256"]:
-            raise RemedyError("退避の写しが、対処の前の中身と一致しません（壊れた・書き換えられた可能性）。戻しません")
-        exists = os.path.exists(_long(path))
-        if rec["method"] == "delete_file":
-            if exists:
-                raise RemedyError(
-                    "同じ場所にファイルがあるため、上書きせずに断りました。そのファイルを移してから戻してください"
-                )
-        elif exists and sha256_file(path) != rec["new_sha256"]:
-            raise RemedyError(
-                "対処のあとにファイルが変わっているため、上書きせずに断りました（退避の写しは残してあります）"
-            )
-        folder = os.path.dirname(path)
-        if not os.path.isdir(_long(folder)):
-            raise RemedyError("元のフォルダが見つかりません。フォルダを作り直してから戻してください")
-        tmp = path + TMP_SUFFIX
+        確定の最中（committing）の失敗は、commit_rewrite が元へ戻して記録も整えているので、ここでは何もしない。
+        """
+        if committing or record_id is None:
+            return
         try:
-            shutil.copy2(_long(backup), _long(tmp))
-            if sha256_file(tmp) != rec["orig_sha256"]:
-                raise RemedyError("戻す途中の写しが一致しませんでした。何も変えていません")
-            replace_with_retry(tmp, path)
-        except BaseException:
-            _discard(tmp)
-            raise
-        self.store.mark_remediation_restored(rid)
-        return {"ok": True, "restored_path": path, "message": f"元に戻しました: {os.path.basename(path)}"}
+            if commit:
+                _discard(commit["tmp_new"])
+            self.store.delete_remediation(record_id)
+        except Exception:  # noqa: BLE001  片付けの失敗で、本来の失敗の理由を隠さない
+            pass
+
+    # ------------------------------------------------------------ 途中で止まった対処の立て直し
+
+    def recover(self, top_path: str | None = None) -> list[dict]:
+        """途中で止まったままの対処（アプリが落ちた・電源が切れた）を立て直す。起動時と、同じファイルの対処を始める前に呼ぶ。
+
+        どの状態からでも、元の中身か新しい中身のどちらかが、元の名前（か「対処前」の名前）で必ず残る（recover_record）。
+        立て直した内容は記録（対処の記録タブ）に残る。立て直せなかったものは、そのまま残して次の機会に試す。
+        """
+        return self._recover(top_path, ignore_busy=False)
+
+    def _recover(self, top_path: str | None, ignore_busy: bool) -> list[dict]:
+        done: list[dict] = []
+        for rec in self.store.unfinished_remediations(top_path):
+            with self._lock:
+                if not ignore_busy and (rec["job_id"], rec["top_path"]) in self._busy:
+                    continue  # いま実行中の対処
+            plan = dict(rec.get("plan") or {})
+            try:
+                state, msg = recover_record(rec)
+            except Exception as e:  # noqa: BLE001
+                plan["recovery"] = f"立て直せませんでした（{type(e).__name__}: {e}）。ファイルは消していません"
+                self.store.update_remediation(rec["id"], note=json.dumps(plan, ensure_ascii=False))
+                continue
+            plan["recovery"] = msg
+            self.store.update_remediation(rec["id"], state=state, note=json.dumps(plan, ensure_ascii=False))
+            done.append({"id": rec["id"], "top_path": rec["top_path"], "state": state, "message": msg})
+        return done
 
 
 def _letters(idx0: int) -> str:

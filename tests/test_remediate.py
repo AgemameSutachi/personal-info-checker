@@ -11,6 +11,8 @@ import csv
 import io
 import json
 import os
+import re
+import shutil
 import socket
 import sys
 import threading
@@ -32,6 +34,45 @@ from pii_checker.store import Store  # noqa: E402
 
 TOKEN = "remedy-test-token"
 N_ROWS = 30  # 明細の上限（20 件）を超える数
+
+
+# ---------------------------------------------------------------- 本物のごみ箱を使わない（差し替え）
+
+REAL_SEND_TO_RECYCLE_BIN = remediate.send_to_recycle_bin  # 差し替える前の本物（長すぎるパスの試験だけが使う）
+
+
+class FakeTrash:
+    """ごみ箱の代わり（tmp_path の中のフォルダへ移すだけ）。本物のごみ箱へは送らない。"""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.sent: list[str] = []
+        root.mkdir(parents=True, exist_ok=True)
+
+    def __call__(self, path: str) -> None:
+        self.sent.append(path)
+        shutil.move(path, str(self.root / f"{len(self.sent)}-{Path(path).name}"))
+
+    def files(self) -> list[Path]:
+        return sorted(p for p in self.root.iterdir() if p.is_file())
+
+
+@pytest.fixture(autouse=True)
+def trash(tmp_path, monkeypatch):
+    """どの試験でも、ごみ箱へ送る関数を差し替える（本物のごみ箱へ送らない）。ごみ箱のある場所として扱う。"""
+    t = FakeTrash(tmp_path / "_trash")
+    monkeypatch.setattr(remediate, "send_to_recycle_bin", t)
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: True)
+    return t
+
+
+def trash_sent_nothing(tmp_path: Path) -> bool:
+    return not (tmp_path / "_trash").exists() or not list((tmp_path / "_trash").iterdir())
+
+
+def new_tmp_files(folder: Path) -> list[Path]:
+    """書き換えの途中の一時の新ファイル（~piichk-new-…）の残り。"""
+    return list(folder.glob(remediate.NEW_PREFIX + "*"))
 
 
 # ---------------------------------------------------------------- 検体の作り方
@@ -86,7 +127,7 @@ def make_service(tmp_path: Path, files: list[Path], runner=inline_runner):
     store.add_files(job, [(str(f), f.stat().st_size, f.stat().st_mtime) for f in files])
     with store.tx() as c:
         c.execute("UPDATE files SET state='done' WHERE job_id=?", (job,))
-    svc = RemedyService(store, backup_root=str(tmp_path / "backup"), runner_fn=runner)
+    svc = RemedyService(store, runner_fn=runner)
     return svc, store, job
 
 
@@ -158,7 +199,7 @@ def test_positions_overflow_is_flagged(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("enc,newline,quoting", CSV_VARIANTS)
-def test_csv_delete_rows(tmp_path, enc, newline, quoting):
+def test_csv_delete_rows(tmp_path, enc, newline, quoting, trash):
     rows = person_rows()
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
@@ -171,7 +212,7 @@ def test_csv_delete_rows(tmp_path, enc, newline, quoting):
     assert p.read_bytes() == encode_csv(kept, enc, newline, quoting)  # 触らない行は文字コード・改行・引用符も元のまま
     assert r["changed"]["rows"] == len(rows) - len(kept)
     assert r["remaining"]["total"] == 0
-    assert Path(r["backup_path"]).read_bytes() == original
+    assert [f.read_bytes() for f in trash.files()] == [original]  # 元はごみ箱へ（退避の写しは作らない）
     total, values = scan_counts(p, tmp_path)
     assert total == 0 and not values
 
@@ -566,8 +607,7 @@ def test_xlsx_delete_all_sheets_is_refused_and_original_kept(tmp_path):
     r = run(svc, job, p, method="delete_sheet", confidences=ALL_RANKS)
     assert r["state"] == "error" and "すべてのシート" in r["message"]
     assert p.read_bytes() == original
-    assert not list((tmp_path / "src").glob("*.piichk-tmp"))
-    assert not (tmp_path / "backup").exists() or not [x for x in (tmp_path / "backup").rglob("*") if x.is_file()]
+    assert not new_tmp_files(p.parent) and trash_sent_nothing(tmp_path)
 
 
 def test_xlsm_is_supported(tmp_path):
@@ -595,10 +635,10 @@ def test_old_xls_and_other_formats_only_allow_file_delete(tmp_path):
         assert not m[k]["available"] and m[k]["reason"]
 
 
-# ---------------------------------------------------------------- 退避・元に戻す・失敗
+# ---------------------------------------------------------------- 元はごみ箱へ（退避なし）・失敗・立て直し
 
 
-def test_backup_is_byte_identical_and_undo_restores(tmp_path):
+def test_original_goes_to_recycle_bin_under_pre_name(tmp_path, trash):
     rows = person_rows()
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
@@ -607,40 +647,60 @@ def test_backup_is_byte_identical_and_undo_restores(tmp_path):
     svc, store, job = make_service(tmp_path, [p])
     r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
     assert r["state"] == "done", r
-    backup = Path(r["backup_path"])
-    assert backup.read_bytes() == original and str(tmp_path / "backup") in str(backup)
-    assert job in str(backup)  # <退避>\<ジョブ ID>\<時刻>\ファイル名
     assert p.read_bytes() != original
+    # 元は、同じフォルダの中で「元の名前（対処前 日時）」に改名してから、ごみ箱へ送られた（中身はバイト単位で元のまま）
+    sent = Path(trash.sent[0])
+    assert sent.parent == p.parent and re.fullmatch(r"a（対処前 \d{8}-\d{6}）\.csv", sent.name)
+    assert [f.read_bytes() for f in trash.files()] == [original]
+    assert r["disposal"] == "recycle_bin" and r["pre_name"] == sent.name
+    assert r["changed"]["pre_name"] == sent.name and "backup_path" not in r
     rec = store.remediation(job, r["remediation_id"])
     import hashlib
 
+    assert rec["state"] == "applied" and rec["backup_path"] is None
     assert rec["orig_sha256"] == hashlib.sha256(original).hexdigest()
     assert rec["new_sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()
-    out = svc.undo(job, r["remediation_id"])
-    assert out["ok"] and p.read_bytes() == original
-    assert store.remediation(job, r["remediation_id"])["state"] == "restored"
-    with pytest.raises(RemedyError, match="すでに"):
-        svc.undo(job, r["remediation_id"])
-    assert not list((tmp_path / "src").glob("*.piichk-tmp"))
+    assert rec["plan"]["mode"] == "recycle" and rec["plan"]["pre_path"] == str(sent)
+    assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*"))  # 一時の新ファイル・改名した元は残らない
+    assert not (tmp_path / "backup").exists()  # 退避のフォルダは作られない
+    assert not hasattr(svc, "undo")  # 退避の写しから戻す「元に戻す」は無い
 
 
-def test_undo_refuses_when_file_changed_after_remediation(tmp_path):
+def test_without_recycle_bin_content_is_replaced_in_one_step(tmp_path, trash, monkeypatch):
+    """ごみ箱の無い場所: os.replace で入れ替える（元は残らない）。下見にそう出る。"""
     rows = person_rows()
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
     p.write_bytes(encode_csv(rows, "utf-8", "\n"))
     svc, store, job = make_service(tmp_path, [p])
-    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
+    assert pv["disposal"] == "replaced"
+    assert "元のファイルは残りません（この場所にはごみ箱がありません）" in pv["warnings"][0]
+    calls: list[tuple[str, str]] = []
+    real_replace = remediate.replace_with_retry
+    monkeypatch.setattr(
+        remediate, "replace_with_retry", lambda s, d, tries=5: (calls.append((s, d)), real_replace(s, d))[1]
+    )
+    monkeypatch.setattr(remediate, "_fs_rename", lambda s, d: pytest.fail("ごみ箱の無い場所では改名の段を使わない"))
+    started = svc.start_run(
+        job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS}, True, pv["expected_sha256"]
+    )
+    svc._runs[started["run_id"]].thread.join(180)
+    r = svc.run_status(job, started["run_id"])
     assert r["state"] == "done", r
-    p.write_bytes(p.read_bytes() + "追記,でした\n".encode("utf-8"))  # 対処のあとに人が編集した
-    edited = p.read_bytes()
-    with pytest.raises(RemedyError, match="変わっている"):
-        svc.undo(job, r["remediation_id"])
-    assert p.read_bytes() == edited  # 上書きしていない
-    assert store.remediation(job, r["remediation_id"])["state"] == "applied"
+    kept = [rows[0]] + [x for x in rows[1:] if not x[3]]
+    assert p.read_bytes() == encode_csv(kept, "utf-8", "\n")
+    assert len(calls) == 1 and calls[0][1] == str(p) and Path(calls[0][0]).name.startswith(remediate.NEW_PREFIX)
+    assert trash.sent == [] and trash.files() == []  # ごみ箱へは送らない（元は残らない）
+    assert r["disposal"] == "replaced" and r["pre_name"] is None
+    rec = store.remediation(job, r["remediation_id"])
+    assert rec["state"] == "applied" and rec["plan"]["mode"] == "replace" and rec["changed"]["disposal"] == "replaced"
+    assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*"))
 
 
-def test_failure_while_writing_keeps_original(tmp_path, monkeypatch):
+def test_failure_while_writing_keeps_original(tmp_path, monkeypatch, trash):
     rows = person_rows()
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
@@ -656,18 +716,54 @@ def test_failure_while_writing_keeps_original(tmp_path, monkeypatch):
     r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
     assert r["state"] == "error"
     assert p.read_bytes() == original
-    assert not list((tmp_path / "src").glob("*.piichk-tmp"))  # 一時のファイルは片付く
-    assert not [x for x in (tmp_path / "backup").rglob("*") if x.is_file()]  # 使わなかった退避も残さない
-    assert store.remediations(job) == []  # 記録も残さない
+    assert not new_tmp_files(p.parent)  # 一時の新ファイルは片付く
+    assert trash.sent == [] and store.remediations(job) == []  # 元に触らない・記録も残さない
 
 
-def test_failure_at_replace_keeps_original(tmp_path, monkeypatch):
-    rows = person_rows()
+def test_unreadable_new_file_is_not_put_in_place(tmp_path, monkeypatch, trash):
+    """新しいファイルを検査し直せない（開けない）ときは、元に触らず、一時の新ファイルを消して終わる。"""
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
-    p.write_bytes(encode_csv(rows, "utf-8", "\n"))
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
     original = p.read_bytes()
     svc, store, job = make_service(tmp_path, [p])
+
+    def boom(*a, **k):
+        raise RuntimeError("cannot scan (simulated)")
+
+    monkeypatch.setattr(remediate, "rescan_summary", boom)
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "error" and "検査し直せませんでした" in r["message"]
+    assert p.read_bytes() == original and not new_tmp_files(p.parent) and trash.sent == []
+    assert store.remediations(job) == []
+
+
+def test_failure_when_original_cannot_be_renamed_keeps_original(tmp_path, monkeypatch, trash):
+    """他のプログラムが開いていて名前を変えられない。元はそのまま・一時の新ファイルは消える・記録は残らない。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    original = p.read_bytes()
+    svc, store, job = make_service(tmp_path, [p])
+
+    def locked(src, dst):
+        raise PermissionError("in use (simulated)")
+
+    monkeypatch.setattr(remediate, "_fs_rename", locked)
+    monkeypatch.setattr(remediate.time, "sleep", lambda s: None)
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "error" and "名前を変えられませんでした" in r["message"]
+    assert p.read_bytes() == original and not new_tmp_files(p.parent) and trash.sent == []
+    assert store.remediations(job) == []
+
+
+def test_failure_at_replace_keeps_original(tmp_path, monkeypatch, trash):
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    original = p.read_bytes()
+    svc, store, job = make_service(tmp_path, [p])
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
 
     def deny(src, dst, tries=5):
         raise RemedyError("置き換えられませんでした（試験）")
@@ -675,8 +771,276 @@ def test_failure_at_replace_keeps_original(tmp_path, monkeypatch):
     monkeypatch.setattr(remediate, "replace_with_retry", deny)
     r = run(svc, job, p, method="dummy", dummy_mode="fixed", confidences=ALL_RANKS)
     assert r["state"] == "error" and "置き換え" in r["message"]
-    assert p.read_bytes() == original
-    assert not list((tmp_path / "src").glob("*.piichk-tmp"))
+    assert p.read_bytes() == original and not new_tmp_files(p.parent) and store.remediations(job) == []
+
+
+def test_failure_sending_to_recycle_bin_restores_original(tmp_path, monkeypatch, trash):
+    """ごみ箱へ送れなかった: 新しいファイルを置いたあとでも、元の状態（元の中身が元の名前）へ戻す。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    original = p.read_bytes()
+    svc, store, job = make_service(tmp_path, [p])
+
+    def fail(path):
+        raise RemedyError("ごみ箱へ送れませんでした（試験）")
+
+    monkeypatch.setattr(remediate, "send_to_recycle_bin", fail)
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "error" and "元の状態に戻しました" in r["message"]
+    assert p.read_bytes() == original  # 元の中身が元の名前で残る
+    assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*")) and store.remediations(job) == []
+
+
+def test_changed_while_working_is_refused_before_touching(tmp_path, trash):
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    svc, store, job = make_service(tmp_path, [p])
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
+    rid, run_state, ctx = svc._begin_run(
+        job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS}, True, pv["expected_sha256"]
+    )
+    # 準備（一時の新ファイルを作る）のあと、確定の前に、人が元のファイルを編集した
+    run_state_args = ctx
+    got = inline_runner("apply", ctx[2], 10)
+    p.write_bytes(p.read_bytes() + "追記,でした\n".encode("utf-8"))
+    edited = p.read_bytes()
+    commit = ctx[5]
+    with pytest.raises(RemedyError, match="変わりました"):
+        remediate.commit_rewrite(store, ctx[6], str(p), commit, got["orig_sha256"])
+    assert p.read_bytes() == edited and not new_tmp_files(p.parent) and trash.sent == []
+    assert store.remediations(job) == [] and run_state_args
+
+
+# ---------------------------------------------------------------- 途中で落ちた状態からの立て直し
+
+
+class SimulatedCrash(BaseException):
+    """プロセスの強制終了・電源断の代わり。Exception ではないので、確定の処理は元へ戻さず、落ちた状態をそのまま残す。"""
+
+
+def crash_after(monkeypatch, target, name: str, nth: int = 1, before: bool = False):
+    """target.name を nth 回目に呼んだ直後（before=True なら直前）に SimulatedCrash を起こす。"""
+    real = getattr(target, name)
+    count = {"n": 0}
+
+    def wrapper(*a, **k):
+        count["n"] += 1
+        hit = count["n"] == nth
+        if hit and before:
+            raise SimulatedCrash(name)
+        out = real(*a, **k)
+        if hit:
+            raise SimulatedCrash(name)
+        return out
+
+    monkeypatch.setattr(target, name, wrapper)
+
+
+def run_until_crash(svc, job, p, params):
+    """_begin_run と _apply を同じスレッドで走らせる（SimulatedCrash をそのまま受け取るため）。"""
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), params)
+    rid, run_state, ctx = svc._begin_run(job, str(p), params, True, pv["expected_sha256"])
+    svc._apply(*ctx)
+    return rid, run_state
+
+
+def _crash_stages():
+    """確定の各段（改名・改名・ごみ箱）の直後と、記録の状態を進めた直後。"""
+    return [
+        ("a1-元を改名した直後（記録はまだ始めたのまま）", "rename", 1),
+        ("a2-元の改名を記録した直後", "state", 2),
+        ("b1-新を元の名前へ改名した直後（記録は改名済みのまま）", "rename", 2),
+        ("b2-新の改名を記録した直後", "state", 3),
+        ("c1-ごみ箱へ送った直後（記録は置いた済みのまま）", "trash", 1),
+        ("c2-ごみ箱へ送って記録を済みにした直後", "state", 4),
+    ]
+
+
+@pytest.mark.parametrize("stage", _crash_stages(), ids=lambda s: s[0])
+def test_crash_in_each_commit_stage_is_recovered(tmp_path, monkeypatch, trash, stage):
+    """確定の各段の直後に落ちた状態を作り、立て直しのあとに、元か新の中身が元の名前（か対処前の名前）で、バイト単位で残る。"""
+    _, kind, nth = stage
+    rows = person_rows()
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(rows, "utf-8", "\n"))
+    original = p.read_bytes()
+    kept = encode_csv([rows[0]] + [x for x in rows[1:] if not x[3]], "utf-8", "\n")
+    svc, store, job = make_service(tmp_path, [p])
+    if kind == "rename":
+        crash_after(monkeypatch, remediate, "_fs_rename", nth)
+    elif kind == "state":
+        crash_after(
+            monkeypatch, store, "update_remediation", nth
+        )  # 1=準備後の結果の記録, 2=改名済み, 3=置いた済み, 4=済み
+    else:
+
+        def trash_then_crash(path):
+            trash(path)  # ごみ箱へ送り終えた直後に落ちる
+            raise SimulatedCrash("trash")
+
+        monkeypatch.setattr(remediate, "send_to_recycle_bin", trash_then_crash)
+    with pytest.raises(SimulatedCrash):
+        run_until_crash(svc, job, p, {"method": "delete_rows", "confidences": ALL_RANKS})
+    # 落ちた状態（記録は途中のまま）。どの状態でも、中身が失われていない
+    states_before = [x["state"] for x in store.unfinished_remediations()]
+    assert len(states_before) <= 1 and set(states_before) <= {"started", "renamed", "swapped"}
+    present = {f.name: f.read_bytes() for f in p.parent.iterdir() if f.is_file()}
+    present.update({f"trash:{f.name}": f.read_bytes() for f in trash.files()})
+    assert original in present.values() or kept in present.values()
+    monkeypatch.undo()
+    monkeypatch.setattr(remediate, "send_to_recycle_bin", trash)
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: True)
+    # 立て直し（アプリの起動時・同じファイルの対処を始める前に走る）
+    svc2 = RemedyService(store, runner_fn=inline_runner)
+    done = svc2.recover()
+    assert store.unfinished_remediations() == []
+    final = p.read_bytes()
+    assert final in (original, kept)  # 元か新のどちらかが、元の名前で残る
+    assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*"))  # 一時の新ファイル・改名した元は残らない
+    # ファイルが1つも失われていない: 元の中身はどこかに（元の名前か、ごみ箱に）ある。新の中身を置いたなら新も
+    everywhere = [final] + [f.read_bytes() for f in trash.files()]
+    assert original in everywhere
+    recs = store.remediations(job)
+    assert len(recs) == 1 and recs[0]["state"] in ("applied", "recovered")
+    assert recs[0]["plan"].get("recovery") or not done
+    # 落ちたあとの立て直しは、2回目は何もしない
+    assert svc2.recover() == []
+
+
+def test_crash_after_new_file_written_leaves_original_and_recovery_removes_tmp(tmp_path, monkeypatch, trash):
+    """1・2 の段（新ファイルを書き、検査し直した）の直後に落ちた: 元は無傷。記録（始めた）から一時の新ファイルを片付ける。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    original = p.read_bytes()
+    svc, store, job = make_service(tmp_path, [p])
+    crash_after(monkeypatch, store, "update_remediation", 1)  # 新ファイルを書き・検査し直し終えた直後（記録の更新の前）
+    with pytest.raises(SimulatedCrash):
+        run_until_crash(svc, job, p, {"method": "delete_rows", "confidences": ALL_RANKS})
+    assert p.read_bytes() == original and len(new_tmp_files(p.parent)) == 1  # 一時の新ファイルが残っている
+    assert [x["state"] for x in store.unfinished_remediations()] == ["started"]
+    monkeypatch.undo()
+    monkeypatch.setattr(remediate, "send_to_recycle_bin", trash)
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: True)
+    done = RemedyService(store, runner_fn=inline_runner).recover()
+    assert p.read_bytes() == original and not new_tmp_files(p.parent) and trash.sent == []
+    assert done[0]["state"] == "recovered" and "変える前" in done[0]["message"]
+
+
+def test_crash_after_replace_without_recycle_bin(tmp_path, monkeypatch, trash):
+    """ごみ箱の無い場所で、os.replace の直後に落ちた（記録は始めたのまま）: 新が入っている。記録を済みにして終える。"""
+    rows = person_rows()
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(rows, "utf-8", "\n"))
+    kept = encode_csv([rows[0]] + [x for x in rows[1:] if not x[3]], "utf-8", "\n")
+    svc, store, job = make_service(tmp_path, [p])
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+    crash_after(monkeypatch, remediate, "replace_with_retry", 1)
+    with pytest.raises(SimulatedCrash):
+        run_until_crash(svc, job, p, {"method": "delete_rows", "confidences": ALL_RANKS})
+    assert p.read_bytes() == kept and not new_tmp_files(p.parent)
+    monkeypatch.undo()
+    monkeypatch.setattr(remediate, "send_to_recycle_bin", trash)
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+    done = RemedyService(store, runner_fn=inline_runner).recover()
+    assert done[0]["state"] == "applied" and p.read_bytes() == kept
+
+
+def test_recovery_restores_when_original_name_is_missing(tmp_path, trash):
+    """記録が途中のまま・元の名前のファイルが無く「対処前」の名前がある → 元の名前へ戻す。一時の新ファイルは消す。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    original = encode_csv(person_rows(), "utf-8", "\n")
+    pre = p.parent / "a（対処前 20261020-101010）.csv"
+    pre.write_bytes(original)
+    tmp_new = p.parent / (remediate.NEW_PREFIX + "abcdefgh-a.csv")
+    tmp_new.write_bytes(b"new")
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(p.parent)], ScanOptions())
+    plan = {"mode": "recycle", "tmp_new": str(tmp_new), "dest": str(p), "pre_path": str(pre)}
+    store.add_remediation(job, str(p), "delete_rows", {}, {}, state="renamed", note=json.dumps(plan))
+    done = RemedyService(store, runner_fn=inline_runner).recover()
+    assert p.read_bytes() == original and not pre.exists() and not tmp_new.exists()
+    assert done[0]["state"] == "recovered" and "元の名前に戻しました" in done[0]["message"]
+    rec = store.remediations(job)[0]
+    assert rec["state"] == "recovered" and "戻しました" in rec["plan"]["recovery"]  # 画面の対処の記録に出る
+
+
+def test_recovery_keeps_both_files_when_unsure_and_never_deletes_unknown(tmp_path, trash):
+    """元の名前のファイルと「対処前」の名前の両方があり、元の名前の中身が新と一致しない → どちらも消さない。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(b"current content")
+    pre = p.parent / "a（対処前 20261020-101010）.csv"
+    pre.write_bytes(b"older content")
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(p.parent)], ScanOptions())
+    plan = {
+        "mode": "recycle",
+        "tmp_new": str(p.parent / "~piichk-new-zzzzzzzz-a.csv"),
+        "dest": str(p),
+        "pre_path": str(pre),
+    }
+    store.add_remediation(
+        job, str(p), "delete_rows", {}, {}, state="swapped", new_sha256="0" * 64, note=json.dumps(plan)
+    )
+    done = RemedyService(store, runner_fn=inline_runner).recover()
+    assert p.read_bytes() == b"current content" and pre.read_bytes() == b"older content" and trash.sent == []
+    assert done[0]["state"] == "recovered" and "両方が残っています" in done[0]["message"]
+
+
+def test_recovery_runs_at_app_start(tmp_path, trash):
+    from pii_checker.web.server import create_app
+
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    original = encode_csv(person_rows(), "utf-8", "\n")
+    pre = p.parent / "a（対処前 20261020-101010）.csv"
+    pre.write_bytes(original)  # 改名のあとで落ちた（元の名前が無い）
+    db = tmp_path / "jobs.sqlite3"
+    store = Store(str(db))
+    job = store.create_job([str(p.parent)], ScanOptions())
+    plan = {
+        "mode": "recycle",
+        "tmp_new": str(p.parent / "~piichk-new-zzzzzzzz-a.csv"),
+        "dest": str(p),
+        "pre_path": str(pre),
+    }
+    store.add_remediation(job, str(p), "delete_rows", {}, {}, state="renamed", note=json.dumps(plan))
+    app = create_app(db=str(db), token=TOKEN, remedy_runner=inline_runner)  # アプリの起動で立て直す
+    assert p.read_bytes() == original and not pre.exists()
+    assert app.state.remedy_recovered and app.state.remedy_recovered[0]["state"] == "recovered"
+    rows = app.state.store.remediations(job)
+    assert rows[0]["state"] == "recovered" and "戻しました" in rows[0]["plan"]["recovery"]
+
+
+def test_recovery_runs_before_the_same_file_is_processed_again(tmp_path, trash):
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    rows = person_rows()
+    p.write_bytes(encode_csv(rows, "utf-8", "\n"))
+    svc, store, job = make_service(tmp_path, [p])
+    # 前に落ちて、一時の新ファイルと「始めた」の記録が残っている
+    leftover = p.parent / (remediate.NEW_PREFIX + "qqqqqqqq-a.csv")
+    leftover.write_bytes(b"half")
+    plan = {
+        "mode": "recycle",
+        "tmp_new": str(leftover),
+        "dest": str(p),
+        "pre_path": str(p.parent / "a（対処前 20261020-101010）.csv"),
+    }
+    old = store.add_remediation(job, str(p), "delete_rows", {}, {}, state="started", note=json.dumps(plan))
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    assert not leftover.exists()  # 実行を始める前に立て直した
+    recs = {x["id"]: x for x in store.remediations(job)}
+    assert recs[old]["state"] == "recovered" and recs[r["remediation_id"]]["state"] == "applied"
 
 
 def test_changed_since_preview_is_refused(tmp_path):
@@ -728,46 +1092,54 @@ def test_scan_alone_never_writes(tmp_path):
 # ---------------------------------------------------------------- ごみ箱（差し替えて確かめる）
 
 
-def test_delete_file_sends_to_recycle_after_backup(tmp_path, monkeypatch):
+def test_delete_file_sends_to_recycle_without_backup(tmp_path, trash):
+    """ごみ箱のある場所: ごみ箱へ送る。退避の写しは作らない（個人情報のファイルを手元のディスクへ写さない）。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    original = encode_csv(person_rows(), "utf-8", "\n")
+    p.write_bytes(original)
+    svc, store, job = make_service(tmp_path, [p])
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_file"})
+    assert pv["summary"] == "ファイル「a.csv」をごみ箱へ送ります（ごみ箱から戻せます）"
+    assert pv["disposal"] == "recycle_bin" and pv["warnings"] == []
+    started = svc.start_run(job, str(p), {"method": "delete_file"}, True, None)
+    svc._runs[started["run_id"]].thread.join(180)
+    r = svc.run_status(job, started["run_id"])
+    assert r["state"] == "done", r
+    assert trash.sent == [str(p)] and not p.exists()
+    assert [f.read_bytes() for f in trash.files()] == [
+        original
+    ]  # ごみ箱の中にある（このテストではごみ箱の代わりのフォルダ）
+    assert not (tmp_path / "backup").exists() and "backup_path" not in r  # 退避は作らない
+    assert r["disposal"] == "recycle_bin" and r["changed"] == {"files": 1, "disposal": "recycle_bin"}
+    rec = store.remediation(job, r["remediation_id"])
+    assert rec["backup_path"] is None and rec["changed"]["disposal"] == "recycle_bin" and rec["state"] == "applied"
+
+
+def test_delete_file_without_recycle_bin_deletes_permanently(tmp_path, monkeypatch, trash):
+    """ごみ箱の無い場所（ネットワーク・外付けなど）: ごみ箱を経由せずに消す。下見・結果・記録で「完全に削除」と分かる。"""
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
     p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
-    original = p.read_bytes()
     svc, store, job = make_service(tmp_path, [p])
-    seen = {}
-
-    def fake_recycle(path):
-        # 送る前に退避が済んでいて、元と同じ中身であること
-        backups = [x for x in (tmp_path / "backup").rglob("a.csv")]
-        seen["backup_at_call"] = [b.read_bytes() == original for b in backups]
-        seen["path"] = path
-        os.remove(path)  # ごみ箱へ送ったことにする（本物のごみ箱は使わない）
-
-    monkeypatch.setattr(remediate, "send_to_recycle_bin", fake_recycle)
-    r = run(svc, job, p, method="delete_file")
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_file"})
+    line = "ファイル「a.csv」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
+    assert pv["summary"] == line and pv["disposal"] == "permanent"
+    assert any(line in w for w in pv["warnings"])
+    started = svc.start_run(job, str(p), {"method": "delete_file"}, True, None)
+    svc._runs[started["run_id"]].thread.join(180)
+    r = svc.run_status(job, started["run_id"])
     assert r["state"] == "done", r
-    assert seen["path"] == str(p) and seen["backup_at_call"] == [True]
-    assert not p.exists()
-    assert Path(r["backup_path"]).read_bytes() == original
-    # 元に戻す: 同じ場所へ戻る。同じ場所にファイルがあれば断る
-    assert svc.undo(job, r["remediation_id"])["ok"] and p.read_bytes() == original
+    assert not p.exists() and trash.sent == [] and trash.files() == []  # ごみ箱にも退避にも何も残らない
+    assert not (tmp_path / "backup").exists() and r["disposal"] == "permanent"
+    rec = store.remediation(job, r["remediation_id"])
+    assert rec["changed"] == {"files": 1, "disposal": "permanent"} and rec["backup_path"] is None
 
 
-def test_delete_file_undo_refuses_when_a_file_is_there(tmp_path, monkeypatch):
-    p = tmp_path / "src" / "a.csv"
-    p.parent.mkdir()
-    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
-    svc, store, job = make_service(tmp_path, [p])
-    monkeypatch.setattr(remediate, "send_to_recycle_bin", lambda path: os.remove(path))
-    r = run(svc, job, p, method="delete_file")
-    assert r["state"] == "done", r
-    p.write_text("別のファイル", encoding="utf-8")
-    with pytest.raises(RemedyError, match="断りました"):
-        svc.undo(job, r["remediation_id"])
-    assert p.read_text(encoding="utf-8") == "別のファイル"
-
-
-def test_delete_file_failure_removes_unused_backup(tmp_path, monkeypatch):
+def test_delete_file_failure_keeps_file_and_makes_no_backup(tmp_path, monkeypatch, trash):
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
     p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
@@ -780,13 +1152,23 @@ def test_delete_file_failure_removes_unused_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(remediate, "send_to_recycle_bin", fail)
     r = run(svc, job, p, method="delete_file")
     assert r["state"] == "error" and p.read_bytes() == original
-    assert not [x for x in (tmp_path / "backup").rglob("*") if x.is_file()]
+    assert not (tmp_path / "backup").exists() and store.remediations(job) == []
+    # ごみ箱の無い場所で、削除そのものが失敗したとき（他のプログラムが開いている等）も、ファイルは残る
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+
+    def locked(path):
+        raise PermissionError("in use (simulated)")
+
+    monkeypatch.setattr(os, "remove", locked)
+    r = run(svc, job, p, method="delete_file")
+    monkeypatch.undo()
+    assert r["state"] == "error" and "削除できませんでした" in r["message"] and p.read_bytes() == original
+    assert store.remediations(job) == []
 
 
-@pytest.mark.skipif(os.name != "nt", reason="ごみ箱は Windows のみ")
 def test_recycle_function_refuses_very_long_path(tmp_path):
     with pytest.raises(RemedyError, match="長すぎ"):
-        remediate.send_to_recycle_bin(str(tmp_path / ("x" * 300) / "a.txt"))
+        REAL_SEND_TO_RECYCLE_BIN(str(tmp_path / ("x" * 300) / "a.txt"))  # 本物の関数（長すぎるパスは触る前に断る）
 
 
 # ---------------------------------------------------------------- できないもの
@@ -805,7 +1187,7 @@ def test_unavailable_files_give_reasons(tmp_path):
     store.add_files(job, [(str(ro), 10, 1.0), (ftp, 10, 1.0), (inner, 10, 1.0)])
     with store.tx() as c:
         c.execute("UPDATE files SET state='done' WHERE job_id=?", (job,))
-    svc = RemedyService(store, backup_root=str(tmp_path / "backup"), runner_fn=inline_runner)
+    svc = RemedyService(store, runner_fn=inline_runner)
     r = svc.request_analysis(job, str(ro))
     assert r["state"] == "error" and "読み取り専用" in r["message"]
     r = svc.request_analysis(job, ftp)
@@ -815,17 +1197,6 @@ def test_unavailable_files_give_reasons(tmp_path):
     r = svc.request_analysis(job, str(folder / "not-in-job.csv"))
     assert r["state"] == "error" and "見つかりません" in r["message"]
     os.chmod(ro, 0o666)
-
-
-def test_backup_root_inside_scanned_folder_is_refused(tmp_path):
-    p = tmp_path / "src" / "a.csv"
-    p.parent.mkdir()
-    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
-    svc, store, job = make_service(tmp_path, [p])
-    svc.backup_root = str(tmp_path / "src" / "退避")
-    analyze(svc, job, p)
-    with pytest.raises(RemedyError, match="検査するフォルダ"):
-        svc.start_run(job, str(p), {"method": "delete_rows"}, True, None)
 
 
 # ---------------------------------------------------------------- 記録に生の値を入れない
@@ -842,7 +1213,7 @@ def _leak(paths: list[str], needles: list[str]) -> list[str]:
     return found
 
 
-def test_records_and_job_db_have_no_raw_values(tmp_path):
+def test_records_and_job_db_have_no_raw_values(tmp_path, trash):
     import glob
 
     rows = person_rows()
@@ -868,7 +1239,8 @@ def test_records_and_job_db_have_no_raw_values(tmp_path):
                 if isinstance(v, str):
                     assert not any(n in v for n in needles), (table, v[:80])
     rec = store.remediations(job)[0]
-    assert rec["method"] == "dummy" and rec["filters"]["dummy_mode"] == "same" and rec["backup_path"]
+    assert rec["method"] == "dummy" and rec["filters"]["dummy_mode"] == "same" and rec["backup_path"] is None
+    assert not (tmp_path / "backup").exists()  # 退避のフォルダは作られない
     # 陽性対照: 生の値を入れた DB なら、この探し方で見つかる
     import sqlite3
 
@@ -879,9 +1251,9 @@ def test_records_and_job_db_have_no_raw_values(tmp_path):
     con.commit()
     con.close()
     assert _leak([str(q)], needles) == [needles[0]]
-    # ダミー化のあとのファイル（書き換えた結果）にも元の値は無いが、退避の写しには元の値がある（元に戻すために残す）
+    # ダミー化のあとのファイル（書き換えた結果）に元の値は無い。元の値があるのは、ごみ箱へ送った元のファイルだけ
     assert _leak([str(p)], needles) == []
-    assert _leak([r["backup_path"]], needles)
+    assert _leak([str(f) for f in trash.files()], needles)
 
 
 # ---------------------------------------------------------------- API
@@ -912,7 +1284,6 @@ def api(tmp_path):
     app = create_app(
         db=str(tmp_path / "jobs.sqlite3"),
         token=TOKEN,
-        backup_root=str(tmp_path / "backup"),
         remedy_runner=inline_runner,
     )
     port = _free_port()
@@ -957,7 +1328,6 @@ def test_api_requires_token_and_header(api):
         (f"/api/jobs/{job}/remedy/analyze", {"top_path": top}),
         (f"/api/jobs/{job}/remedy/preview", {"top_path": top, "method": "delete_rows"}),
         (f"/api/jobs/{job}/remedy/run", {"top_path": top, "method": "delete_rows", "confirmed": True}),
-        (f"/api/jobs/{job}/remediations/1/undo", {}),
     ):
         assert call(base, path, "POST", body, token=None)[0] == 401
         assert call(base, path, "POST", body, token="wrong")[0] == 401
@@ -967,7 +1337,7 @@ def test_api_requires_token_and_header(api):
     assert api["path"].read_bytes() == original  # 断られたものは何も変えていない
 
 
-def test_api_end_to_end(api):
+def test_api_end_to_end(api, trash):
     base, job, p = api["base"], api["job"], api["path"]
     top = str(p)
     original = p.read_bytes()
@@ -1009,11 +1379,13 @@ def test_api_end_to_end(api):
     row = lst["rows"][0]
     assert row["state"] == "applied" and row["method"] == "delete_rows" and row["file_name"] == "a.csv"
     assert not any(n in json.dumps(lst, ensure_ascii=False) for n in raw_needles(api["rows"]))
-    # 元に戻す
-    st, out = call(base, f"/api/jobs/{job}/remediations/{row['id']}/undo", "POST", {})
-    assert st == 200 and out["ok"] and p.read_bytes() == original
-    st, out = call(base, f"/api/jobs/{job}/remediations/{row['id']}/undo", "POST", {})
-    assert st == 400 and "すでに" in out["detail"]
+    # 元はごみ箱へ（退避の写しは作らない）。「元に戻す」の API は無い
+    assert row["disposal"] == "recycle_bin" and row["pre_name"].startswith("a（対処前 ") and row["recovery"] == ""
+    assert status["disposal"] == "recycle_bin" and "backup_path" not in status
+    assert [f.read_bytes() for f in trash.files()] == [original]
+    assert "backup_root" not in lst and lst["recovered_at_start"] == []
+    st, _ = call(base, f"/api/jobs/{job}/remediations/{row['id']}/undo", "POST", {})
+    assert st in (404, 405)
     st, _ = call(base, "/api/jobs/no-such/remedy/analyze", "POST", {"top_path": top})
     assert st == 404
     st, _ = call(base, f"/api/jobs/{job}/remedy/analyze", "POST", {})
@@ -1068,8 +1440,8 @@ def test_xlsx_dummy_numeric_cell_and_sheet_filter_keep_shared_string(tmp_path):
     assert r["remaining"]["total"] > 0  # B の分が残る（残りを正直に数える）
 
 
-def test_real_worker_process_round_trip(tmp_path):
-    """本番と同じ別プロセス（pebble・メモリ上限）で、分析・実行・元に戻すが通る（位置の集まりも受け渡せる）。"""
+def test_real_worker_process_round_trip(tmp_path, trash):
+    """本番と同じ別プロセス（pebble・メモリ上限）で、分析・準備・確定が通る（位置の集まりも受け渡せる）。"""
     rows = person_rows()
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
@@ -1081,4 +1453,4 @@ def test_real_worker_process_round_trip(tmp_path):
     kept = [rows[0]] + [x for x in rows[1:] if not x[3]]
     assert p.read_bytes() == encode_csv(kept, "cp932", "\r\n")
     assert r["remaining"]["total"] == 0
-    assert svc.undo(job, r["remediation_id"])["ok"] and p.read_bytes() == original
+    assert [f.read_bytes() for f in trash.files()] == [original]  # 別プロセスで準備し、確定は親が行って、元はごみ箱へ

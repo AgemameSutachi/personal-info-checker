@@ -9,7 +9,7 @@
 - パスワードはメモリ上の JobRunner にだけ渡し、保存しない。
 - 保存・レポートには伏せた値だけを残す。画面の詳細では、そのファイルを読み直して検出した値そのものを
   メモリの中だけで返す（/api/jobs/{id}/reveal。ほかの API と同じトークンの守りの内側）。
-- 検査は何も書き込まない。画面で対処を選んで実行したときだけ、そのファイルを書き換える（元は退避・削除はごみ箱。
+- 検査は何も書き込まない。画面で対処を選んで実行したときだけ、そのファイルを書き換える（退避の写しは作らず、元はごみ箱へ。
   /api/jobs/{id}/remedy/*。ほかの API と同じトークン・Host・独自ヘッダーの守りの内側）。
 """
 
@@ -30,7 +30,7 @@ from .. import __version__, folderacl, jobdiff, reportflags
 from ..detectors import PII_TYPES
 from ..models import STATUS_LABELS, Confidence, PasswordBook, ScanOptions, Status
 from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
-from ..remediate import METHOD_LABELS, RemedyService
+from ..remediate import ARCHIVE_DELETE_LABEL, METHOD_LABELS, RemedyService
 from ..remedy_write import RemedyError
 from ..reveal import RevealService
 from ..remote import ENCODINGS, KINDS, ConnectError, Connection, ftp_check, smb_connect, smb_disconnect
@@ -113,7 +113,6 @@ def create_app(
     token: str | None = None,
     allowed_hosts: set[str] | None = None,
     desktop: bool = False,
-    backup_root: str | None = None,
     remedy_runner=None,
 ) -> FastAPI:
     store = Store(db)
@@ -125,9 +124,16 @@ def create_app(
     app.state.registry = registry
     reveal_service = RevealService(store, registry)
     app.state.reveal = reveal_service
-    # 対処（書き換え・削除）。退避の置き場の既定は %LOCALAPPDATA%\個人情報チェッカー\退避。runner は試験で差し替える
-    remedy_service = RemedyService(store, backup_root=backup_root, runner_fn=remedy_runner)
+    # 対処（書き換え・削除）。runner は試験で差し替える
+    remedy_service = RemedyService(store, runner_fn=remedy_runner, registry=registry)
     app.state.remedy = remedy_service
+    # 前回、対処の途中で止まった（アプリが落ちた・電源が切れた）ものがあれば、元の名前のファイルを立て直す
+    try:
+        app.state.remedy_recovered = remedy_service.recover()
+    except (
+        Exception
+    ):  # noqa: BLE001  立て直しの失敗でアプリを起動できなくしない（次に同じファイルを対処するときにも試す）
+        app.state.remedy_recovered = []
     # ホスト名は大文字小文字を区別しない（ブラウザは小文字で送るが、gethostname() は「Office-PC」のように大文字を含む）
     # 許可する側は名前そのもの（ポートは付かない。IPv6 は「::1」とも「[::1]」とも書ける）
     hosts = {h.strip().strip("[]").lower() for h in (allowed_hosts or set(LOCAL_HOSTS))} - {""}
@@ -518,6 +524,10 @@ def create_app(
             raise HTTPException(400, "ファイルのパスを指定してください")
         return top_path
 
+    def _remedy_item(payload: dict) -> None:
+        if not isinstance(payload.get("item_path") or "", str):
+            raise HTTPException(400, "書庫の中のパスの指定が正しくありません")
+
     def _remedy_call(fn, *args):
         """対処の処理を呼び、利用者向けの失敗（RemedyError）を 400 で返す（文面はそのまま画面に出す）。"""
         try:
@@ -529,18 +539,23 @@ def create_app(
     def remedy_analyze(job_id: str, payload: dict = Body(...)):
         """対処の前に、そのファイルを読み直して位置を集める（すぐには終わらない。同じ呼び出しを繰り返して状態を見る）。"""
         _job_or_404(job_id)
-        return remedy_service.request_analysis(job_id, _remedy_top_path(payload))
+        item_path = payload.get("item_path") or ""
+        if not isinstance(item_path, str):
+            raise HTTPException(400, "書庫の中のパスの指定が正しくありません")
+        return remedy_service.request_analysis(job_id, _remedy_top_path(payload), item_path)
 
     @app.post("/api/jobs/{job_id}/remedy/preview")
     def remedy_preview(job_id: str, payload: dict = Body(...)):
         """選んだ方法・絞り込みで、何がどう変わるかを返す（何も書き換えない）。"""
         _job_or_404(job_id)
+        _remedy_item(payload)
         return _remedy_call(remedy_service.preview, job_id, _remedy_top_path(payload), payload)
 
     @app.post("/api/jobs/{job_id}/remedy/run")
     def remedy_run(job_id: str, payload: dict = Body(...)):
         """対処を実行する（確認の操作つき）。すぐには終わらないので、返った run_id で状態を見る。"""
         _job_or_404(job_id)
+        _remedy_item(payload)
         return _remedy_call(
             remedy_service.start_run,
             job_id,
@@ -568,22 +583,27 @@ def create_app(
                     "top_path": r["top_path"],
                     "file_name": os.path.basename(r["top_path"]),
                     "method": r["method"],
-                    "method_label": METHOD_LABELS.get(r["method"], r["method"]),
+                    "item_path": (r["filters"] or {}).get("item_path") or "",
+                    "converted_to": (r["filters"] or {}).get("converted_to") or "",
+                    "method_label": (
+                        ARCHIVE_DELETE_LABEL
+                        if (r["filters"] or {}).get("item_path") and r["method"] == "delete_file"
+                        else METHOD_LABELS.get(r["method"], r["method"])
+                    ),
                     "filters": r["filters"],
                     "changed": r["changed"],
                     "remaining": r["remaining"],
-                    "backup_path": r["backup_path"],
+                    # 元のファイルの行き先: recycle_bin=ごみ箱へ送った／permanent=完全に削除した／replaced=入れ替えた（元は残らない）。
+                    # 退避の写しは作らない。ごみ箱へ送ったときは、ごみ箱から pre_name の名前で戻す
+                    "disposal": (r["changed"] or {}).get("disposal") or "",
+                    "pre_name": (r["changed"] or {}).get("pre_name") or "",
+                    # started / renamed / swapped は途中で止まったまま（次の起動・次の対処の前に立て直す）。
+                    # applied=済み、recovered=立て直した（recovery に、何をしたかの説明）
                     "state": r["state"],
-                    "restored_at": r["restored_at"],
+                    "recovery": (r["plan"] or {}).get("recovery") or "",
                 }
             )
-        return {"rows": out, "backup_root": remedy_service.backup_root}
-
-    @app.post("/api/jobs/{job_id}/remediations/{rid}/undo")
-    def remediation_undo(job_id: str, rid: int):
-        """退避の写しを元の場所へ戻す（今のファイルが対処の直後から変わっていれば、上書きせずに断る）。"""
-        _job_or_404(job_id)
-        return _remedy_call(remedy_service.undo, job_id, rid)
+        return {"rows": out, "recovered_at_start": getattr(app.state, "remedy_recovered", [])}
 
     def _page(sql: str, args: tuple, offset: int, limit: int):
         limit = max(1, min(limit, 500))

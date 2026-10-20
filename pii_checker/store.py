@@ -441,11 +441,51 @@ class Store:
                     kw.get("backup_path"),
                     kw.get("orig_sha256"),
                     kw.get("new_sha256"),
-                    "applied",
+                    kw.get("state", "applied"),
                     kw.get("note", ""),
                 ),
             )
             return int(cur.lastrowid)
+
+    # 対処の記録の更新で書き換えてよい列（JSON の列は辞書で渡す）
+    _REMEDIATION_FIELDS = (
+        "state",
+        "changed",
+        "remaining",
+        "backup_path",
+        "orig_sha256",
+        "new_sha256",
+        "note",
+        "restored_at",
+    )
+
+    def update_remediation(self, rid: int, **fields) -> None:
+        """対処の記録（途中の状態・結果・立て直しの記録）を更新する。生の値は渡さない。"""
+        sets, args = [], []
+        for k, v in fields.items():
+            if k not in self._REMEDIATION_FIELDS:
+                raise ValueError(f"更新できない列: {k}")
+            if k in ("changed", "remaining") and not isinstance(v, str):
+                v = json.dumps(v, ensure_ascii=False)
+            sets.append(f"{k}=?")
+            args.append(v)
+        if sets:
+            with self.tx() as c:
+                c.execute(f"UPDATE remediations SET {', '.join(sets)} WHERE id=?", (*args, rid))
+
+    def delete_remediation(self, rid: int) -> None:
+        """きれいに取りやめた実行の記録を消す（元に触る前に失敗した・元に戻し終えた）。"""
+        with self.tx() as c:
+            c.execute("DELETE FROM remediations WHERE id=?", (rid,))
+
+    def unfinished_remediations(self, top_path: str | None = None) -> list[dict]:
+        """途中で止まったままの対処の記録（始めた・元を改名した・新しいファイルを置いた）。立て直しの対象。"""
+        sql = "SELECT * FROM remediations WHERE state IN ('started','renamed','swapped')"
+        args: tuple = ()
+        if top_path is not None:
+            sql += " AND top_path=?"
+            args = (top_path,)
+        return [self._remediation_row(r) for r in self.query(sql + " ORDER BY id", args)]
 
     def remediation(self, job_id: str, rid: int) -> dict | None:
         rows = self.query("SELECT * FROM remediations WHERE job_id=? AND id=?", (job_id, rid))
@@ -460,6 +500,12 @@ class Store:
         d = dict(r)
         for k in ("filters", "changed", "remaining"):
             d[k] = json.loads(d[k]) if d.get(k) else None
+        # 実行の段取り（方法・一時の新ファイル・改名後の元の名前・立て直しの結果）。note に JSON で持つ
+        note = d.get("note") or ""
+        try:
+            d["plan"] = json.loads(note) if note.startswith("{") else {}
+        except ValueError:
+            d["plan"] = {}
         return d
 
     def mark_remediation_restored(self, rid: int) -> None:

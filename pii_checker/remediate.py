@@ -6,16 +6,16 @@ Access はファイルの削除だけ）。
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
 - 対象は「実行の時点でファイルを読み直して集めた、全部の検出の位置」（明細の上限 20 件ではない）。
   位置の集め直しと書き換えは別プロセス（検査と同じ pebble・メモリ上限・時間制限）で行う。生の値は位置に入れない。
-- 退避の写しは作らない（個人情報のファイルを手元のディスクへ写さないため）。元のファイルはごみ箱へ送る。
+- 元の写しは作らない（個人情報のファイルを手元のディスクへ写さないため）。元のファイルはごみ箱へ送る。
 - 書き換えの流れ（途中で落ちても、元か新のどちらかが必ず元の名前か「対処前」の名前で残る）:
   (1) 元と同じフォルダの一時の名前（~piichk-new-…）へ新しい中身を書く（flush・fsync）→ (2) 新しいファイルを検査し直して開けると
   確かめる（ここまで元に触らない）→ (3) 記録（remediations）に「始めた」と段取り（一時の新ファイル・改名後の元の名前）を書く →
   (4) ごみ箱のある場所: 元を「元の名前（対処前 日時）」に改名 → 新を元の名前へ改名 → 改名した元をごみ箱へ。各段のあとで記録の状態を進める／
   (5) ごみ箱の無い場所: os.replace で入れ替える（元は残らない。下見に出す）。
   (1)(2) は別プロセス（apply_task）、(3)〜(5) は親のプロセス（commit_rewrite）。
-- 途中で止まった記録は、起動時と、同じファイルに対処を始める前に立て直す（recover_record）。「元に戻す」（退避の写しから戻す）は無い。
+- 途中で止まった記録は、起動時と、同じファイルに対処を始める前に立て直す（recover_record）。「元に戻す」（元の写しから戻す）は無い。
   ごみ箱へ送った場合は、ごみ箱から「元の名前（対処前 …）」を戻してもらう。ごみ箱の無い場所は戻せない。
-- 「ファイルを削除」も退避しない。ごみ箱のある場所はごみ箱へ送り（SHFileOperationW）、無い場所（ネットワーク・外付け）はそのまま消す。
+- 「ファイルを削除」も元の写しは作らない。ごみ箱のある場所はごみ箱へ送り（SHFileOperationW）、無い場所（ネットワーク・外付け）はそのまま消す。
   どちらにしたかを結果・記録に残す。書庫ごとの削除・zip に作り直すときの元の書庫の削除も同じ扱い。
 - 書庫の中のファイル（T2-a2）: item_path（検査のパス「外!内」）を対象に、取り出して同じ書き換えを当て、書庫全体を作り直す
   （archive_write.py）。rar など書けない形式は zip に作り直す（元の書庫は削除）。
@@ -72,7 +72,7 @@ LAYOUT_LABELS = {
 }
 # 書庫の中のファイルにだけ使える方法
 ARCHIVE_ONLY_METHODS = ("remove_entry", "convert_zip")
-ARCHIVE_DELETE_LABEL = "書庫ごとファイルを削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）"
+ARCHIVE_DELETE_LABEL = "書庫全体を削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）"
 CONF_RANKS = {"high": 3, "medium": 2, "low": 1}
 RANK_LABELS = {3: "高", 2: "中", 1: "低"}
 ANALYSIS_KEEP_SECONDS = 600  # 分析（位置の集まり）をメモリに持つ時間
@@ -174,11 +174,11 @@ def disposal_text(noun: str, name: str, recycle: bool) -> tuple[str, str]:
     if recycle:
         return f"{noun}「{name}」をごみ箱へ送ります（ごみ箱から戻せます）", ""
     msg = f"{noun}「{name}」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
-    return msg, msg + "。退避の写しも作りません"
+    return msg, msg + "。元のファイルは残りません"
 
 
 def delete_original(path: str) -> str:
-    """元のファイルを消す（退避はしない）。ごみ箱のある場所ならごみ箱へ送り、無い場所（ネットワーク・外付けなど）は、
+    """元のファイルを消す（元の写しは作らない）。ごみ箱のある場所ならごみ箱へ送り、無い場所（ネットワーク・外付けなど）は、
     ごみ箱を経由せずにそのまま消す。どちらにしたかを "recycle_bin" / "permanent" で返す。失敗しても元のファイルは消えていない。"""
     if has_recycle_bin(path):
         send_to_recycle_bin(path)
@@ -577,7 +577,7 @@ def select_from_args(positions: dict, args: dict) -> Selection:
 def apply_task(args: dict) -> dict:
     """対処の実行のうち、別プロセスで動く部分。
 
-    - ファイルの削除はここで済ませる（退避はしない。ごみ箱のある場所はごみ箱へ・無い場所はそのまま消す）。
+    - ファイルの削除はここで済ませる（元の写しは作らない。ごみ箱のある場所はごみ箱へ・無い場所はそのまま消す）。
     - 書き換えは、一時の新ファイルを書き（flush・fsync）、検査し直して開けると確かめるところまで（prepare）。
       元の名前への確定（改名・置き換え・ごみ箱）と記録の更新は、親のプロセスが行う（commit_rewrite）。
       ここまでは元のファイルに触らない。失敗したら一時の新ファイルを消して終わる。
@@ -589,7 +589,7 @@ def apply_task(args: dict) -> dict:
     if not os.path.isfile(_long(path)):
         raise RemedyError("ファイルが見つかりません（移動・削除された可能性）")
     if method == "delete_file":
-        # 個人情報を含むファイルを手元のディスクへ写さないため、削除は退避しない（ごみ箱から戻す・戻せない場合は下見で知らせる）
+        # 個人情報を含むファイルを手元のディスクへ写さないため、削除は元の写しは作らない（ごみ箱から戻す・戻せない場合は下見で知らせる）
         disposal = delete_original(path)
         return {"deleted": True, "changed": {"files": 1, "disposal": disposal}}
     if args.get("item_path"):
@@ -1156,13 +1156,25 @@ class RemedyService:
                 "password_opened": bool(got.get("password_opened")),
             }
             if inner:
-                a.info["archive"] = got["archive"]
+                # entry_count＝書庫全体を削除するとき一緒に無くなる中のファイル（検査で見つけた項目）の数
+                a.info["archive"] = {**got["archive"], "entry_count": self._entry_count(a)}
                 a.info["leaf_name"] = leaf_name
             self._finish(a, "done")
         except RemedyError as e:
             self._finish(a, "error", str(e))
         except Exception as e:  # noqa: BLE001  想定外の失敗も画面に理由を返す（値は含めない）
             self._finish(a, "error", f"分析に失敗しました（{type(e).__name__}）")
+
+    def _entry_count(self, a: Analysis) -> int:
+        """検査の結果にある、その書庫の中の項目の数（書庫そのものは数えない）。数えられなければ 0。"""
+        try:
+            rows = self.store.query(
+                "SELECT COUNT(*) FROM items WHERE job_id=? AND top_path=? AND path<>?",
+                (a.job_id, a.top_path, a.top_path),
+            )
+            return int(rows[0][0])
+        except Exception:  # noqa: BLE001  数が出せなくても対処そのものは続ける
+            return 0
 
     def _finish(self, a: Analysis, state: str, error: str = "") -> None:
         with self._lock:
@@ -1234,7 +1246,9 @@ class RemedyService:
                 else LAYOUT_LABELS.get((a.info.get("layout"), method), METHOD_LABELS[method])
             ),
             "file_name": leaf,
+            # warnings＝消える・戻せない・壊れうるもの（赤く先頭に出す）／notes＝仕組み・保たれるもの（折りたたみの「詳しい説明」）
             "warnings": [],
+            "notes": [],
             "expected_sha256": a.info.get("sha256"),
         }
         if arch:
@@ -1308,9 +1322,11 @@ class RemedyService:
         if layout == "xlsx" and method != "dummy":
             out["warnings"].extend(XLSX_WARNINGS)
         if layout in DB_LAYOUTS:
-            out["warnings"].extend(db_warnings(layout, method, sel, schema))
+            db_warn, db_notes = db_warnings(layout, method, sel, schema)
+            out["warnings"].extend(db_warn)
+            out["notes"].extend(db_notes)
         if layout.startswith("csv") or layout == "lines":
-            out["warnings"].append("文字コード・BOM・改行・区切り・引用符の付け方は元のまま保ちます")
+            out["notes"].append("文字コード・BOM・改行・区切り・引用符の付け方は元のまま保ちます")
         if a.info.get("other_findings"):
             out["warnings"].append(
                 f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
@@ -1325,17 +1341,18 @@ class RemedyService:
 
     @staticmethod
     def _original_warning(out: dict, leaf: str, recycle: bool, is_archive: bool, convert: bool) -> None:
-        """書き換えのとき、元のファイルがどうなるか（退避の写しは作らない）を下見の最初に出す。zip への作り直しは別の文面。"""
+        """書き換えのとき、元のファイルがどうなるかを下見に出す（ごみ箱の無い場所は warnings の先頭、ある場所は notes の先頭）。
+        zip への作り直しは別の文面。"""
         if convert:
             return  # _archive_warnings が、元の書庫の行き先を含めて出す
         noun = "書庫" if is_archive else "ファイル"
         if recycle:
             out["disposal"] = "recycle_bin"
             stem, ext = os.path.splitext(leaf)
-            out["warnings"].insert(
+            out["notes"].insert(
                 0,
                 f"元の{noun}は、同じフォルダの中で「{stem}（対処前 年月日-時分秒）{ext}」の名前に変えてからごみ箱へ送ります"
-                "（ごみ箱から戻すと、この名前で戻ります）。退避の写しは作らないので、このアプリの「元に戻す」はありません",
+                "（ごみ箱から戻すと、この名前で戻ります）",
             )
         else:
             out["disposal"] = "replaced"
@@ -1352,9 +1369,9 @@ class RemedyService:
             new_name = os.path.basename(zip_target_for(top_path))
             out["disposal"] = "recycle_bin" if recycle else "permanent"
             gone = (
-                f"元の「{leaf}」はごみ箱へ送ります（退避の写しは作りません。ごみ箱から戻せます）"
+                f"元の「{leaf}」はごみ箱へ送ります（ごみ箱から戻せます）"
                 if recycle
-                else f"元の「{leaf}」は完全に削除します（この場所にはごみ箱がありません。退避もしないので、元に戻せません）"
+                else f"元の「{leaf}」は完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
             )
             out["warnings"].insert(
                 0,
@@ -1372,11 +1389,11 @@ class RemedyService:
                 same += "（日時・権限・所有者などのメタデータも保ちます）"
             elif arch["levels"][-1]["single"]:
                 same = "中身を書き換えて、同じ形式で包み直します"
-            out["warnings"].insert(0, f"書庫「{leaf}」全体を作り直します。{same}")
+            out["notes"].insert(0, f"書庫「{leaf}」全体を作り直します。{same}")
         if len(arch["levels"]) > 1:
             names = " → ".join([leaf] + [lv["name"] for lv in arch["levels"]])
-            out["warnings"].append(f"入れ子になっています（{names}）。内側の書庫から順に作り直します")
-        out["warnings"].append(
+            out["notes"].append(f"入れ子になっています（{names}）。内側の書庫から順に作り直します")
+        out["notes"].append(
             "同じ書庫の中の別の項目も対処するときは、1項目ずつ実行します（そのたびに書庫を作り直します）"
         )
         if arch["signed"]:
@@ -1384,7 +1401,7 @@ class RemedyService:
                 "署名つきの書庫（jar の署名など）です。作り直すと、署名の検証に通らなくなります（署名し直しが要ります）"
             )
         if arch["encrypted"] and not convert:
-            out["warnings"].append(
+            out["notes"].append(
                 "パスワードつきです。検査のときに入れたパスワードで、同じ暗号方式（"
                 + (arch["encryption"] or "元と同じ")
                 + "）に暗号化し直します"
@@ -1484,7 +1501,7 @@ class RemedyService:
             with self._slots:
                 got = self._runner_fn("apply", args, timeout * 2)
             if got.get("deleted"):
-                # ファイル・書庫ごとの削除（退避しない）。済んだあとに記録を残す
+                # ファイル・書庫ごとの削除（元の写しは作らない）。済んだあとに記録を残す
                 changed, remaining, extra = got["changed"], None, {}
                 rid = self.store.add_remediation(
                     run.job_id, run.top_path, p["method"], filters, changed, remaining=None, state="applied"
@@ -1524,7 +1541,7 @@ class RemedyService:
                     "file_name": os.path.basename(run.top_path),
                     "item_name": (a.info.get("archive") or {}).get("item", ""),
                     # 元のファイルの行き先: recycle_bin=ごみ箱へ送った（ごみ箱から戻す）／permanent=完全に削除した／
-                    # replaced=中身を入れ替えた（元は残らない）。退避の写しは作らないので、このアプリの「元に戻す」は無い
+                    # replaced=中身を入れ替えた（元は残らない）。元の写しは作らないので、このアプリの「元に戻す」は無い
                     "disposal": changed.get("disposal"),
                     "pre_name": changed.get("pre_name"),
                     **extra,
@@ -1648,7 +1665,8 @@ def office_preview(
             spans.add((sheet, arr[i], arr[i + 2], arr[i + 3]))
             cells.add((sheet, arr[i], arr[i + 1]))
     changes: dict = {"detections": len(spans)}
-    notes = out["warnings"]
+    notes = out["notes"]  # 仕組み・保たれるもの
+    warns = out["warnings"]  # 消える・戻せない・壊れうるもの
     props = (
         "文書のプロパティ（作成者・題など）・属性値・グラフなどの文字に、消した値や選んだ種類・確度の検出が残っていれば、それも取り除きます。"
         "文書の縮小画像（サムネイル）は、元の画面が写っているため取り除きます"
@@ -1661,7 +1679,7 @@ def office_preview(
             out["summary"] = (
                 f"{len(pages)} ページの検出 {len(spans):,} 件を黒塗りします（文字そのものを取り除きます。元に戻せません）"
             )
-            notes.append(
+            warns.append(
                 "黒塗りは、見た目だけを隠す注釈ではなく、ページの内容から文字そのものを取り除きます（黒い四角が残ります）。"
                 "元に戻せません。コピーしても、文字の抽出をしても、値は出てきません"
             )
@@ -1735,17 +1753,17 @@ def office_preview(
         if method == "delete_rows":
             changes["rows"] = len(rows)
             out["summary"] = f"表の {len(rows):,} 行を削除します（検出を含む行）"
-            notes.append(
+            warns.append(
                 "結合したセル（縦に結合）を含む行を消すと、表の見た目が崩れることがあります。行が全部なくなった表は、表ごと取り除きます"
             )
         else:
             changes["cols"] = len(cols)
             out["summary"] = f"表の {len(cols):,} 列を削除します（検出を含む列）"
-            notes.append(
+            warns.append(
                 "結合したセル（複数の列にまたがるセル）に検出があるときは、列を削除できません。列の幅は変わりません。列が全部なくなった表は、表ごと取り除きます"
             )
         if outside:
-            notes.append(
+            warns.append(
                 f"表の外にある検出（{outside:,} 箇所の段落）は、行・列の削除では変わりません。段落の削除かダミー化を選んでください"
             )
         if not rows:
@@ -1771,16 +1789,17 @@ def _key_columns(info: dict, cols: list, idxs, kinds: tuple) -> list[str]:
     return names
 
 
-def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[str]:
-    """SQLite・SQL のダンプの下見の注意（値は含めない）。"""
+def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> tuple[list[str], list[str]]:
+    """SQLite・SQL のダンプの下見の注意（値は含めない）。(warnings＝消える・戻せない・壊れうるもの, notes＝仕組み・保たれるもの)。"""
     out: list[str] = []
+    notes: list[str] = []
     tables = (schema or {}).get("tables") or {}
     if layout == "sqlite":
-        out.append(
+        notes.append(
             "元のファイルは書き換えず、写しに SQL を当てて作ります。終わりに VACUUM（空き領域も詰める）をかけ、"
             "消した値がファイルの空きに残らないようにします（ファイルは小さくなることがあります）"
         )
-        out.append(
+        notes.append(
             "外部キーの連鎖削除は動かしません。その表のトリガーは書き換えの間だけ外し、終わりに元の定義で作り直します"
         )
         for t in sel.sheets():
@@ -1838,17 +1857,17 @@ def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[
                         f"表「{t}」の列（{'、'.join(keyed)}）は主キー・一意の索引・外部キーに使われています。置き換えると、"
                         "ほかの表との突き合わせが壊れたり、一意の制約で失敗したりすることがあります（失敗したら何も変わりません）"
                     )
-        out.append(
+        notes.append(
             "-wal・-shm・-journal の付属ファイルが元のファイルのそばにあるときは、他のプログラムが開いている可能性があるため実行を断ります"
         )
     elif layout in ORACLE_LAYOUTS:
-        out.extend(oracle_warnings(layout, method, sel, schema))
+        out, notes = oracle_warnings(layout, method, sel, schema)
     else:
-        out.append(
+        notes.append(
             "SQL のダンプを1行ずつ読みながら新しいファイルへ書きます。触らない行は元のバイト列のまま写し、文字コード・改行も元のままです"
         )
         if method == "delete_rows":
-            out.append(
+            notes.append(
                 "COPY のデータ行と、INSERT 文の VALUES の1組（1行）を取り除きます。組がすべて無くなった INSERT 文は文ごと消えます"
             )
         elif method == "delete_columns":
@@ -1863,18 +1882,19 @@ def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[
                 "CREATE TABLE・COPY のブロック・INSERT 文・DROP TABLE・LOCK TABLES・索引・制約・権限・コメントなど、その表の文を取り除きます。"
                 "表のデータはすべて消えます（検出した行だけではありません）。ほかの表の外部キーがその表を参照している場合は、読み込み時に失敗します"
             )
-        out.append("pg_dump のカスタム形式・ディレクトリ形式は、いまはファイルの削除だけです（平文の SQL のみ対応）")
-    return out
+        notes.append("pg_dump のカスタム形式・ディレクトリ形式は、いまはファイルの削除だけです（平文の SQL のみ対応）")
+    return out, notes
 
 
-def oracle_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[str]:
-    """Oracle のダンプの下見の注意（値は含めない）。"""
+def oracle_warnings(layout: str, method: str, sel: Selection, schema: dict) -> tuple[list[str], list[str]]:
+    """Oracle のダンプの下見の注意（値は含めない）。(warnings, notes) を返す。"""
+    notes: list[str] = []
     out = [
         "書き換えたダンプは、そのまま使わずに、読み込みの確かめ（旧 exp は imp、expdp は impdp。テスト用のデータベースで）をしてから、"
         "元の場所へ戻してください。このアプリは Oracle へ読み込んで確かめることはしていません",
     ]
     if layout == "oracle_expdp":
-        out.append(
+        notes.append(
             "表の行を詰め直して、行の合計・索引・ブロックの見出しの値を直し、残りをゼロで埋めます。ファイルの大きさは変わりません"
             "（マスターテーブルが持つ各表の位置を保つため）。ダンプの大きさ分の書き出しをします"
         )
@@ -1883,14 +1903,14 @@ def oracle_warnings(layout: str, method: str, sel: Selection, schema: dict) -> l
             "完全に消したいときは、EXCLUDE=STATISTICS を付けて取り直したダンプを使ってください"
         )
         if method == "delete_rows":
-            out.append(
+            notes.append(
                 "消した行の数は、マスターテーブルが持つ行数の記録とは合わなくなります（読み込みの結果の行数は実際の行数です）"
             )
     else:
         if method == "delete_rows":
-            out.append("行のバイト列を写さずに取り除きます。表の定義・索引・制約はそのままです")
+            notes.append("行のバイト列を写さずに取り除きます。表の定義・索引・制約はそのままです")
         elif method == "dummy":
-            out.append(
+            notes.append(
                 "文字の値は同じ文字セットで書き直し、数値・日付の列は Oracle の内部形式で正しい値を作ります（数値は 0 または同じ桁数の数、"
                 "日付は 1900 年代の日付）。列の長さに収まらないダミーは、同じ文字数の「*」にします"
             )
@@ -1904,10 +1924,10 @@ def oracle_warnings(layout: str, method: str, sel: Selection, schema: dict) -> l
                 "表の定義・データ・索引・制約・権限・統計の区画を取り除きます。表のデータはすべて消えます（検出した行だけではありません）。"
                 "ほかの表の外部キーがその表を参照している場合は、読み込み時に失敗します"
             )
-        out.append(
+        notes.append(
             "書き換えた表の統計（ANALSTATS）は取り除きます（列の最小値・最大値に元の値が入っているため。読み込みのあとに取り直せます）"
         )
-    return out
+    return out, notes
 
 
 def _letters(idx0: int) -> str:

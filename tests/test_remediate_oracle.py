@@ -1276,15 +1276,15 @@ def test_exp_analysis_lists_methods_and_preview_warns_to_check_with_imp(tmp_path
     assert a.info["layout"] == "oracle_exp"
     assert "顧客" in a.view()["sheets"] and "商品" not in a.view()["sheets"]  # 対象にする表（検出のある表だけ）
     pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
-    text = "\n".join(pv["warnings"])
+    text = "\n".join(pv["warnings"] + pv["notes"])
     assert "imp" in text and "確かめ" in text and "元の場所へ戻して" in text and pv["sample_rows"][0] == "顧客: 1 行目"
     assert "統計" in text  # 書き換えた表の統計を取り除く旨
     pv = svc.preview(job, str(p), {"method": "delete_columns", "confidences": ALL_RANKS})
-    assert pv["sample_cols"][0].startswith("顧客.") and "外部キー" in "\n".join(pv["warnings"])
+    assert pv["sample_cols"][0].startswith("顧客.") and "外部キー" in "\n".join(pv["warnings"] + pv["notes"])
     pv = svc.preview(job, str(p), {"method": "dummy", "dummy_mode": "same", "confidences": ALL_RANKS})
-    assert "1900 年代" in "\n".join(pv["warnings"]) and "欄" in pv["summary"]
+    assert "1900 年代" in "\n".join(pv["warnings"] + pv["notes"]) and "欄" in pv["summary"]
     pv = svc.preview(job, str(p), {"method": "delete_table", "confidences": ALL_RANKS})
-    assert "すべて消えます" in "\n".join(pv["warnings"]) and pv["changes"]["table_names"] == ["顧客"]
+    assert "すべて消えます" in "\n".join(pv["warnings"] + pv["notes"]) and pv["changes"]["table_names"] == ["顧客"]
 
 
 def test_dp_preview_warns_about_size_statistics_and_imp(tmp_path, small_granule):
@@ -1292,7 +1292,7 @@ def test_dp_preview_warns_about_size_statistics_and_imp(tmp_path, small_granule)
     svc, store, job = make_service(tmp_path, [p])
     analyze(svc, job, p)
     pv = svc.preview(job, str(p), {"method": "dummy", "dummy_mode": "same", "confidences": ALL_RANKS})
-    text = "\n".join(pv["warnings"])
+    text = "\n".join(pv["warnings"] + pv["notes"])
     assert "impdp" in text and "ファイルの大きさは変わりません" in text and "EXCLUDE=STATISTICS" in text
     assert "SYS_EXPORT_SCHEMA_01" not in repr(pv)  # マスターテーブルは対象に出ない
 

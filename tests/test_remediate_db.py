@@ -316,12 +316,12 @@ def test_sqlite_preview_warns_about_keys_triggers_and_vacuum(sqlite_case):
     p, svc, store, job = sqlite_case
     analyze(svc, job, p)
     pv = svc.preview(job, str(p), {"method": "delete_table", "confidences": ALL_RANKS})
-    text = "\n".join(pv["warnings"])
+    text = "\n".join(pv["warnings"] + pv["notes"])
     assert "VACUUM" in text and "すべて消えます" in text and "トリガー 2 個" in text and "索引 1 個" in text
     assert "v_items" not in text  # 無関係のビューは出さない
     pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
     assert pv["sample_rows"][0].startswith("people: rowid ")
-    assert "トリガー" in "\n".join(pv["warnings"])
+    assert "トリガー" in "\n".join(pv["warnings"] + pv["notes"])
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
@@ -801,9 +801,11 @@ def test_dump_preview_labels_and_notes(tmp_path):
     analyze(svc, job, p)
     pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
     assert pv["sample_rows"][0].startswith("public.people: ") and "行目" in pv["sample_rows"][0]
-    assert "1行ずつ" in "\n".join(pv["warnings"])
+    assert "1行ずつ" in "\n".join(pv["warnings"] + pv["notes"])
     pv = svc.preview(job, str(p), {"method": "delete_table", "confidences": ALL_RANKS})
-    assert "1 個の表を削除します: public.people" in pv["summary"] and "すべて消えます" in "\n".join(pv["warnings"])
+    assert "1 個の表を削除します: public.people" in pv["summary"] and "すべて消えます" in "\n".join(
+        pv["warnings"] + pv["notes"]
+    )
     a = svc.get_analysis(job, str(p))
     assert (
         a.info["layout"] == "sqldump"

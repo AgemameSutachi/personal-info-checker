@@ -165,7 +165,7 @@ def test_pdf_redact_removes_text_everywhere_and_keeps_the_rest(tmp_path, trash):
     assert a.info["methods"]["redact"]["available"] and a.info["methods"]["delete_pages"]["available"]
     assert "delete_rows" not in a.info["methods"] and "dummy" not in a.info["methods"] and a.view()["sheets"] == []
     pv = svc.preview(job, str(p), {"method": "redact", "confidences": ALL_RANKS})
-    assert "文字そのもの" in pv["summary"] and any("元に戻せません" in w for w in pv["warnings"])
+    assert "文字そのもの" in pv["summary"] and any("元に戻せません" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="redact", confidences=ALL_RANKS)
     assert r["state"] == "done", r
     # 検査し直して消えている・文字の抽出にも生のバイト列にも値が無い
@@ -457,7 +457,7 @@ def test_pdf_redact_blanks_the_image_pixels_for_text_found_by_ocr(tmp_path):
     assert got["layout"] == "pdf" and {k[0] for k in got["positions"]} == {"1ページ（OCR）"}
     svc, store, job = make_service(tmp_path, [p])
     pv = analyze(svc, job, p) and svc.preview(job, str(p), {"method": "redact", "confidences": ALL_RANKS})
-    assert any("OCR" in w for w in pv["warnings"])
+    assert any("OCR" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="redact", confidences=ALL_RANKS)
     assert r["state"] == "done", r
     seen = render_ocr_text(p)

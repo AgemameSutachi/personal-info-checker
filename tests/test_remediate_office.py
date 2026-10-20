@@ -422,7 +422,7 @@ def test_docx_delete_rows_only_touches_table_rows(tmp_path):
         "delete_rows" in pv_a.info["methods"] and pv_a.info["methods"]["delete_rows"]["label"] == "表の該当する行を削除"
     )
     pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
-    assert pv["changes"]["rows"] == 3 and any("表の外にある検出" in w for w in pv["warnings"])
+    assert pv["changes"]["rows"] == 3 and any("表の外にある検出" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
     assert r["state"] == "done", r
     assert r["changed"]["rows"] == 3 and r["changed"]["outside_table"] >= 1

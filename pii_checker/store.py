@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
--- 対処（remediate）の記録。生の値は書かない（方法・絞り込みの種類と確度・数・退避先・ハッシュだけ）
+-- 対処（remediate）の記録。生の値は書かない（方法・絞り込みの種類と確度・数・元のファイルの行き先・ハッシュだけ）
 CREATE TABLE IF NOT EXISTS remediations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id TEXT,

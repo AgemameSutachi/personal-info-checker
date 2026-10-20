@@ -847,7 +847,7 @@ async function loadTable() {
     rows = r.rows.map((x) => [
       `<td class="nowrap">${esc(fmtTime(x.at))}</td>`,
       pathCell(x.top_path).replace(/<\/td>$/, `${x.item_path ? `<div class="small muted">書庫の中: ${esc(x.item_path.slice(x.top_path.length + 1))}</div>` : ""}</td>`),
-      `<td>${esc(x.method_label)}${x.converted_to ? `<div class="small muted">→ ${esc(leafName(x.converted_to))} に作り直し</div>` : ""}</td>`,
+      `<td title="${esc(x.method_label)}">${esc(shortMethodName(x))}${x.converted_to ? `<div class="small muted">→ ${esc(leafName(x.converted_to))} に作り直し</div>` : ""}</td>`,
       `<td class="small">${esc(changedText(x.changed))}</td>`,
       `<td class="small">${esc(originalText(x))}</td>`,
       `<td class="small">${esc(remainingText(x.remaining))}</td>`,
@@ -865,7 +865,13 @@ async function loadTable() {
     head = ["ファイル", "種類", "確度", "値", "場所", "前後の文脈"];
     // 値と文脈は、はじめは伏せた値。「値を表示」でそのファイルを読み直すと、検出した値そのものに置き換える（保存はしない）
     const rvAttr = (x, masked) => `data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(masked)}"`;
-    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<td class="nowrap"><span class="mono rv-value" ${rvAttr(x, x.value)}>${esc(x.value)}</span> <button type="button" class="rv-btn small" data-top="${esc(x.top_path)}" title="元のファイルを読み直して、検出した値を出します（保存しません）">値を表示</button></td>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small rv-ctx" ${rvAttr(x, x.context)} title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
+    const btnShown = new Set(); // 「値を表示」は、ファイルごとの最初の行にだけ出す（押すと、そのファイルの全行の値が出る）
+    const rvButton = (x) => {
+      if (btnShown.has(x.top_path)) return "";
+      btnShown.add(x.top_path);
+      return ` <button type="button" class="rv-btn small" data-top="${esc(x.top_path)}" title="元のファイルを読み直して、このファイルの全行の検出した値を出します（保存しません）">値を表示</button>`;
+    };
+    rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<td class="nowrap"><span class="mono rv-value" ${rvAttr(x, x.value)}>${esc(x.value)}</span>${rvButton(x)}</td>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small rv-ctx" ${rvAttr(x, x.context)} title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
     click = r.rows.map((x) => x.top_path);
   }
   // 作り直しの前にフォーカスしていた行を覚えて、後で戻す
@@ -947,7 +953,8 @@ async function openDetail(topPath) {
       </div>`).join("") +
     (f.rows.length
       ? `<h4>検出明細（${f.total > f.rows.length ? `${fmtNum(f.total)} 件のうち ${fmtNum(f.rows.length)} 件を表示` : `全 ${fmtNum(f.total)} 件`}）</h4>
-         <div class="rv-bar small"><span id="rv-status" class="muted" role="status"></span> <label><input type="checkbox" id="rv-mask"${state.maskValues ? " checked" : ""}> 伏せて表示</label></div>
+         <div id="detail-stale" class="rm-banner rm-banner-stale hidden" role="status">この明細は対処前の検査の結果です。対処を反映するには再検査してください（対処したファイルの値は伏せた表示に戻しています）</div>
+         <div class="rv-bar small"><span id="rv-status" class="muted" role="status"></span> <label><input type="checkbox" id="rv-mask" disabled checked> 伏せて表示 <span class="rv-mask-hint muted"></span></label></div>
          <div class="table-wrap"><table><thead><tr><th>種類</th><th>確度</th><th>値</th><th>場所</th><th>文脈</th></tr></thead><tbody>${f.rows.map((x) => `<tr><td class="nowrap">${esc(x.type)}</td><td>${pill(x.confidence, x.confidence_label)}</td><td class="mono rv-value" data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(x.value)}">${esc(x.value)}</td><td class="loc">${esc(x.location)}</td><td class="small rv-ctx" data-fid="${esc(x.fid)}" data-top="${esc(x.top_path)}" data-masked="${esc(x.context)}">${esc(x.context)}</td></tr>`).join("")}</tbody></table></div>`
       : "");
   $("#btn-copy-path").addEventListener("click", async () => {
@@ -970,6 +977,7 @@ async function openDetail(topPath) {
   $("#detail-dialog").showModal();
   const mine = ++detailToken;
   detailReveal = null;
+  updateMaskEnabled();
   if (f.rows.length) {
     // 開いたら自動で元のファイルを読み直し、検出した値と文脈を出す（読み直しの間は伏せた値を出しておく）
     const big = fileRow && fileRow.size >= REVEAL_BIG_BYTES;
@@ -978,6 +986,7 @@ async function openDetail(topPath) {
       detailReveal = r;
       setRevealStatus(r, big);
       paintValues($("#detail-body"), topPath, r);
+      updateMaskEnabled();
     }, () => detailToken === mine && $("#detail-dialog").open);
   }
 }
@@ -1054,10 +1063,25 @@ function setRevealStatus(r, big) {
   }
 }
 
+// 「伏せて表示」のチェックは、値を出せるまで（読み直しが済むまで）無効にする。無効の間は、いま伏せて出しているとおり「入」に見せる
+const MASK_HINT = "値を表示すると切り替えられます";
+function setMaskControl(box, enabled) {
+  if (!box) return;
+  box.disabled = !enabled;
+  box.checked = enabled ? state.maskValues : true;
+  const hint = box.closest("label").querySelector(".rv-mask-hint");
+  if (hint) hint.textContent = enabled ? "" : `（${MASK_HINT}）`;
+}
+function updateMaskEnabled() {
+  const tableOk = [...document.querySelectorAll("#table .rv-value")].some((el) => revealCached(el.dataset.top));
+  setMaskControl($("#rv-mask-table"), tableOk);
+  setMaskControl($("#rv-mask"), !!(detailReveal && detailReveal.state === "done"));
+}
+
 // 「伏せて表示」の切り替え（詳細の窓と検出明細の表で同じ設定を使う）
 function setMask(on) {
   state.maskValues = on;
-  document.querySelectorAll("#rv-mask, #rv-mask-table").forEach((c) => { c.checked = on; });
+  updateMaskEnabled();
   if ($("#rv-status") && detailReveal) setRevealStatus(detailReveal, false);
   const tops = new Set([...document.querySelectorAll("#table .rv-value")].map((el) => el.dataset.top));
   tops.forEach((t) => paintValues($("#table"), t, revealCached(t)));
@@ -1080,6 +1104,7 @@ function setupRevealButtons() {
     const r = revealCached(top);
     if (r) done(top, r);
   });
+  updateMaskEnabled();
   table.querySelectorAll(".rv-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1087,7 +1112,7 @@ function setupRevealButtons() {
       const mine = [...table.querySelectorAll(".rv-btn")].filter((b) => b.dataset.top === top);
       mine.forEach((b) => { b.disabled = true; b.textContent = "読み込み中…"; });
       revealFile(top, (r) => {
-        if (r.state === "done") done(top, r);
+        if (r.state === "done") { done(top, r); updateMaskEnabled(); }
         else if (r.state === "error") mine.forEach((b) => { b.disabled = false; b.textContent = "表示できません"; b.title = r.message; });
       }, () => table.isConnected && state.tab === "findings");
     });
@@ -1109,24 +1134,42 @@ $("#show-secret").addEventListener("change", (e) => {
 
 
 // ---------------------------------------------------------------- 対処（検出した個人情報を消す・置き換える）
-// 検査は何も書き込まない。ここで選んで実行したときだけ、そのファイルを書き換える（退避の写しは作らず、元はごみ箱へ送る）。
+// 検査は何も書き込まない。ここで選んで実行したときだけ、そのファイルを書き換える（写しは作らず、元はごみ箱へ送る）。
 // 流れ: 分析（ファイルを読み直して検出の位置を全部集める）→ 選ぶ → 下見 → 確認 → 実行 → 結果（元に戻す）
 let rmToken = 0; // 対処の画面を開き直すたびに増やす（閉じた・別のファイルを開いた後の状態確認を止める）
 const rmSleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const RM_CONF = [["high", "高", 3], ["medium", "中", 2], ["low", "低", 1]];
 
-// 元のファイルの行き先（退避の写しは作らない）。ごみ箱へ送った／完全に削除した／入れ替えた（元は残らない）
+// 元のファイルの行き先の帯。完全に削除・元が残らないときは赤の太字、ごみ箱へ送るときは控えめな青。done=実行したあと（過去形）
+function disposalBanner(d, done) {
+  if (!d) return "";
+  if (d === "recycle_bin") {
+    return `<div class="rm-banner rm-banner-trash" role="note">元のファイルはごみ箱へ${done ? "送りました" : "送ります"}（ごみ箱から戻せます）</div>`;
+  }
+  return `<div class="rm-banner rm-banner-perm" role="note">元に戻せません（この場所にはごみ箱がありません）</div>`;
+}
+// 元のファイルの行き先（写しは作らない）。ごみ箱へ送った／完全に削除した／入れ替えた（元は残らない）
 function disposalText(d) {
   if (d === "recycle_bin") return "ごみ箱へ送った";
   if (d === "permanent") return "完全に削除した（ごみ箱の無い場所）";
   if (d === "replaced") return "残っていない（ごみ箱の無い場所で、中身を入れ替えた）";
   return "";
 }
-// 「元に戻す」の代わりの案内（このアプリは退避の写しを持たない。ごみ箱へ送ったものは、ごみ箱から戻す）
+// 「元に戻す」の代わりの案内（このアプリは元の写しを持たない。ごみ箱へ送ったものは、ごみ箱から戻す）
 function guideText(d, preName) {
   if (d === "recycle_bin") return preName ? `元に戻すには、エクスプローラーのごみ箱から「${preName}」を戻してください（この名前で戻ります）。` : "元に戻すには、エクスプローラーのごみ箱から戻してください。";
   if (d === "permanent" || d === "replaced") return "元に戻せません（ごみ箱の無い場所のため）。";
   return "";
+}
+// 対処の記録の「方法」の列に出す短い名前（長い説明は title に。ごみ箱へ送ったか完全に削除かは「元のファイル」の列）
+const RM_SHORT = {
+  delete_file: "ファイルを削除", delete_rows: "行を削除", delete_columns: "列を削除", dummy: "ダミー化",
+  delete_sheet: "シートを削除", delete_table: "表を削除", remove_entry: "書庫から取り除く", convert_zip: "zip に作り直す",
+  redact: "黒塗り", delete_pages: "ページを削除", delete_paragraphs: "段落を削除", delete_slides: "スライドを削除",
+};
+function shortMethodName(x) {
+  if (x.method === "delete_file" && x.item_path) return "書庫ごと削除";
+  return RM_SHORT[x.method] || x.method_label;
 }
 function originalText(x) {
   const t = disposalText(x.disposal);
@@ -1195,7 +1238,14 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
   const id = encodeURIComponent(state.jobId);
   const types = state.info.pii_types || {};
   // 「zip に作り直す」は方法ではなく、書けない形式（rar・cab・iso など）のときに添える指定（チェックボックス）
+  // 書庫の中のファイルの対処では、「書庫から取り除く」と書き換えを先に、「書庫ごと削除」は末尾に区切って出す
   const methods = Object.entries(a.methods).filter(([k]) => k !== "convert_zip");
+  const wholeDelete = itemPath ? methods.filter(([k]) => k === "delete_file") : [];
+  const mainMethods = itemPath ? methods.filter(([k]) => k !== "delete_file") : methods;
+  const methodLabel = (k, m) => (k === "delete_file" && itemPath
+    ? `書庫全体を削除（中のファイル ${fmtNum((a.archive && a.archive.entry_count) || 0)} 件を含む。ごみ箱へ送る。ごみ箱が無い場所では完全に削除）`
+    : m.label);
+  const methodRow = ([k, m]) => `<label class="check rm-method${m.available ? "" : " disabled"}"><input type="radio" name="rm-method" value="${esc(k)}"${m.available ? "" : " disabled"}> ${esc(methodLabel(k, m))}${m.available ? "" : `<span class="small muted"> — 選べません: ${esc(m.reason)}</span>`}</label>`;
   const arch = a.archive || null;
   const needConvert = !!(arch && !arch.can_write && a.methods.convert_zip && a.methods.convert_zip.available);
   const innerName = itemPath ? itemPath.slice(topPath.length + 1) : "";
@@ -1205,10 +1255,16 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
   area.innerHTML = `
     <div class="item-card rm-card">
       <h4>対処する <span class="small muted">（${esc(leafName(topPath))}${innerName ? ` の中の ${esc(innerName)}` : ""}）</span></h4>
-      <p class="small muted">自動では何も変わりません。ここで選んで実行したときだけ書き換えます。退避の写しは作りません（個人情報のファイルを手元のディスクへ写さないため）。元のファイル（書庫の中のファイルなら書庫）は、ごみ箱のある場所ではごみ箱へ送ります（同じフォルダの中で「元の名前（対処前 日時）」に名前を変えてから送るので、ごみ箱からその名前で戻せます）。ごみ箱が無い場所（ネットワーク・外付けなど）では、元のファイルは残らず、元に戻せません。</p>
+      <p class="small muted">選んで実行したときだけ書き換えます。元のファイルはごみ箱へ送ります（ごみ箱から戻せます）。ごみ箱の無い場所では元は残りません。</p>
+      <details class="small muted rm-more"><summary>詳しく</summary>
+        <p>自動では何も変わりません。個人情報のファイルを手元のディスクへ写さないため、元の写しは作りません。</p>
+        <p>元のファイル（書庫の中のファイルなら書庫）は、ごみ箱のある場所では、同じフォルダの中で「元の名前（対処前 日時）」に名前を変えてからごみ箱へ送ります。ごみ箱からその名前で戻せます。</p>
+        <p>ごみ箱が無い場所（ネットワーク・外付けなど）では、元のファイルは残らず、元に戻せません。</p>
+      </details>
       ${arch ? `<p class="small">書庫: ${esc(arch.top_label)}${arch.levels.length > 1 ? `（入れ子 ${arch.levels.length} 段）` : ""}。${arch.can_write ? "書庫全体を作り直します。ほかの項目は中身を変えずに写します。" : arch.can_convert ? "この形式は書き換えられません。「zip に作り直す」と、形式が変わります（元の書庫は削除します）。" : esc(arch.convert_reason)}${arch.signed ? " 署名つきです（作り直すと署名が壊れます）。" : ""}${arch.encrypted && arch.can_write ? ` パスワードつきです（検査のとき入れたパスワードで暗号化し直します）。` : ""}</p>` : ""}
       <fieldset class="rm-set"><legend>方法</legend>
-        ${methods.map(([k, m]) => `<label class="check rm-method${m.available ? "" : " disabled"}"><input type="radio" name="rm-method" value="${esc(k)}"${m.available ? "" : " disabled"}> ${esc(m.label)}${m.available ? "" : `<span class="small muted"> — 選べません: ${esc(m.reason)}</span>`}</label>`).join("")}
+        ${mainMethods.map(methodRow).join("")}
+        ${wholeDelete.length ? `<div class="rm-whole">${wholeDelete.map(methodRow).join("")}</div>` : ""}
       </fieldset>
       ${needConvert ? `<fieldset class="rm-set" id="rm-convert-set"><legend>形式</legend><label class="check"><input type="checkbox" id="rm-convert" checked disabled> ${esc(a.methods.convert_zip.label)} <span class="small muted">— この形式は書き換えられないため、書庫ごとの削除以外の方法は、zip に作り直して行います（元の書庫は削除します）</span></label></fieldset>` : ""}
       <div id="rm-filters" class="hidden">
@@ -1226,6 +1282,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
       </div>
       <div class="row">
         <button type="button" id="rm-preview" class="primary" disabled>下見（まだ何も変わりません）</button>
+        <span id="rm-preview-hint" class="small muted">方法を選ぶと押せます</span>
         <button type="button" id="rm-cancel">やめる</button>
         <span id="rm-msg" class="msg small" role="status"></span>
       </div>
@@ -1238,6 +1295,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
     $("#rm-filters").classList.toggle("hidden", m === "delete_file" || m === "remove_entry");
     $("#rm-dummy-set").classList.toggle("hidden", m !== "dummy");
     $("#rm-preview").disabled = false;
+    $("#rm-preview-hint").classList.add("hidden");
     $("#rm-preview-out").innerHTML = ""; // 選び直したら、前の下見は無効
   }));
   area.addEventListener("change", (e) => {
@@ -1280,7 +1338,9 @@ function renderRemedyPreview(topPath, body, pv, btn) {
       <p><strong>${esc(pv.summary)}</strong></p>
       ${pv.sample_rows && pv.sample_rows.length ? `<p class="small">${esc(pv.sample_label || "変わる行の番号の例")}: ${esc(pv.sample_rows.join("、"))}${more ? " …" : ""}</p>` : ""}
       ${pv.sample_cols && pv.sample_cols.length ? `<p class="small">変わる列の例: ${esc(pv.sample_cols.join("、"))}</p>` : ""}
-      ${pv.warnings.length ? `<ul class="small rm-warn">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      ${disposalBanner(pv.disposal, false)}
+      ${pv.warnings.length ? `<ul class="rm-warn">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      ${pv.notes && pv.notes.length ? `<details class="small rm-notes"><summary>詳しい説明（${pv.notes.length} 件）</summary><ul>${pv.notes.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""}
       <div class="row"><button type="button" id="rm-run" class="danger">実行…</button></div>
       <div id="rm-confirm"></div>
     </div>`;
@@ -1289,9 +1349,10 @@ function renderRemedyPreview(topPath, body, pv, btn) {
     $("#rm-run").disabled = true;
     $("#rm-confirm").innerHTML = `
       <div class="rm-confirm" role="alertdialog" aria-label="実行の確認">
-        <p>${pv.item_name ? "書庫" : "ファイル"} <strong class="mono">${esc(pv.file_name)}</strong>${pv.item_name ? ` の中の <strong class="mono">${esc(pv.item_name)}</strong>` : ""} に対して、次を実行します。</p>
+        ${disposalBanner(pv.disposal, false)}
+        <p>${pv.item_name ? "書庫" : "ファイル"} <strong class="mono">${esc(pv.file_name)}</strong>${pv.item_name && pv.method !== "delete_file" ? ` の中の <strong class="mono">${esc(pv.item_name)}</strong>` : ""}${pv.item_name && pv.method === "delete_file" ? " 全体" : ""} に対して、次を実行します。</p>
         <p><strong>${esc(pv.method_label)}</strong>: ${esc(pv.summary)}</p>
-        <p class="small muted">${pv.disposal === "permanent" || pv.disposal === "replaced" ? "退避の写しは作りません。この場所にはごみ箱が無いため、元のファイルは残らず、元に戻せません。" : "退避の写しは作りません（元のファイルはごみ箱へ送ります。ごみ箱から戻せます）。"}よろしければ「実行する」を押してください。</p>
+        <p class="small muted">よろしければ「実行する」を押してください。</p>
         <div class="row"><button type="button" id="rm-go" class="danger">実行する</button> <button type="button" id="rm-back">やめる</button></div>
       </div>`;
     $("#rm-back").addEventListener("click", () => { $("#rm-confirm").innerHTML = ""; $("#rm-run").disabled = false; });
@@ -1331,20 +1392,46 @@ async function runRemedy(topPath, body, btn) {
     return;
   }
   const rem = r.remaining;
+  // 書庫ごとの削除は「書庫 ○○ 全体」、取り除きは「書庫 ○○ から ○○ を取り除き、書庫を作り直しました」と出す
+  const target = r.item_name && r.method !== "remove_entry" && r.method !== "delete_file"
+    ? `（${esc(r.file_name)} の中の ${esc(r.item_name)}）`
+    : r.item_name && r.method === "delete_file" ? `（書庫 ${esc(r.file_name)} 全体）` : `（${esc(r.file_name)}）`;
+  const doneLine = r.method === "remove_entry"
+    ? `<p><strong>書庫 <span class="mono">${esc(r.file_name)}</span> から <span class="mono">${esc(r.item_name)}</span> を取り除き、書庫を作り直しました。</strong></p>`
+    : `<p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}${target}</p>`;
   area.innerHTML = `
     <div class="item-card rm-card rm-done" role="status">
-      <h4>対処しました</h4>
-      <p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}（${esc(r.file_name)}${r.item_name ? ` の中の ${esc(r.item_name)}` : ""}）</p>
-      ${r.disposal ? `<p><strong>${esc((r.disposal === "recycle_bin" ? "元のファイルは、ごみ箱へ送りました。" : r.disposal === "permanent" ? "ごみ箱の無い場所のため、完全に削除しました。" : "ごみ箱の無い場所のため、中身を入れ替えました。元のファイルは残っていません。") + " " + guideText(r.disposal, r.pre_name))}</strong></p>` : ""}
+      <h4 id="rm-done-title" tabindex="-1">対処しました</h4>
+      ${disposalBanner(r.disposal, true)}
+      ${doneLine}
+      ${r.disposal === "recycle_bin" ? `<p class="small">${esc(guideText(r.disposal, r.pre_name))}</p>` : ""}
       ${r.converted_to ? `<p>zip に作り直しました: <span class="mono">${esc(r.converted_to)}</span></p>` : ""}
-      ${r.notes && r.notes.length ? `<ul class="small rm-warn">${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+      ${r.notes && r.notes.length ? `<ul class="small rm-notes-list">${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       <p>残った検出: ${rem ? `全体 <strong>${fmtNum(rem.total)}</strong> 件（選んだ種類・確度の分は <strong>${fmtNum(rem.selected)}</strong> 件）` : "検査し直していません（ファイルの削除、または検査し直せませんでした）"}</p>
       ${rem && rem.selected === 0 && rem.total > 0 ? `<p class="small muted">残りは、選ばなかった種類・確度か、行や列の位置を持たない場所（コメント・内側のファイルなど）の検出です。</p>` : ""}
-      <p class="small muted">退避の写しは作っていません（個人情報のファイルを手元のディスクへ写さないため）。</p>
       <p class="small muted">この検査の結果（検出の一覧）は対処の前のままです。反映するには検査し直してください。ダミーにした値そのものは、残りの数に入れていません。</p>
       <div class="row"><button type="button" id="rm-done-close">閉じる</button></div>
     </div>`;
   $("#rm-done-close").addEventListener("click", () => { area.innerHTML = ""; if (btn) btn.disabled = false; });
+  markRemedied(topPath);
+  // 結果が画面の外に出ていることがあるので、見える位置へ動かして、見出しへフォーカスを移す
+  area.scrollIntoView({ block: "start" });
+  const title = $("#rm-done-title");
+  if (title) title.focus({ preventScroll: true });
+}
+
+// 対処したファイルの、読み直した値のキャッシュを捨て、伏せた表示に戻す。検出明細は対処前の結果だと帯で知らせる
+function markRemedied(topPath) {
+  revealCache.delete(revealKey(state.jobId, topPath));
+  detailToken++; // 実行中の読み直しの結果は使わない
+  detailReveal = null;
+  const stale = $("#detail-stale");
+  if (stale) stale.classList.remove("hidden");
+  paintValues($("#detail-body"), topPath, null);
+  paintValues($("#table"), topPath, null);
+  const st = $("#rv-status");
+  if (st) st.textContent = "対処したため、検出した値は伏せて表示しています（再検査すると最新になります）。";
+  updateMaskEnabled();
 }
 
 // ---------------------------------------------------------------- レポート（結果をまとめたページ）

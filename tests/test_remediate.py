@@ -1,8 +1,8 @@
 """検出した個人情報への対処（remediate。T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm）の試験。
 
-守ること: 検査は何も書き込まない。対処は人が選んで実行したときだけ。元は退避へ写し、書き換えは新しいファイルへ書いてから置き換え、
+守ること: 検査は何も書き込まない。対処は人が選んで実行したときだけ。元は元の写しへ写し、書き換えは新しいファイルへ書いてから置き換え、
 途中の失敗で元を壊さず、「元に戻す」で戻せる。記録とジョブの DB に生の値を入れない。
-検体はすべて pytest の tmp_path に作る。本物のごみ箱へは送らない（送る関数を差し替える）。退避の置き場も tmp_path。
+検体はすべて pytest の tmp_path に作る。本物のごみ箱へは送らない（送る関数を差し替える）。元の写しの置き場も tmp_path。
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ def test_csv_delete_rows(tmp_path, enc, newline, quoting, trash):
     assert p.read_bytes() == encode_csv(kept, enc, newline, quoting)  # 触らない行は文字コード・改行・引用符も元のまま
     assert r["changed"]["rows"] == len(rows) - len(kept)
     assert r["remaining"]["total"] == 0
-    assert [f.read_bytes() for f in trash.files()] == [original]  # 元はごみ箱へ（退避の写しは作らない）
+    assert [f.read_bytes() for f in trash.files()] == [original]  # 元はごみ箱へ（元の写しは作らない）
     total, values = scan_counts(p, tmp_path)
     assert total == 0 and not values
 
@@ -635,7 +635,7 @@ def test_old_xls_and_other_formats_only_allow_file_delete(tmp_path):
         assert not m[k]["available"] and m[k]["reason"]
 
 
-# ---------------------------------------------------------------- 元はごみ箱へ（退避なし）・失敗・立て直し
+# ---------------------------------------------------------------- 元はごみ箱へ（写しは作らない）・失敗・立て直し
 
 
 def test_original_goes_to_recycle_bin_under_pre_name(tmp_path, trash):
@@ -662,8 +662,27 @@ def test_original_goes_to_recycle_bin_under_pre_name(tmp_path, trash):
     assert rec["new_sha256"] == hashlib.sha256(p.read_bytes()).hexdigest()
     assert rec["plan"]["mode"] == "recycle" and rec["plan"]["pre_path"] == str(sent)
     assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*"))  # 一時の新ファイル・改名した元は残らない
-    assert not (tmp_path / "backup").exists()  # 退避のフォルダは作られない
-    assert not hasattr(svc, "undo")  # 退避の写しから戻す「元に戻す」は無い
+    assert not (tmp_path / "backup").exists()  # 元の写しのフォルダは作られない
+    assert not hasattr(svc, "undo")  # 元の写しから戻す「元に戻す」は無い
+
+
+def test_preview_splits_warnings_and_notes(tmp_path, trash, monkeypatch):
+    """下見の注意は2種類に分ける。warnings＝消える・戻せない・壊れうるもの、notes＝仕組み・保たれるもの。"""
+    p = tmp_path / "src" / "a.csv"
+    p.parent.mkdir()
+    p.write_bytes(encode_csv(person_rows(), "utf-8", "\n"))
+    svc, store, job = make_service(tmp_path, [p])
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
+    # ごみ箱へ送る・文字コードを保つ、は仕組み（notes）。赤く出す注意には入らない
+    assert any("ごみ箱へ送ります" in n for n in pv["notes"])
+    assert any("文字コード" in n for n in pv["notes"])
+    assert not any("文字コード" in w or "ごみ箱へ送ります" in w for w in pv["warnings"])
+    # ごみ箱の無い場所では、元が残らないことが warnings の先頭に出る
+    monkeypatch.setattr(remediate, "has_recycle_bin", lambda path: False)
+    analyze(svc, job, p)
+    pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
+    assert "元のファイルは残りません" in pv["warnings"][0] and not any("ごみ箱へ送ります" in n for n in pv["notes"])
 
 
 def test_without_recycle_bin_content_is_replaced_in_one_step(tmp_path, trash, monkeypatch):
@@ -1093,7 +1112,7 @@ def test_scan_alone_never_writes(tmp_path):
 
 
 def test_delete_file_sends_to_recycle_without_backup(tmp_path, trash):
-    """ごみ箱のある場所: ごみ箱へ送る。退避の写しは作らない（個人情報のファイルを手元のディスクへ写さない）。"""
+    """ごみ箱のある場所: ごみ箱へ送る。元の写しは作らない（個人情報のファイルを手元のディスクへ写さない）。"""
     p = tmp_path / "src" / "a.csv"
     p.parent.mkdir()
     original = encode_csv(person_rows(), "utf-8", "\n")
@@ -1102,7 +1121,7 @@ def test_delete_file_sends_to_recycle_without_backup(tmp_path, trash):
     analyze(svc, job, p)
     pv = svc.preview(job, str(p), {"method": "delete_file"})
     assert pv["summary"] == "ファイル「a.csv」をごみ箱へ送ります（ごみ箱から戻せます）"
-    assert pv["disposal"] == "recycle_bin" and pv["warnings"] == []
+    assert pv["disposal"] == "recycle_bin" and pv["warnings"] + pv["notes"] == []
     started = svc.start_run(job, str(p), {"method": "delete_file"}, True, None)
     svc._runs[started["run_id"]].thread.join(180)
     r = svc.run_status(job, started["run_id"])
@@ -1111,7 +1130,7 @@ def test_delete_file_sends_to_recycle_without_backup(tmp_path, trash):
     assert [f.read_bytes() for f in trash.files()] == [
         original
     ]  # ごみ箱の中にある（このテストではごみ箱の代わりのフォルダ）
-    assert not (tmp_path / "backup").exists() and "backup_path" not in r  # 退避は作らない
+    assert not (tmp_path / "backup").exists() and "backup_path" not in r  # 元の写しは作らない
     assert r["disposal"] == "recycle_bin" and r["changed"] == {"files": 1, "disposal": "recycle_bin"}
     rec = store.remediation(job, r["remediation_id"])
     assert rec["backup_path"] is None and rec["changed"]["disposal"] == "recycle_bin" and rec["state"] == "applied"
@@ -1128,12 +1147,12 @@ def test_delete_file_without_recycle_bin_deletes_permanently(tmp_path, monkeypat
     pv = svc.preview(job, str(p), {"method": "delete_file"})
     line = "ファイル「a.csv」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
     assert pv["summary"] == line and pv["disposal"] == "permanent"
-    assert any(line in w for w in pv["warnings"])
+    assert any(line in w for w in pv["warnings"] + pv["notes"])
     started = svc.start_run(job, str(p), {"method": "delete_file"}, True, None)
     svc._runs[started["run_id"]].thread.join(180)
     r = svc.run_status(job, started["run_id"])
     assert r["state"] == "done", r
-    assert not p.exists() and trash.sent == [] and trash.files() == []  # ごみ箱にも退避にも何も残らない
+    assert not p.exists() and trash.sent == [] and trash.files() == []  # ごみ箱にも写しにも何も残らない
     assert not (tmp_path / "backup").exists() and r["disposal"] == "permanent"
     rec = store.remediation(job, r["remediation_id"])
     assert rec["changed"] == {"files": 1, "disposal": "permanent"} and rec["backup_path"] is None
@@ -1240,7 +1259,7 @@ def test_records_and_job_db_have_no_raw_values(tmp_path, trash):
                     assert not any(n in v for n in needles), (table, v[:80])
     rec = store.remediations(job)[0]
     assert rec["method"] == "dummy" and rec["filters"]["dummy_mode"] == "same" and rec["backup_path"] is None
-    assert not (tmp_path / "backup").exists()  # 退避のフォルダは作られない
+    assert not (tmp_path / "backup").exists()  # 元の写しのフォルダは作られない
     # 陽性対照: 生の値を入れた DB なら、この探し方で見つかる
     import sqlite3
 
@@ -1379,7 +1398,7 @@ def test_api_end_to_end(api, trash):
     row = lst["rows"][0]
     assert row["state"] == "applied" and row["method"] == "delete_rows" and row["file_name"] == "a.csv"
     assert not any(n in json.dumps(lst, ensure_ascii=False) for n in raw_needles(api["rows"]))
-    # 元はごみ箱へ（退避の写しは作らない）。「元に戻す」の API は無い
+    # 元はごみ箱へ（元の写しは作らない）。「元に戻す」の API は無い
     assert row["disposal"] == "recycle_bin" and row["pre_name"].startswith("a（対処前 ") and row["recovery"] == ""
     assert status["disposal"] == "recycle_bin" and "backup_path" not in status
     assert [f.read_bytes() for f in trash.files()] == [original]

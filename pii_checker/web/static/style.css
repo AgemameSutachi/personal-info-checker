@@ -109,7 +109,23 @@ button.danger { background: var(--danger); color: #fff; border-color: var(--dang
 .rm-set legend { font-weight: 600; padding: 0 6px; }
 .rm-method.disabled { opacity: .7; }
 .rm-preview { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 6px; }
-.rm-warn { margin: 6px 0 6px 18px; color: var(--danger); }
+.rm-warn { margin: 6px 0 6px 18px; color: var(--danger); font-weight: 700; }
+#rm-area { scroll-margin-top: 70px; }
+.rm-notes { margin: 6px 0; }
+.rm-notes summary, .rm-more summary { cursor: pointer; }
+.rm-notes ul { margin: 4px 0 4px 18px; }
+.rm-notes-list { margin: 6px 0 6px 18px; }
+.rm-whole { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 6px; }
+/* 元のファイルの行き先の帯: 元が残らない＝赤の太字／ごみ箱へ送る＝控えめな青／検出明細は対処前＝黄 */
+.rm-banner { border-radius: 6px; padding: 6px 12px; margin: 8px 0; }
+.rm-banner-perm { background: #b3261e; color: #fff; font-weight: 700; }
+.rm-banner-trash { background: #e6f0ff; color: #17407f; border: 1px solid #9db9e6; }
+.rm-banner-stale { background: #fff4d6; color: #5c4400; border: 1px solid #e6c766; }
+@media (prefers-color-scheme: dark) {
+  .rm-banner-perm { background: #8c1d18; }
+  .rm-banner-trash { background: #1d2e4a; color: #cfe0ff; border-color: #35527f; }
+  .rm-banner-stale { background: #3a3014; color: #f3dd9b; border-color: #6b5a22; }
+}
 .rm-confirm { border: 2px solid var(--danger); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .rm-done { border-color: var(--primary); }
 button.wide { width: 100%; }

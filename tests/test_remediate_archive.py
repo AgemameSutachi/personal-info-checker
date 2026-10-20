@@ -1,6 +1,6 @@
 """書庫の中のファイルへの対処（T2-a2）の試験。
 
-守ること: T2-a と同じ（検査は何も書き込まない・元は退避・書き換えは一時の名前から置き換え・失敗で元を壊さない・元に戻せる・
+守ること: T2-a と同じ（検査は何も書き込まない・元の写し・書き換えは一時の名前から置き換え・失敗で元を壊さない・元に戻せる・
 記録とジョブの DB に生の値を入れない）に加えて、書庫を作り直しても、ほかの項目が元のまま（zip は圧縮済みのデータ・日時・圧縮方式・
 属性・コメント・並び順まで同じ）であること。
 検体はすべて pytest の tmp_path に作る。本物のごみ箱へは送らない（送る関数を差し替える）。7-Zip が要る試験は見つからなければ skip。
@@ -303,10 +303,10 @@ def test_zip_csv_delete_rows(zip_case, trash):
         assert z.comment == b"archive comment" and z.testzip() is None
     assert r["remaining"]["total"] == 0 and r["changed"]["rows"] == len(rows) - len(kept)
     assert inner_values(archive, c["tmp"], c["item"]) == []
-    assert [f.read_bytes() for f in trash.files()] == [original]  # 元の書庫は書庫ごと、ごみ箱へ（退避はしない）
+    assert [f.read_bytes() for f in trash.files()] == [original]  # 元の書庫は書庫ごと、ごみ箱へ（元の写しは作らない）
     assert not list(archive.parent.glob(remediate.NEW_PREFIX + "*")) and leftover_workdirs(c["tmp"]) == []
     # 下見の文面: 書庫全体を作り直す・ほかの項目は中身を変えずに写す・1項目ずつ
-    text = "\n".join(pv["warnings"])
+    text = "\n".join(pv["warnings"] + pv["notes"])
     assert "全体を作り直します" in text and "そのまま写します" in text and "1項目ずつ" in text
     assert pv["item_name"] == "data/people.csv" and pv["file_name"] == "pack.zip"
 
@@ -429,7 +429,7 @@ def test_zip_nested_two_levels(tmp_path, trash):
     kept = [person_rows()[0]] + [x for x in person_rows()[1:] if not x[3]]
     assert zip_member(new_inner, "people.csv") == encode_csv(kept, "utf-8", "\r\n")
     assert r["remaining"]["total"] == 0
-    assert "入れ子" in "\n".join(pv["warnings"])
+    assert "入れ子" in "\n".join(pv["warnings"] + pv["notes"])
     restore_from_trash(trash, outer)
     assert snapshot(outer) == before
 
@@ -622,7 +622,7 @@ def test_encrypted_zip_is_rebuilt_with_same_password_and_method(tmp_path, mem, t
         assert zip_member(archive, target, pwd=pw.encode("utf-8")) == encode_csv(kept, "utf-8", "\r\n")
     assert sevenzip_cat(archive, target, pw) == encode_csv(kept, "utf-8", "\r\n")  # 同じパスワードで開ける
     assert sevenzip_cat(archive, "readme.txt", pw) == "説明です\n".encode("utf-8")
-    assert "パスワードつき" in "\n".join(pv["warnings"])
+    assert "パスワードつき" in "\n".join(pv["warnings"] + pv["notes"])
     assert r["remaining"]["total"] == 0
     restore_from_trash(trash, archive)
     assert snapshot(archive) == before
@@ -695,7 +695,7 @@ def test_7z_rebuilt_with_7zip_keeping_other_items(tmp_path, flags, pw, trash):
             [SEVENZIP, "l", "-slt", "-pwrong", str(archive)], capture_output=True, stdin=subprocess.DEVNULL
         )
         assert bad.returncode != 0
-    assert "7-Zip" in "\n".join(pv["warnings"])
+    assert "7-Zip" in "\n".join(pv["warnings"] + pv["notes"])
     restore_from_trash(trash, archive)
     assert list_7z(archive, pw) == before
 
@@ -951,7 +951,7 @@ def test_unwritable_archive_can_become_zip(tmp_path, monkeypatch, trash):
     m = a.info["methods"]
     arch = a.info["archive"]
     assert arch["top_kind"] == "wim" and not arch["can_write"] and arch["can_convert"]
-    assert m["delete_file"]["available"] and m["delete_file"]["label"].startswith("書庫ごと")
+    assert m["delete_file"]["available"] and m["delete_file"]["label"].startswith("書庫全体")
     assert m["convert_zip"]["available"] and m["remove_entry"]["available"] and m["delete_rows"]["available"]
     # 「zip に作り直す」を選ばずに実行しようとすると断る
     with pytest.raises(RemedyError, match="zip に作り直す"):
@@ -960,7 +960,7 @@ def test_unwritable_archive_can_become_zip(tmp_path, monkeypatch, trash):
     pv = svc.preview(job, str(archive), params)
     first = pv["warnings"][0]
     assert "形式が変わります" in first and "pack.zip" in first and pv["convert_zip"]
-    assert "ごみ箱へ送ります" in first and "退避の写しは作りません" in first and "拡張子が変わる" in first
+    assert "ごみ箱へ送ります" in first and "ごみ箱から戻せます" in first and "拡張子が変わる" in first
     started = svc.start_run(job, str(archive), params, True, pv["expected_sha256"])
     svc._runs[started["run_id"]].thread.join(300)
     r = svc.run_status(job, started["run_id"])
@@ -973,7 +973,7 @@ def test_unwritable_archive_can_become_zip(tmp_path, monkeypatch, trash):
         rows = person_rows()
         assert z.read("data/people.csv") == encode_csv([rows[0]] + [x for x in rows[1:] if not x[3]], "utf-8", "\r\n")
     assert r["remaining"]["total"] == 0
-    # 元の書庫は、退避せずにごみ箱へ（中身はバイト単位で元のまま）
+    # 元の書庫は、元の写しを作らずにごみ箱へ（中身はバイト単位で元のまま）
     assert [f.read_bytes() for f in trash.files()] == [original] and not (tmp_path / "backup").exists()
     rec = store.remediation(job, r["remediation_id"])
     assert rec["filters"]["converted_to"] == str(new_zip) and rec["filters"]["item_path"] == item
@@ -1016,7 +1016,7 @@ def test_archive_delete_file_uses_same_two_messages(tmp_path):
     a.info["recycle_bin"] = False
     pv = svc.preview(job, str(archive), {"method": "delete_file", "item_path": item})
     assert pv["summary"] == "書庫「pack.wim」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
-    assert any("完全に削除します" in w for w in pv["warnings"])
+    assert any("完全に削除します" in w for w in pv["warnings"] + pv["notes"])
 
 
 @needs_7z
@@ -1107,7 +1107,7 @@ def test_original_archive_goes_to_recycle_bin_whole_and_can_be_restored_from_it(
     r, _ = run_inner(c["svc"], c["job"], archive, c["item"], method="delete_rows", confidences=ALL_RANKS)
     assert r["state"] == "done"
     assert archive.read_bytes() != original
-    # 元の書庫は書庫ごと、「元の名前（対処前 日時）.zip」の名前で、ごみ箱へ。退避の写しは作らない
+    # 元の書庫は書庫ごと、「元の名前（対処前 日時）.zip」の名前で、ごみ箱へ。元の写しは作らない
     sent = Path(trash.sent[0])
     assert sent.parent == archive.parent and re.fullmatch(r"pack（対処前 \d{8}-\d{6}）\.zip", sent.name)
     assert r["pre_name"] == sent.name and r["disposal"] == "recycle_bin"
@@ -1182,7 +1182,7 @@ def test_records_job_db_and_temp_have_no_raw_values(tmp_path, trash):
                     assert not any(n in v for n in needles), (table, v[:80])
     rec = store.remediations(job)[0]
     assert rec["method"] == "dummy" and rec["filters"]["item_path"].endswith("!data/people.csv")
-    assert rec["backup_path"] is None and not (tmp_path / "backup").exists()  # 退避は作らない
+    assert rec["backup_path"] is None and not (tmp_path / "backup").exists()  # 元の写しは作らない
     # 作業用の一時フォルダ・検査の一時フォルダに、取り出したファイルが残っていない
     scan_files = [str(p) for p in (tmp_path / "scantmp").rglob("*") if p.is_file()]
     assert _leak(scan_files, needles) == [] and leftover_workdirs(tmp_path) == []
@@ -1232,7 +1232,7 @@ def test_signed_archive_warns_and_plain_file_has_no_archive_methods(tmp_path):
     pv = svc.preview(
         job, str(jar), {"method": "delete_rows", "item_path": item_of(jar, "people.csv"), "confidences": ALL_RANKS}
     )
-    assert any("署名" in w and "壊れ" not in w or "検証に通らなく" in w for w in pv["warnings"])
+    assert any("署名" in w and "壊れ" not in w or "検証に通らなく" in w for w in pv["warnings"] + pv["notes"])
     # 書庫の中でないファイル（実ファイル）の分析には、書庫用の方法を出さない
     plain = root / "a.csv"
     plain.write_bytes(csv_bytes())
@@ -1270,7 +1270,7 @@ def test_second_item_after_first_needs_fresh_analysis_and_both_stay_clean(tmp_pa
     analyze_inner(svc, job, archive, ib)
     pa = {"method": "delete_rows", "item_path": ia, "confidences": ALL_RANKS}
     pv = svc.preview(job, str(archive), pa)
-    assert "1項目ずつ" in "\n".join(pv["warnings"])
+    assert "1項目ずつ" in "\n".join(pv["warnings"] + pv["notes"])
     started = svc.start_run(job, str(archive), pa, True, pv["expected_sha256"])
     svc._runs[started["run_id"]].thread.join(120)
     assert svc.run_status(job, started["run_id"])["state"] == "done"
@@ -1350,11 +1350,13 @@ def test_api_inner_item_end_to_end(tmp_path, trash):
             time.sleep(0.1)
         assert a["state"] == "done", a
         assert a["archive"]["top_kind"] == "zip" and a["archive"]["can_write"] and "remove_entry" in a["methods"]
-        assert a["methods"]["delete_file"]["label"].startswith("書庫ごと")
+        assert a["methods"]["delete_file"]["label"].startswith("書庫全体")
         body = {"top_path": str(archive), "item_path": item, "method": "delete_rows", "confidences": ALL_RANKS}
         code, pv = call(f"/api/jobs/{job}/remedy/preview", "POST", body)
         assert (
-            code == 200 and pv["item_name"] == "data/people.csv" and "全体を作り直します" in "\n".join(pv["warnings"])
+            code == 200
+            and pv["item_name"] == "data/people.csv"
+            and "全体を作り直します" in "\n".join(pv["warnings"] + pv["notes"])
         )
         code, bad = call(f"/api/jobs/{job}/remedy/preview", "POST", {**body, "item_path": 5})
         assert code == 400
@@ -1374,7 +1376,7 @@ def test_api_inner_item_end_to_end(tmp_path, trash):
         assert row["disposal"] == "recycle_bin" and row["pre_name"].startswith("pack（対処前 ")
         assert "backup_root" not in listing
         code, _ = call(f"/api/jobs/{job}/remediations/{row['id']}/undo", "POST", {})
-        assert code in (404, 405)  # 退避の写しから戻す「元に戻す」は無い
+        assert code in (404, 405)  # 元の写しから戻す「元に戻す」は無い
         restore_from_trash(trash, archive)  # ごみ箱から戻したのと同じ
         assert snapshot(archive) == before
     finally:

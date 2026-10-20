@@ -568,7 +568,7 @@ def build_rust_extension() -> None:
 def check_rust_extension() -> None:
     """Rust 拡張を入れて作ったときは、できた配布フォルダの中に拡張の本体（.pyd）が入っていることを確かめる。"""
     probe = subprocess.run([sys.executable, "-c", "import pii_rs_detect"], capture_output=True)
-    found = sorted(p.name for p in INTERNAL.glob("pii_rs_detect*.pyd"))
+    found = sorted(str(p.relative_to(INTERNAL)) for p in INTERNAL.glob("**/pii_rs_detect*.pyd"))
     if probe.returncode == 0 and not found:
         raise SystemExit("! Rust 拡張を入れて作ったのに、配布フォルダに pii_rs_detect の .pyd がありません")
     print(f"Rust 拡張の同梱: {', '.join(found) if found else 'なし（Python の経路で動く exe）'}")

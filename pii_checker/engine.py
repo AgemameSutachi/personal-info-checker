@@ -367,7 +367,7 @@ class Collector:
     def finish(self) -> None:
         """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
 
-        最後に、種類ごとの異なる値の数を数えて項目に残す（値・hash は捨てる）。
+        最後に、種類ごとの異なる値の数を数えて項目に残す（値・hash は捨てる。seen もここで空にするので、後から add_text しない）。
         """
         self._finish_cues()
         self._count_distinct()
@@ -437,16 +437,31 @@ class Collector:
         確度は、同じ値（正規化して同じもの）を見たうちで最も高いもの。住所の引き上げ（_finish_cues）の後に数える。
         """
         # 種類 → {値の hash → 順位} の2段にする（(種類, hash) の組を値ごとに作ると、300万件で約 170MB 余計に食う）
-        best: dict[str, dict[int, int]] = {}
+        # seen は finish の後には使わない。中身を小さな配列（値の hash と「種類の番号×4＋確度の順位」）へ写して
+        # seen を丸ごと手放してから best を作る（seen と best の表を同時に抱えないので、最後の跳ねが小さい。
+        # 260万件で +80MB → +29MB）
+        types: list[str] = []
+        type_no: dict[str, int] = {}
+        hashes = array("q")
+        codes = array("L")
         for entry in self.seen.values():
             if len(entry) < 4:
                 continue  # 上限の外で後から足した値（異なる値には数えない）
-            per_type = best.get(entry[2])
-            if per_type is None:
-                per_type = best[entry[2]] = {}
-            rank = entry[1].rank
-            if per_type.get(entry[3], 0) < rank:
-                per_type[entry[3]] = rank
+            no = type_no.get(entry[2])
+            if no is None:
+                no = type_no[entry[2]] = len(types)
+                types.append(entry[2])
+            hashes.append(entry[3])
+            codes.append(no * 4 + entry[1].rank)
+        self.seen = {}
+        best: dict[str, dict[int, int]] = {t: {} for t in types}
+        per = [best[t] for t in types]
+        for dhash, code in zip(hashes, codes):
+            per_type = per[code >> 2]
+            rank = code & 3
+            if per_type.get(dhash, 0) < rank:
+                per_type[dhash] = rank
+        del hashes, codes
         self.item.distinct_counts = _count_by_rank(best)
         if self.distinct_sink is not None:
             sink = self.distinct_sink

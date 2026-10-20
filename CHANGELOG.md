@@ -2,6 +2,10 @@
 
 版ごとの主な変更です。配布版（zip）は [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) にあります。
 
+## 未公開
+
+- 本文の検出の中心を Rust の拡張（pii_rs_detect）でも動かせるようにした（結果は Python 版と同じ。拡張が無い環境では今までどおり Python で動く。`--version` の 2 行目に検出エンジンを出す）
+
 ## 1.2.0（2026-10-20）
 
 ### 新しい機能: 見つけた個人情報への対処

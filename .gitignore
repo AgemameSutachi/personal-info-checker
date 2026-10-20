@@ -24,3 +24,5 @@ NOW-archive-*.md
 private/
 # 記事の材料など、公開しない報告
 reports/
+# Rust 拡張のビルド生成物
+rust/*/target/

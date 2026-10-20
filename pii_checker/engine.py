@@ -228,6 +228,9 @@ class Collector:
     # 表を読んでいる間だけ形式ごとの処理が入れる。None のときは通し番号をそのまま使う
     row_key: Callable[[int], int] | None = None
     pos_off: bool = False  # True の間は位置を集めない（書き換えられない表を読んでいるとき）
+    # 集めた位置（行, 列, 開始, 終了）を、別の鍵の位置の並び [(シート, 行, 列, 開始, 終了), ...] に置き換える関数。
+    # docx の表のセルの文字の範囲を、その中の段落ごとの範囲にするために、表を読んでいる間だけ入れる
+    pos_map: Callable[[int, int, int, int], list[tuple]] | None = None
     line_base: int | None = None  # 行の塊を検査している間だけ（塊の先頭の行番号）
 
     def add_text(
@@ -355,14 +358,16 @@ class Collector:
 
     def _record_position(self, hit, rank: int, norm: str) -> None:
         """検出1件の構造の位置（行・列・値の開始と終了）を集める。rank 0 は「人の手がかり待ち」（finish で決める）。"""
-        if self.pos_layout.startswith("csv") or self.pos_layout in ("xlsx", "sqlite", "sqldump"):
+        if self.pos_layout.startswith("csv") or self.pos_layout in ("xlsx", "sqlite", "sqldump", "docx", "pptx"):
+            # docx・pptx: シートは部品名（表のセルは「部品名#tblN」）、行は段落の通し番号（表のセルは表の行）、列は図形・表の列
             if self.cell_pos is None or self.pos_off:
                 return
             row, col = self.cell_pos
             if self.row_key is not None:
                 row = self.row_key(row)
             start, end = hit.start, hit.end
-        elif self.pos_layout == "lines" and self.line_base is not None:
+        elif self.pos_layout in ("lines", "pdf") and self.line_base is not None:
+            # pdf: シートは「Nページ」（OCR は「Nページ（OCR）」）、行はそのページの文字（または OCR の行）の行番号
             row = self.line_base + norm.count("\n", 0, hit.start)
             col = 0
             line_start = norm.rfind("\n", 0, hit.start) + 1
@@ -371,14 +376,18 @@ class Collector:
             start, end = hit.start - line_start, min(hit.end, line_end) - line_start
         else:
             return
-        if self.pos_total >= POSITIONS_LIMIT:
-            self.pos_overflow = True
-            return
-        arr = self.positions.get((self.pos_sheet, hit.pii_type, rank))
-        if arr is None:
-            arr = self.positions[(self.pos_sheet, hit.pii_type, rank)] = array("q")
-        arr.extend((row, col, start, end))
-        self.pos_total += 1
+        pieces = [(self.pos_sheet, row, col, start, end)]
+        if self.pos_map is not None:
+            pieces = self.pos_map(row, col, start, end)
+        for sheet, row, col, start, end in pieces:
+            if self.pos_total >= POSITIONS_LIMIT:
+                self.pos_overflow = True
+                return
+            arr = self.positions.get((sheet, hit.pii_type, rank))
+            if arr is None:
+                arr = self.positions[(sheet, hit.pii_type, rank)] = array("q")
+            arr.extend((row, col, start, end))
+            self.pos_total += 1
 
     def _finish_positions(self) -> None:
         """待たせていた住所・固定電話の位置を、人の手がかりがあれば確度 中、無ければ 低 の位置へ移し、項目に渡す。"""

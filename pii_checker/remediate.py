@@ -1,5 +1,5 @@
 """検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル、
-T2-b: SQLite・SQL のダンプ。Access・Oracle のダンプはファイルの削除だけ）。
+T2-b: SQLite・SQL のダンプ。Access・Oracle のダンプはファイルの削除だけ、T2-c: PDF の黒塗り・docx・pptx）。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
@@ -58,6 +58,16 @@ METHOD_LABELS = {
     # 書庫の中のファイルに対する方法（T2-a2）
     "remove_entry": "書庫から取り除く（中のファイルを削除）",
     "convert_zip": "zip に作り直す（形式が変わる）",
+    # PDF・docx・pptx（T2-c）
+    "redact": "黒塗り（文字ごと消す。元に戻せない）",
+    "delete_pages": "該当するページを削除",
+    "delete_paragraphs": "該当する段落を削除",
+    "delete_slides": "該当するスライドを削除（ノートも）",
+}
+# 形式によって呼び方を変える方法（docx の行・列は表の行・列）
+LAYOUT_LABELS = {
+    ("docx", "delete_rows"): "表の該当する行を削除",
+    ("docx", "delete_columns"): "表の該当する列を削除",
 }
 # 書庫の中のファイルにだけ使える方法
 ARCHIVE_ONLY_METHODS = ("remove_entry", "convert_zip")
@@ -76,8 +86,20 @@ LAYOUT_METHODS = {
     "xlsx": ("delete_rows", "delete_columns", "dummy", "delete_sheet"),
     "sqlite": ("delete_rows", "delete_columns", "dummy", "delete_table"),
     "sqldump": ("delete_rows", "delete_columns", "dummy", "delete_table"),
+    "pdf": ("redact", "delete_pages"),
+    "docx": ("dummy", "delete_paragraphs", "delete_rows", "delete_columns"),
+    "pptx": ("dummy", "delete_slides"),
 }
 DB_LAYOUTS = ("sqlite", "sqldump")  # 位置の「シート」が表の名前になる形式
+OFFICE_LAYOUTS = ("pdf", "docx", "pptx")  # 位置の「シート」がページ・部品・スライドになる形式（T2-c）
+# ある形式にだけ出す方法
+LAYOUT_ONLY_METHODS = {
+    "delete_table": DB_LAYOUTS,
+    "redact": ("pdf",),
+    "delete_pages": ("pdf",),
+    "delete_paragraphs": ("docx",),
+    "delete_slides": ("pptx",),
+}
 XLSX_EXTS = (".xlsx", ".xlsm")
 NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
 STATES_UNFINISHED = ("started", "renamed", "swapped")  # 途中で止まった記録の状態（立て直しの対象）
@@ -504,6 +526,9 @@ def collect_task(args: dict) -> dict:
         reason = result.items[0].reason if result.items else ""
         raise RemedyError(f"元のファイルを読めませんでした: {reason}" if reason else "元のファイルを読めませんでした")
     others = sum(sum(it.finding_counts.values()) for it in result.items if it is not top)
+    password_opened = any(
+        "パスワードで開いた" in n for n in top.notes
+    )  # 暗号化された PDF を、検査で入れたパスワードで開いた
     db_schema: dict = {}
     if top.pos_layout == "sqlite" and top.positions:
         from .remedy_sqlite import schema_notes
@@ -523,6 +548,7 @@ def collect_task(args: dict) -> dict:
         "top_findings": sum(top.finding_counts.values()),
         "other_findings": others,
         "db_schema": db_schema,
+        "password_opened": password_opened,
     }
 
 
@@ -562,8 +588,21 @@ def apply_task(args: dict) -> dict:
     return prepare_plain(args)
 
 
-def rewrite_file(src: str, dst: str, layout: str, method: str, sel: Selection, maker, name: str) -> dict:
-    """形式（検査のときに決まる位置の意味）に応じて、一時の新ファイル dst へ書き換えた結果を書く。元の src には書かない。"""
+def rewrite_file(
+    src: str, dst: str, layout: str, method: str, sel: Selection, maker, name: str, passwords: list[str] | None = None
+) -> dict:
+    """形式（検査のときに決まる位置の意味）に応じて、一時の新ファイル dst へ書き換えた結果を書く。元の src には書かない。
+
+    passwords は検査のときに入れたパスワードの候補（暗号化された PDF を開き、同じパスワードで暗号化し直すために使う）。
+    """
+    if layout == "pdf":
+        from .remedy_pdf import rewrite_pdf_file
+
+        return rewrite_pdf_file(src, dst, method, sel, maker, passwords)
+    if layout in ("docx", "pptx"):
+        from .remedy_office import rewrite_office_file
+
+        return rewrite_office_file(src, dst, layout, method, sel, maker)
     if layout == "xlsx":
         return rewrite_xlsx_file(src, dst, method, sel, maker, keep_vba=name.lower().endswith(".xlsm"))
     if layout == "sqlite":
@@ -595,8 +634,9 @@ def _verify_new_file(tmp_new: str, options: ScanOptions, args: dict, dummies: li
 def prepare_plain(args: dict) -> dict:
     """実ファイル（csv・tsv・txt・xlsx・xlsm）の書き換えを、一時の新ファイルまで作って検査し直す。"""
     path, method, tmp_new = args["path"], args["method"], args["tmp_new"]
+    book = args.get("book") or PasswordBook()
     # 実行の時点でファイルを読み直して、位置を集める
-    got = collect_task({"path": path, "options": args["options"]})
+    got = collect_task({"path": path, "options": args["options"], "book": book})
     problem = unsupported_reason(method, path, got)
     if problem:
         raise RemedyError(problem)
@@ -610,11 +650,14 @@ def prepare_plain(args: dict) -> dict:
     maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
     orig_sha = sha256_file(path)
     try:
-        stats = rewrite_file(path, tmp_new, got["layout"], method, sel, maker, path)
+        stats = rewrite_file(
+            path, tmp_new, got["layout"], method, sel, maker, path, passwords=book.candidates_for(path)
+        )
+        notes = stats.pop("notes", None) or []  # 結果に添える知らせ（PDF の制限が引き継がれないなど。値は含めない）
         fsync_path(tmp_new)
         if sha256_file(path) != orig_sha:
             raise RemedyError("書き換えている間に元のファイルが変わりました。何も変えていません")
-        remaining = _verify_new_file(tmp_new, args["options"], args, sorted(maker.produced) if maker else [])
+        remaining = _verify_new_file(tmp_new, args["options"], args, sorted(maker.produced) if maker else [], book)
         new_sha = sha256_file(tmp_new)
     except BaseException:
         _discard(tmp_new)
@@ -625,6 +668,7 @@ def prepare_plain(args: dict) -> dict:
         "new_sha256": new_sha,
         "changed": stats,
         "remaining": remaining,
+        "notes": notes,
     }
 
 
@@ -656,6 +700,7 @@ def prepare_inner(args: dict) -> dict:
             )
         new_leaf = None
         stats: dict = {"entries": 1}
+        leaf_notes: list[str] = []
         maker = None
         if method == "remove_entry":
             problem = unsupported_reason(method, res.leaf_name, {"archive": arch})
@@ -672,7 +717,17 @@ def prepare_inner(args: dict) -> dict:
                 raise RemedyError("選んだ種類・確度の検出が、ファイルに見つかりませんでした（何も変えていません）")
             maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
             new_leaf = os.path.join(env.new_dir(), res.leaf_name)
-            stats = rewrite_file(res.leaf_path, new_leaf, got["layout"], method, sel, maker, res.leaf_name)
+            stats = rewrite_file(
+                res.leaf_path,
+                new_leaf,
+                got["layout"],
+                method,
+                sel,
+                maker,
+                res.leaf_name,
+                passwords=book.candidates_for(path),
+            )
+            leaf_notes = stats.pop("notes", None) or []
         dest = aw.zip_target_for(path) if convert else path
         if convert and os.path.exists(_long(dest)):
             raise RemedyError(
@@ -681,7 +736,7 @@ def prepare_inner(args: dict) -> dict:
             )
         orig_sha = sha256_file(path)
         try:
-            notes = aw.rebuild_target(res, new_leaf, env, tmp_new, convert)
+            notes = [*leaf_notes, *aw.rebuild_target(res, new_leaf, env, tmp_new, convert)]
             fsync_path(tmp_new)
             if sha256_file(path) != orig_sha:
                 raise RemedyError("作り直している間に元の書庫が変わりました。何も変えていません")
@@ -779,7 +834,7 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     if family not in LAYOUT_METHODS:
         return (
             "この形式の中身の書き換えには、まだ対応していません"
-            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ）。ファイルの削除はできます"
+            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
         )
     if family == "xlsx" and not path.lower().endswith(XLSX_EXTS):
         return "xlsx・xlsm 以外の Excel 形式は、中身を書き換えられません。ファイルの削除はできます"
@@ -794,6 +849,17 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     return ""
 
 
+def layout_from_kind(kind: str) -> str:
+    """位置を集められなかったとき（パスワードが必要・読めなかった）に、方法の一覧の出し分けに使う形式（形式の名前から決める）。"""
+    if kind == "PDF":
+        return "pdf"
+    if kind.startswith("Word（docx）"):
+        return "docx"
+    if kind.startswith("PowerPoint（pptx）"):
+        return "pptx"
+    return ""
+
+
 def file_only_reason(kind: str) -> str:
     """中身の書き換えを作っていない形式（ファイルの削除だけできる）の理由。当てはまらなければ空。"""
     if kind.startswith("Access"):
@@ -805,6 +871,17 @@ def file_only_reason(kind: str) -> str:
         return (
             "Oracle のダンプ（exp・expdp）は、長さ・区画の作りが細かく、書き換えて読み込める形を保つのが難しいため、"
             "いまはファイルの削除だけに対応しています（中身の対処は今後対応します）"
+        )
+    if "97-2003" in kind and ("doc" in kind or "ppt" in kind):
+        what = "Word（doc）" if "Word" in kind else "PowerPoint（ppt）"
+        return (
+            f"旧形式の {what} は、書き換えて保存できる部品が無いため、ファイルの削除だけに対応しています"
+            "（docx・pptx に変換してから検査し直すと、段落・スライドなどの対処ができます）"
+        )
+    if "暗号化された Office" in kind:
+        return (
+            "パスワードで暗号化された Office 文書は、中身を書き換えられないため、ファイルの削除だけに対応しています"
+            "（パスワードを外して保存し直してから検査し直すと、中身の対処ができます）"
         )
     if "PostgreSQL" in kind and "custom" in kind:
         return (
@@ -867,7 +944,8 @@ class Analysis:
         for (_sheet, pii_type, rank), arr in self.positions.items():
             d = counts.setdefault(pii_type, {})
             d[str(rank)] = d.get(str(rank), 0) + len(arr) // 4
-        sheets = sorted({k[0] for k in self.positions if k[0]})
+        # 「対象にするシート・表」の絞り込みは、Excel と DB だけ（PDF・docx・pptx の「シート」はページ・部品・スライドの名前）
+        sheets = [] if self.info.get("layout") in OFFICE_LAYOUTS else sorted({k[0] for k in self.positions if k[0]})
         return {"state": "done", **self.info, "counts": counts, "sheets": sheets}
 
 
@@ -998,7 +1076,14 @@ class RemedyService:
         options = replace(options, reveal=False, collect_positions=True, temp_dir=temp_dir, reuse=False)
         size = int(rows[0]["size"] or 0)
         timeout = min(MAX_TIMEOUT, max(MIN_TIMEOUT, size // BYTES_PER_SEC))
-        plan = {"options": options, "size": size, "timeout": timeout, "roots": job["roots"], "book": None}
+        # 検査のときに入れたパスワード（暗号化された PDF を開く・同じパスワードで暗号化し直すために使う。メモリの中だけ）
+        plan = {
+            "options": options,
+            "size": size,
+            "timeout": timeout,
+            "roots": job["roots"],
+            "book": self._book_for(job_id),
+        }
         if item_path:
             if not item_path.startswith(top_path + "!"):
                 raise RemedyError("書庫の中のパスが正しくありません")
@@ -1006,14 +1091,12 @@ class RemedyService:
                 "SELECT 1 FROM items WHERE job_id=? AND top_path=? AND path=?", (job_id, top_path, item_path)
             ):
                 raise RemedyError("その項目は、この検査の結果に見つかりません")
-            plan["book"] = self._book_for(job_id)
         return plan
 
     def _collect_args(self, a: Analysis, plan: dict) -> dict:
-        args = {"path": a.top_path, "options": plan["options"]}
+        args = {"path": a.top_path, "options": plan["options"], "book": plan["book"]}
         if a.item_path:
             args["item_path"] = a.item_path
-            args["book"] = plan["book"]
         return args
 
     def _analyze(self, a: Analysis, plan: dict) -> None:
@@ -1027,12 +1110,20 @@ class RemedyService:
             for m in METHOD_LABELS:
                 if m in ARCHIVE_ONLY_METHODS and not inner:
                     continue  # 実ファイルには出さない（書庫の中のファイルにだけ使える方法）
-                if m == "delete_table" and got["layout"] not in DB_LAYOUTS:
-                    continue  # 表の削除は、SQLite・SQL のダンプだけ
-                if m == "delete_sheet" and got["layout"] in DB_LAYOUTS:
+                layout = got["layout"] or layout_from_kind(got.get("kind") or "")
+                only = LAYOUT_ONLY_METHODS.get(m)
+                if only is not None and layout not in only:
+                    continue  # その形式にだけ出す方法（表の削除は DB・黒塗りは PDF など）
+                if m == "delete_sheet" and layout in DB_LAYOUTS + OFFICE_LAYOUTS:
                     continue  # シートは Excel の言い方（DB は表）
+                if layout in OFFICE_LAYOUTS and m not in ("delete_file", "convert_zip", *LAYOUT_METHODS[layout]):
+                    continue  # PDF に行・列は無い・pptx に表の行・列の削除は無い
                 reason = unsupported_reason(m, leaf_name, got)
-                label = ARCHIVE_DELETE_LABEL if (inner and m == "delete_file") else METHOD_LABELS[m]
+                label = (
+                    ARCHIVE_DELETE_LABEL
+                    if (inner and m == "delete_file")
+                    else LAYOUT_LABELS.get((layout, m), METHOD_LABELS[m])
+                )
                 methods[m] = {"label": label, "available": not reason, "reason": reason}
             a.info = {
                 "layout": got["layout"],
@@ -1044,6 +1135,7 @@ class RemedyService:
                 "dummy_modes": DUMMY_MODES,
                 "recycle_bin": has_recycle_bin(a.top_path),
                 "db_schema": got.get("db_schema") or {},
+                "password_opened": bool(got.get("password_opened")),
             }
             if inner:
                 a.info["archive"] = got["archive"]
@@ -1118,7 +1210,11 @@ class RemedyService:
         arch = a.info.get("archive")
         out = {
             "method": method,
-            "method_label": ARCHIVE_DELETE_LABEL if (arch and method == "delete_file") else METHOD_LABELS[method],
+            "method_label": (
+                ARCHIVE_DELETE_LABEL
+                if (arch and method == "delete_file")
+                else LAYOUT_LABELS.get((a.info.get("layout"), method), METHOD_LABELS[method])
+            ),
             "file_name": leaf,
             "warnings": [],
             "expected_sha256": a.info.get("sha256"),
@@ -1155,7 +1251,11 @@ class RemedyService:
             if len(sample) >= SAMPLE_ROWS:
                 break
         changes: dict = {"detections": sel.detections}
-        if method == "delete_rows":
+        if layout in OFFICE_LAYOUTS:
+            changes = office_preview(layout, method, sel, p, out, sample, bool(a.info.get("password_opened")))
+            out["sample_rows"] = sample
+            out["sample_label"] = "変わる場所の例"
+        elif method == "delete_rows":
             changes["rows"] = n_rows
             out["summary"] = f"{n_rows:,} 行を削除します（検出 {sel.detections:,} 件を含む行）"
             out["sample_rows"] = sample
@@ -1305,10 +1405,11 @@ class RemedyService:
                 "dummy_mode": p["dummy_mode"],
                 "expected_sha256": expected_sha256 or a.info.get("sha256"),
             }
+            if p["method"] != "delete_file":
+                args["book"] = plan["book"]
             if item_path and p["method"] != "delete_file":
                 args["item_path"] = item_path
                 args["convert_zip"] = p["convert_zip"]
-                args["book"] = plan["book"]
             filters = {k: p[k] for k in ("types", "ranks", "sheets", "dummy_mode")}
             if a.item_path:
                 filters["item_path"] = a.item_path  # 書庫の中の対象（パスだけ。生の値は入れない）
@@ -1468,7 +1569,16 @@ class RemedyService:
 
 
 def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> str:
-    """下見に出す「変わる行」の呼び名（Excel・csv は行番号、SQLite は rowid、SQL のダンプは行番号・何組目か）。"""
+    """下見に出す「変わる行」の呼び名（Excel・csv は行番号、SQLite は rowid、SQL のダンプは行番号・何組目か、
+    PDF はページと行、docx は部品と段落の番号、pptx はスライドと段落の番号）。"""
+    if layout == "pdf":
+        return f"{sheet} {key} 行目"
+    if layout == "docx":
+        return f"{docx_part_label(sheet)} 段落 {key}"
+    if layout == "pptx":
+        from .ooxml_text import split_pptx_sheet
+
+        return f"{split_pptx_sheet(sheet)[0]} 段落 {key}"
     if layout == "sqldump":
         from .formats.dbdump import ROW_KEY_SHIFT
 
@@ -1480,6 +1590,148 @@ def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> 
             return f"{sheet}: {key} 行目"
         return f"{sheet}: rowid {key}"
     return f"{sheet}!{key}" if sheet else str(key)
+
+
+def docx_part_label(part: str) -> str:
+    """docx の部品名の呼び方（下見に出す）。"""
+    leaf = part.rsplit("/", 1)[-1].lower()
+    for head, label in (
+        ("document", "本文"),
+        ("header", "ヘッダー"),
+        ("footer", "フッター"),
+        ("footnotes", "脚注"),
+        ("endnotes", "文末脚注"),
+        ("comments", "コメント"),
+    ):
+        if leaf.startswith(head):
+            return label
+    return part
+
+
+def _page_of(sheet: str) -> int:
+    import re
+
+    m = re.match(r"^(\d+)ページ", sheet)
+    return int(m.group(1)) if m else 0
+
+
+def office_preview(
+    layout: str, method: str, sel: Selection, p: dict, out: dict, sample: list[str], password_opened: bool
+) -> dict:
+    """PDF・docx・pptx の下見（変わる数・注意）を out に書き、changes を返す。何も書き換えない。値は含めない。"""
+    from .ooxml_text import CODE_COL_MASK, CODE_ROW_MASK, CODE_ROW_SHIFT, CODE_TBL_SHIFT, split_pptx_sheet
+
+    spans = set()  # 同じ場所を2通りの読み方で拾った検出（本文として・表の列見出しつき）を1つに数える
+    cells = set()
+    for (sheet, _t, _r), arr in sel.groups.items():
+        for i in range(0, len(arr), 4):
+            spans.add((sheet, arr[i], arr[i + 2], arr[i + 3]))
+            cells.add((sheet, arr[i], arr[i + 1]))
+    changes: dict = {"detections": len(spans)}
+    notes = out["warnings"]
+    props = (
+        "文書のプロパティ（作成者・題など）・属性値・グラフなどの文字に、消した値や選んだ種類・確度の検出が残っていれば、それも取り除きます。"
+        "文書の縮小画像（サムネイル）は、元の画面が写っているため取り除きます"
+    )
+    if layout == "pdf":
+        pages = sorted({_page_of(k[0]) for k in sel.groups})
+        ocr = any("OCR" in k[0] for k in sel.groups)
+        if method == "redact":
+            changes["pages"] = len(pages)
+            out["summary"] = (
+                f"{len(pages)} ページの検出 {len(spans):,} 件を黒塗りします（文字そのものを取り除きます。元に戻せません）"
+            )
+            notes.append(
+                "黒塗りは、見た目だけを隠す注釈ではなく、ページの内容から文字そのものを取り除きます（黒い四角が残ります）。"
+                "元に戻せません。コピーしても、文字の抽出をしても、値は出てきません"
+            )
+            if ocr:
+                notes.append(
+                    "画像の中の文字を OCR で読んだ検出は、画像のその部分の画素を黒く塗りつぶします"
+                    "（OCR の位置は近似なので、少し広めに塗ります）"
+                )
+        else:
+            changes["pages_removed"] = len(pages)
+            out["summary"] = f"{len(pages)} ページを削除します: " + "、".join(str(n) for n in pages)
+            notes.append(
+                "削除したページの文字・画像は、ファイルに残りません（保存し直して、使われなくなった部品も取り除きます）"
+            )
+        notes.append(
+            "文書情報（作成者・題など）・XMP・注釈・フォーム欄・しおり・リンク・埋め込みファイルに、消した値や選んだ種類・確度の検出が"
+            "残っていれば、それも取り除きます"
+        )
+        notes.append(
+            "PDF を保存し直します（増分保存にしないので、消した文字が古い版として残りません。ファイルの内部の作りは変わります）"
+        )
+        if password_opened:
+            notes.append("パスワードつきの PDF です。検査のとき入れたパスワードで、同じ方式に暗号化し直して保存します")
+        return changes
+    if layout == "pptx":
+        slides = sorted(
+            {int(split_pptx_sheet(k[0])[0].replace("スライド", "").split("（")[0] or 0) for k in sel.groups}
+        )
+        if method == "delete_slides":
+            changes["slides"] = len(slides)
+            out["summary"] = f"{len(slides)} 枚のスライドを削除します: " + "、".join(str(n) for n in slides)
+            notes.append(
+                "スライドに使われていた画像・グラフ・埋め込み・ノートのうち、ほかのスライドで使われていないものも取り除きます。"
+                "ほかのスライドからそのスライドへのリンクは外します。スライドの題の一覧（文書のプロパティ）も取り除きます"
+            )
+        else:
+            changes["cells"] = len(cells)
+            out["summary"] = (
+                f"{len(cells):,} 個の段落の検出した値 {len(spans):,} 件を置き換えます（{DUMMY_MODES[p['dummy_mode']]}）"
+            )
+            notes.append("置き換えた文字の書式は、値の最初の文字の書式に合わせます。ノートの中の検出も対象です")
+        notes.append(props)
+        return changes
+    # docx
+    paras = {(k, r) for k, r, _c in cells}
+    if method == "dummy":
+        changes["cells"] = len(paras)
+        out["summary"] = (
+            f"{len(paras):,} 個の段落（表のセル・ヘッダー・フッター・脚注・コメント・テキストボックスの中を含む）の検出した値 "
+            f"{len(spans):,} 件を置き換えます（{DUMMY_MODES[p['dummy_mode']]}）"
+        )
+        notes.append(
+            "値が複数の文字の塊（run）に割れていても置き換えます。置き換えた文字の書式は、値の最初の文字の書式に合わせます。"
+            "変更履歴（削除した文字・挿入した文字）やフィールドの命令の中の値も置き換えます"
+        )
+    elif method == "delete_paragraphs":
+        changes["paragraphs"] = len(paras)
+        out["summary"] = f"{len(paras):,} 個の段落を削除します（検出 {len(spans):,} 件を含む段落）"
+        notes.append(
+            "表のセル・テキストボックス・脚注などの最後の1つの段落、節の区切りを持つ段落は、取り除かずに中身を空にします"
+        )
+    else:
+        rows, cols, outside = set(), set(), 0
+        for sheet, row, code in cells:
+            if not code:
+                outside += 1
+                continue
+            tbl, r, c = code >> CODE_TBL_SHIFT, (code >> CODE_ROW_SHIFT) & CODE_ROW_MASK, code & CODE_COL_MASK
+            rows.add((sheet, tbl, r))
+            cols.add((sheet, tbl, c))
+        if method == "delete_rows":
+            changes["rows"] = len(rows)
+            out["summary"] = f"表の {len(rows):,} 行を削除します（検出を含む行）"
+            notes.append(
+                "結合したセル（縦に結合）を含む行を消すと、表の見た目が崩れることがあります。行が全部なくなった表は、表ごと取り除きます"
+            )
+        else:
+            changes["cols"] = len(cols)
+            out["summary"] = f"表の {len(cols):,} 列を削除します（検出を含む列）"
+            notes.append(
+                "結合したセル（複数の列にまたがるセル）に検出があるときは、列を削除できません。列の幅は変わりません。列が全部なくなった表は、表ごと取り除きます"
+            )
+        if outside:
+            notes.append(
+                f"表の外にある検出（{outside:,} 箇所の段落）は、行・列の削除では変わりません。段落の削除かダミー化を選んでください"
+            )
+        if not rows:
+            raise RemedyError("選んだ種類・確度の検出が、表の中にありません")
+    notes.append(props)
+    return changes
 
 
 def col_label(layout: str, sheet: str, idx0: int, schema: dict | None = None) -> str:

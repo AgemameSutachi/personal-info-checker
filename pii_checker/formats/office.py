@@ -29,6 +29,15 @@ from ..engine import (
     Uncheckable,
 )
 from ..models import Status
+from ..ooxml_text import (
+    DOCX_EXTRA_RE,
+    DOCX_MAIN,
+    docx_structure,
+    pptx_paragraphs,
+    pptx_para_text,
+    pptx_sheet,
+    pptx_slide_parts,
+)
 from ..textdecode import iter_strings, iter_strings_chunked
 from .misc import attribute_texts, markup_to_text, rtf_to_text
 
@@ -222,26 +231,46 @@ def handle_docx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
     f, z = _open_zip(blob)
     with f, z:
         structured = False
+        collecting = col.collect_positions
+        if collecting:
+            col.pos_layout = (
+                "docx"  # 対処のために、部品・段落・表の行と列で位置を集める（remedy_office.py が書き換えに使う）
+            )
         try:
-            root = ET.fromstring(z.read("word/document.xml"))
+            root = ET.fromstring(z.read(DOCX_MAIN))
+            info = docx_structure(root) if collecting else {}
             n_par = 0
-            for p in root.iter(f"{W}p"):
+            for idx, p in enumerate(root.iter(f"{W}p"), start=1):
                 text = _para_text(p)
                 if text.strip():
                     n_par += 1
-                    col.add_text(text, f"本文 段落{n_par}", method="本文")
+                    col.pos_sheet, col.cell_pos = DOCX_MAIN, (idx, info[id(p)][1] if collecting else 0)
+                    try:
+                        col.add_text(text, f"本文 段落{n_par}", method="本文")
+                    finally:
+                        col.pos_sheet, col.cell_pos = "", None
             for t_idx, tbl in enumerate(root.iter(f"{W}tbl"), start=1):
                 rows = []
                 for tr in tbl.findall(f"{W}tr"):
                     rows.append(["".join(_para_text(p) for p in tc.iter(f"{W}p")) for tc in tr.findall(f"{W}tc")])
                 # 表は列見出しの意味を使ってもう一度読む（本文で数えた値は二重に数えない）
-                col.add_table(
-                    rows, lambda r, c, t_idx=t_idx: f"表{t_idx} {r}行{c + 1}列", method="表（列見出し）", skip_seen=True
-                )
+                col.pos_sheet = DOCX_MAIN
+                col.pos_map = _cell_position_mapper(tbl, info) if collecting else None
+                try:
+                    col.add_table(
+                        rows,
+                        lambda r, c, t_idx=t_idx: f"表{t_idx} {r}行{c + 1}列",
+                        method="表（列見出し）",
+                        skip_seen=True,
+                    )
+                finally:
+                    col.pos_sheet, col.cell_pos, col.pos_map = "", None, None
             structured = True
         except Exception as e:
             item.notes.append(f"本文の構造を読めなかったため XML として読んだ（{type(e).__name__}: {e}）")
-        n = sweep_zip_parts(ctx, z, blob, col, depth, raw_parts=lambda name: structured and name == "word/document.xml")
+        n = sweep_zip_parts(ctx, z, blob, col, depth, raw_parts=lambda name: structured and name == DOCX_MAIN)
+        if collecting and structured:
+            _collect_docx_extra_positions(z, col, item)
     item.method = (
         f"本文の段落・表（見出し付き）＋zip 内の全部品 {n} 個（ヘッダー・フッター・コメント・脚注・変更履歴を含む）"
     )
@@ -249,6 +278,69 @@ def handle_docx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
         raise PartialScan(
             "本文の段落・表を構造として読めず、XML の文字だけを検査した（表の列見出しの意味を使えていない）"
         )
+
+
+def _cell_position_mapper(tbl, info: dict):
+    """表のセル（行・列。文字は、セルの中の段落の文字をつないだもの）の文字の範囲を、段落ごとの範囲にする関数を返す。
+
+    対処は段落を単位に書き換えるので、表の列見出しを使って読んだ検出も、本文の段落の位置と同じ形（部品・段落の通し番号・段落の中の範囲）
+    で残す（セルの中の検出が、本文の段落として読んだ検出と同じ鍵になり、書き換えで二重にならない）。
+    """
+    import unicodedata
+
+    from ..remedy_write import _orig_bounds
+
+    rows = tbl.findall(f"{W}tr")
+
+    def mapper(row: int, c: int, start: int, end: int) -> list[tuple]:
+        cells = rows[row - 1].findall(f"{W}tc")
+        if c >= len(cells):
+            return []
+        paras = list(cells[c].iter(f"{W}p"))
+        texts = [_para_text(p) for p in paras]
+        cell = "".join(texts)
+        norm = unicodedata.normalize("NFKC", cell)
+        bounds = _orig_bounds(cell, norm)
+        o_start, o_end = (0, len(cell)) if bounds is None else bounds(start, min(end, len(norm)))
+        out = []
+        offset = 0
+        for p, text in zip(paras, texts):
+            a, b = max(o_start, offset), min(o_end, offset + len(text))
+            if a < b:
+                n0 = len(unicodedata.normalize("NFKC", text[: a - offset]))
+                n1 = len(unicodedata.normalize("NFKC", text[: b - offset]))
+                idx, code = info[id(p)]
+                out.append((DOCX_MAIN, idx, code, n0, n1))
+            offset += len(text)
+        return out
+
+    return mapper
+
+
+def _collect_docx_extra_positions(z: zipfile.ZipFile, col: Collector, item: ItemResult) -> None:
+    """対処のための位置集め（検査の結果は変えない）: ヘッダー・フッター・脚注・コメントの段落の位置を集める。
+
+    これらの部品は検査では XML の文字として読むだけなので、段落の通し番号で位置を取り直す。検査で数えた値は
+    二重に数えない（skip_seen）。
+    """
+    for name in z.namelist():
+        if not DOCX_EXTRA_RE.match(name):
+            continue
+        try:
+            root = ET.fromstring(z.read(name))
+        except Exception as e:
+            item.notes.append(f"{name} の段落を読めなかったため、対処では変わらない（{type(e).__name__}）")
+            continue
+        info = docx_structure(root)
+        for idx, p in enumerate(root.iter(f"{W}p"), start=1):
+            text = _para_text(p)
+            if not text.strip():
+                continue
+            col.pos_sheet, col.cell_pos = name, (idx, info[id(p)][1])
+            try:
+                col.add_text(text, f"{name} 段落{idx}", method="XML部品", skip_seen=True)
+            finally:
+                col.pos_sheet, col.cell_pos = "", None
 
 
 # ------------------------------------------------------------------ pptx / ODF / その他 OOXML
@@ -307,6 +399,36 @@ def handle_ooxml_generic(ctx: ScanContext, blob: Blob, item: ItemResult, col: Co
     item.method = (
         f"表 {tables} 枚のセル＋" if tables else ""
     ) + f"zip 内の全部品 {n} 個（本文・ノート・コメント・埋め込み・画像）"
+
+
+def handle_pptx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """pptx。検査は handle_ooxml_generic と同じ（zip の全部品）。対処のための位置集めのときだけ、
+    スライドとノートの段落の位置を足す（検査の結果は変えない）。"""
+    handle_ooxml_generic(ctx, blob, item, col, depth)
+    if not col.collect_positions:
+        return
+    try:
+        f, z = _open_zip(blob)
+        with f, z:
+            col.pos_layout = "pptx"
+            for no, part, notes in pptx_slide_parts(z.read):
+                for sheet, name in ((pptx_sheet(no, part, False), part), (pptx_sheet(no, notes, True), notes)):
+                    if not name:
+                        continue
+                    root = ET.fromstring(z.read(name))
+                    for para_no, shape, p in pptx_paragraphs(root):
+                        text = pptx_para_text(p)
+                        if not text.strip():
+                            continue
+                        col.pos_sheet, col.cell_pos = sheet, (para_no, shape)
+                        try:
+                            col.add_text(text, f"{name} 段落{para_no}", method="スライドの文字", skip_seen=True)
+                        finally:
+                            col.pos_sheet, col.cell_pos = "", None
+    except Exception as e:
+        col.pos_layout = ""  # 途中までしか読めていない位置は、対処に使わない
+        col.positions.clear()
+        item.notes.append(f"スライドの段落の位置を集められなかったため、対処できない（{type(e).__name__}: {e}）")
 
 
 # ------------------------------------------------------------------ 暗号化

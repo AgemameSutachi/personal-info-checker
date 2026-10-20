@@ -434,7 +434,7 @@ def handler_for(kind: str):
         "xlsx": office.handle_xlsx,
         "xlsb": office.handle_xlsb,
         "docx": office.handle_docx,
-        "pptx": office.handle_ooxml_generic,
+        "pptx": office.handle_pptx,
         "ooxml": office.handle_ooxml_generic,
         "odf": office.handle_ooxml_generic,
         "xps": office.handle_ooxml_generic,

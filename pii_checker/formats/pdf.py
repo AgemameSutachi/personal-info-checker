@@ -12,6 +12,11 @@ from ..models import Status
 OCR_DPI = 200
 
 
+def page_sheet(no: int, ocr: bool) -> str:
+    """対処のための位置の「シート」の名前（1 始まりのページ番号。OCR で読んだ分は別）。"""
+    return f"{no}ページ（OCR）" if ocr else f"{no}ページ"
+
+
 def _page_image_coverage(page) -> float:
     """ページの面積のうち画像が占める割合（0〜1）。"""
     try:
@@ -57,6 +62,8 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                     ),
                 )
 
+        if col.collect_positions:
+            col.pos_layout = "pdf"  # 対処のために、ページ・行・文字の範囲で位置を集める（remedy_pdf.py が黒塗りに使う）
         meta = doc.metadata or {}
         for key in ("author", "title", "subject", "keywords", "creator"):
             if meta.get(key):
@@ -74,7 +81,11 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             no = page.number + 1
             text = page.get_text("text") or ""
             if text.strip():
-                col.add_lines(text, location_prefix=f"{no}ページ ", method="本文")
+                col.pos_sheet = page_sheet(no, False)
+                try:
+                    col.add_lines(text, location_prefix=f"{no}ページ ", method="本文")
+                finally:
+                    col.pos_sheet = ""
             reason_ocr = _needs_ocr(page, text)
             if reason_ocr:
                 done, reason = _ocr_page(ctx, page, col, no)
@@ -192,7 +203,11 @@ def _ocr_page(ctx: ScanContext, page, col: Collector, no: int) -> tuple[bool, st
         else Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
     )
     text = ocr.ocr_pil_image(img)
-    col.add_lines(text, location_prefix=f"{no}ページ（OCR） ", method="OCR", ocr=True)
+    col.pos_sheet = page_sheet(no, True)
+    try:
+        col.add_lines(text, location_prefix=f"{no}ページ（OCR） ", method="OCR", ocr=True)
+    finally:
+        col.pos_sheet = ""
     return True, ""
 
 

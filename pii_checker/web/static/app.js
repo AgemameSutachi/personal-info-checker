@@ -1149,6 +1149,12 @@ function changedText(c) {
   if (c.sheets) parts.push(`シート ${fmtNum(c.sheets)}`);
   if (c.tables) parts.push(`表 ${fmtNum(c.tables)}`);
   if (c.cells) parts.push(`置き換え ${fmtNum(c.cells)}`);
+  if (c.pages) parts.push(`黒塗りしたページ ${fmtNum(c.pages)}（${fmtNum(c.regions || 0)} か所）`);
+  if (c.pages_removed) parts.push(`ページ ${fmtNum(c.pages_removed)} を削除`);
+  if (c.paragraphs) parts.push(`段落 ${fmtNum(c.paragraphs)} を削除`);
+  if (c.slides) parts.push(`スライド ${fmtNum(c.slides)} を削除`);
+  if (c.cleaned) parts.push(`文書情報・注釈・属性値などに残った値 ${fmtNum(c.cleaned)} か所も取り除き`);
+  if (c.outside_table) parts.push(`表の外の検出は未変更 ${fmtNum(c.outside_table)}`);
   if (c.skipped_formula) parts.push(`数式は未変更 ${fmtNum(c.skipped_formula)}`);
   return parts.join("・") || "変更なし";
 }
@@ -1272,7 +1278,7 @@ function renderRemedyPreview(topPath, body, pv, btn) {
     <div class="rm-preview" role="status">
       <h4>下見（まだ何も変わっていません）</h4>
       <p><strong>${esc(pv.summary)}</strong></p>
-      ${pv.sample_rows && pv.sample_rows.length ? `<p class="small">変わる行の番号の例: ${esc(pv.sample_rows.join("、"))}${more ? " …" : ""}</p>` : ""}
+      ${pv.sample_rows && pv.sample_rows.length ? `<p class="small">${esc(pv.sample_label || "変わる行の番号の例")}: ${esc(pv.sample_rows.join("、"))}${more ? " …" : ""}</p>` : ""}
       ${pv.sample_cols && pv.sample_cols.length ? `<p class="small">変わる列の例: ${esc(pv.sample_cols.join("、"))}</p>` : ""}
       ${pv.warnings.length ? `<ul class="small rm-warn">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
       <div class="row"><button type="button" id="rm-run" class="danger">実行…</button></div>

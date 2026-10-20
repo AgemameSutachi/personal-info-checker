@@ -38,6 +38,7 @@ __all__ = [
     "unavailable_reason",
     "ocr_image_bytes",
     "ocr_pil_image",
+    "ocr_pil_image_lines",
 ]
 
 # 文字の高さ（px）の目安。これより小さければ拡大して読み直す
@@ -254,22 +255,34 @@ def _needs_space(prev_word: str, next_word: str, gap: float, height: float) -> b
     return gap > height * _SPACE_GAP_RATIO
 
 
-def _join_words(words: list[tuple[str, float, float, float]]) -> str:
-    """1 行ぶんの語（文字列, 左端x, 右端x, 高さ）を、空白の要否を判断しながらつなぐ。"""
+def _join_words_owned(words: list[tuple[str, float, float, float]]) -> tuple[str, list[int], list]:
+    """1 行ぶんの語をつなぎ、（文字列, 各文字がどの語の文字か（語の間の空白は -1）, 空でない語の並び）を返す。
+
+    後処理（ハイフン・中黒・鉤括弧の置き換え）は1文字を1文字に替えるだけなので、文字の並びと語の対応は変わらない。
+    """
     words = [w for w in words if w[0]]
     if not words:
-        return ""
+        return "", [], []
     height = statistics.median(w[3] for w in words)
     parts = [words[0][0]]
-    for prev, cur in zip(words, words[1:]):
+    owner = [0] * len(words[0][0])
+    for k, (prev, cur) in enumerate(zip(words, words[1:]), start=1):
         gap = cur[1] - prev[2]
         if _needs_space(prev[0], cur[0], gap, height):
             parts.append(" ")
+            owner.append(-1)
         parts.append(cur[0])
+        owner.extend([k] * len(cur[0]))
     text = "".join(parts)
     text = _DASH_BETWEEN_ALNUM.sub("-", text)
     text = _DOT_BETWEEN_ALPHA.sub(".", text)
-    return _BRACKET_AS_R.sub("r", text)
+    text = _BRACKET_AS_R.sub("r", text)
+    return text, owner, words
+
+
+def _join_words(words: list[tuple[str, float, float, float]]) -> str:
+    """1 行ぶんの語（文字列, 左端x, 右端x, 高さ）を、空白の要否を判断しながらつなぐ。"""
+    return _join_words_owned(words)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +378,12 @@ def _recognize_fitted(img: Image.Image) -> list[dict]:
     行の中心がその帯の受け持ち範囲にあるものだけを採る（重なりでの二重取りを防ぐ）。
     """
     limit = _max_dimension()
+    ratio = 1.0
     if img.width > limit:
         ratio = limit / img.width
         img = img.resize((limit, max(1, round(img.height * ratio))), Image.Resampling.LANCZOS)
     if img.height <= limit:
-        return _recognize_lines(img)
+        return [dict(line, scale=ratio) for line in _recognize_lines(img)]
 
     overlap = min(_TILE_OVERLAP, limit // 4)
     stride = limit - overlap
@@ -385,7 +399,7 @@ def _recognize_fitted(img: Image.Image) -> list[dict]:
         for line in _recognize_lines(tile):
             center = y0 + (line["top"] + line["bottom"]) / 2
             if own_top <= center < own_bottom:
-                line = dict(line, top=line["top"] + y0, bottom=line["bottom"] + y0)
+                line = dict(line, top=line["top"] + y0, bottom=line["bottom"] + y0, scale=ratio)
                 collected.append(line)
     return collected
 
@@ -402,8 +416,11 @@ def _scaled(img: Image.Image, factor: float) -> Image.Image:
     return img.resize(size, Image.Resampling.LANCZOS)
 
 
-def _ocr_single(img: Image.Image) -> str:
-    """1 ページぶんの画像を認識してテキストを返す（必要なら拡大して読み直す）。"""
+def _ocr_lines(img: Image.Image) -> list[dict]:
+    """1 ページぶんの画像を認識して行の一覧を返す（必要なら拡大して読み直す）。
+
+    各行の座標は、認識に使った画像（縮小・拡大したもの）の画素。元の画像の画素にするには line["scale"] で割る。
+    """
     gray = _to_gray(img)
     lines = _recognize_fitted(gray)
     limit = _max_dimension()
@@ -417,13 +434,33 @@ def _ocr_single(img: Image.Image) -> str:
             if factor >= 1.25:
                 retry = _recognize_fitted(_scaled(gray, factor))
                 if retry:
-                    lines = retry
+                    lines = [dict(line, scale=line["scale"] * factor) for line in retry]
     elif max(gray.size) * _RETRY_UPSCALE <= limit:
         # 何も読めなかった小さい画像は、文字が小さすぎる可能性があるので拡大して読み直す
-        lines = _recognize_fitted(_scaled(gray, _RETRY_UPSCALE))
+        lines = [
+            dict(line, scale=line["scale"] * _RETRY_UPSCALE)
+            for line in _recognize_fitted(_scaled(gray, _RETRY_UPSCALE))
+        ]
+    return lines
 
-    texts = [_join_words(line["words"]) for line in lines]
+
+def _ocr_single(img: Image.Image) -> str:
+    """1 ページぶんの画像を認識してテキストを返す（必要なら拡大して読み直す）。"""
+    texts = [_join_words(line["words"]) for line in _ocr_lines(img)]
     return "\n".join(t for t in texts if t)
+
+
+def _prepare_pil(img):
+    """PIL.Image を認識できる形にする（型の確認・EXIF の回転・読み込み）。"""
+    _require_available()
+    if not isinstance(img, Image.Image):
+        raise ValueError(f"PIL.Image を渡してください（渡された型: {type(img).__name__}）")
+    try:
+        img = ImageOps.exif_transpose(img) or img
+        img.load()
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"画像を読み込めませんでした（壊れている可能性があります）: {exc}") from exc
+    return img
 
 
 def ocr_pil_image(img) -> str:
@@ -436,15 +473,37 @@ def ocr_pil_image(img) -> str:
         OcrUnavailable: OCR が使えない環境のとき
         ValueError: 画像として扱えないものを渡されたとき
     """
-    _require_available()
-    if not isinstance(img, Image.Image):
-        raise ValueError(f"PIL.Image を渡してください（渡された型: {type(img).__name__}）")
-    try:
-        img = ImageOps.exif_transpose(img) or img
-        img.load()
-    except (OSError, SyntaxError, ValueError) as exc:
-        raise ValueError(f"画像を読み込めませんでした（壊れている可能性があります）: {exc}") from exc
-    return _ocr_single(img)
+    return _ocr_single(_prepare_pil(img))
+
+
+def ocr_pil_image_lines(img) -> list[dict]:
+    """``ocr_pil_image`` と同じ読み方で、行ごとの文字列と位置を返す（対処で、検出した文字の場所を黒く塗るために使う）。
+
+    戻り値の要素: {"text": 行の文字列, "chars": [(左端x, 右端x), ...]（文字ごと。語の幅を文字数で等分した近似）,
+    "top": 行の上端y, "bottom": 行の下端y}（座標は渡した画像の画素）。行の並びと文字列は ``ocr_pil_image`` の
+    結果を改行で分けたものと同じ。
+    """
+    out = []
+    for line in _ocr_lines(_prepare_pil(img)):
+        text, owner, words = _join_words_owned(line["words"])
+        if not text:
+            continue
+        scale = line.get("scale", 1.0) or 1.0
+        chars: list[tuple[float, float]] = []
+        prev_end = None
+        for i, k in enumerate(owner):
+            if k >= 0:
+                _w, x0, x1, _h = words[k]
+                n = len(words[k][0])
+                at = sum(1 for o in owner[:i] if o == k)
+                step = (x1 - x0) / n
+                chars.append(((x0 + step * at) / scale, (x0 + step * (at + 1)) / scale))
+                prev_end = chars[-1][1]
+            else:
+                nxt = words[owner[i + 1]][1] / scale if i + 1 < len(owner) and owner[i + 1] >= 0 else prev_end
+                chars.append((prev_end if prev_end is not None else nxt, nxt if nxt is not None else prev_end))
+        out.append({"text": text, "chars": chars, "top": line["top"] / scale, "bottom": line["bottom"] / scale})
+    return out
 
 
 def ocr_image_bytes(data: bytes) -> str:

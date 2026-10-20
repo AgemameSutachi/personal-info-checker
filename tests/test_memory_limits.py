@@ -69,7 +69,22 @@ def _docx_with_big_part(text: str) -> bytes:
 
 
 def test_big_office_part_is_swept(tmp_path, monkeypatch):
+    """本文として読んでいない大きな部品は、文字を拾ったうえで「途中まで」にする。"""
+    monkeypatch.setattr(office, "READ_ALL_LIMIT", 1000)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types/>')
+        z.writestr("word/document.xml", '<?xml version="1.0"?><w:document xmlns:w="w"><w:body/></w:document>')
+        z.writestr("customXml/item1.xml", "<a>" + "<b>本文です</b>" * 200 + f"<b>電話 {PHONE}</b></a>")
+    res = _scan(tmp_path, "big.docx", buf.getvalue())
+    assert "phone" in _types(res)
+    assert any(it.status == Status.PARTIAL and "大きすぎる" in it.reason for it in res.items)
+
+
+def test_big_main_part_read_as_body_is_not_partial(tmp_path, monkeypatch):
+    """本文として読み終えた本文の部品は、大きくても「途中まで」にせず、残留の確かめの注記だけ残す。"""
     monkeypatch.setattr(office, "READ_ALL_LIMIT", 1000)
     res = _scan(tmp_path, "big.docx", _docx_with_big_part(PHONE))
     assert "phone" in _types(res)
-    assert any(it.status == Status.PARTIAL and "大きすぎる" in it.reason for it in res.items)
+    assert not any(it.status == Status.PARTIAL for it in res.items)
+    assert any("残留の確かめ" in n for it in res.items for n in it.notes)

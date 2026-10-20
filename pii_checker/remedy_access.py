@@ -167,7 +167,7 @@ def jackcess_sort_problem(path: str, strategies: list[str], tables: dict, chosen
         return ""
     shown = "、".join(f"「{t}」" for t in blocked[:5]) + (f"ほか {len(blocked) - 5} 個" if len(blocked) > 5 else "")
     return (
-        f"表 {shown} は、この PC では書き換えられません（このファイルは並び順の設定が「一般」以外（「日本語」など）で、"
+        f"表{shown}は、この PC では書き換えられません（このファイルは並び順の設定が「一般」以外（「日本語」など）で、"
         "同梱の部品（Jackcess）は、その設定の文字の索引や添付ファイル型の列のある表を書き換えられないため）。"
         "IT 担当の方に「Microsoft Access Database Engine（64bit）」を入れてもらうと書き換えられます"
     )

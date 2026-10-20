@@ -80,8 +80,14 @@ def sweep_zip_parts(
             with z.open(info) as f:
                 for s in iter_strings_chunked(f.read):
                     col.add_text(s, name, method="大きな部品の文字列走査", raw=raw_parts(name))
-            col.item.status = Status.PARTIAL
-            col.item.reason = f"部品 {name}（{info.file_size:,} バイト）が大きすぎるため、その部品は文字として読める部分だけを検査した"
+            if raw_parts(name):
+                # 表・本文として読み終えた部品の拾い直し（残留の確かめ）なので、検査は欠けていない。途中までの印は付けない
+                col.item.notes.append(
+                    f"部品 {name}（{info.file_size:,} バイト）は大きいため、残留の確かめは文字として読める部分だけにした"
+                )
+            else:
+                col.item.status = Status.PARTIAL
+                col.item.reason = f"部品 {name}（{info.file_size:,} バイト）が大きすぎるため、その部品は文字として読める部分だけを検査した"
             continue
         data = z.read(info)
         if lower.endswith((".xml", ".rels", ".vml")) or data[:5] == b"<?xml":

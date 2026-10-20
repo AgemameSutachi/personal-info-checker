@@ -510,8 +510,8 @@ JACKCESS_REASONS = (
     ("foreign key", "ほかの表から参照されている値のため、Access に断られました。ダミーに置き換えを選んでください。"),
     (
         "sort order",
-        "このファイルの並び順（「日本語」など、「一般」以外）の文字の索引は、Jackcess では書き換えられないため断られました"
-        "（添付ファイル型の列の中身を消すときにも当たります）。IT 担当の方に「Microsoft Access Database Engine"
+        "このファイルは並び順が「一般」以外（「日本語」など）のため、同梱の部品（Jackcess）では、文字の索引や"
+        "添付ファイル型の列の中身を書き換えられず、断られました。IT 担当の方に「Microsoft Access Database Engine"
         "（64bit）」を入れてもらうと書き換えられます。",
     ),
 )

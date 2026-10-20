@@ -1122,6 +1122,7 @@ def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409", fil
     try:
         db.Execute("CREATE TABLE people (id LONG, [氏名] TEXT(50), [電話] TEXT(50))")
         td = db.TableDefs("people")
+        td.Fields.Append(td.CreateField("メモ", 12))  # 普通のメモの列（複合列と見分けられることの確かめ）
         td.Fields.Append(td.CreateField("添付", 101))  # dbAttachment
         rs = db.OpenRecordset("people")
         for i, name, phone in rows:
@@ -1130,8 +1131,9 @@ def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409", fil
             f.write_bytes(content)
             rs.AddNew()
             rs.Fields("id").Value = i
-            rs.Fields("氏名").Value = name
+            rs.Fields("氏名").Value = name or None
             rs.Fields("電話").Value = phone or None
+            rs.Fields("メモ").Value = f"連絡事項{i} " + "あ" * 300
             child = rs.Fields("添付").Value
             child.AddNew()
             child.Fields("FileData").LoadFromFile(str(f))
@@ -1256,6 +1258,53 @@ def test_delete_rows_removes_attachments_of_deleted_rows_and_keeps_the_rest(stra
     raw = p.read_bytes()
     left = [i for i, _n, phone in rows if phone and before[i][1000:1064] in raw]
     assert not left, f"消した行の添付の中身がファイルに残っている: {left}"
+
+
+@pytest.mark.parametrize("strategy", ["ace", "jackcess"])
+def test_delete_table_removes_attachment_contents(strategy, tmp_path, monkeypatch, trash):
+    """表の削除（ACE は DROP TABLE、Jackcess は全行の削除）でも、添付の中身はファイルに残らない。"""
+    if not available(strategy):
+        pytest.skip(f"{strategy} が使えない環境")
+    rows = [(i, f"山田 太郎{i}", f"090-1234-{i:04d}") for i in range(1, 7)]
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, rows, tmp_path)
+    assert all(_attachment_bytes(i)[1000:1064] in p.read_bytes() for i, _n, _p in rows), "陽性対照"
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", [strategy])
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_table", types=["phone"], confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    raw = p.read_bytes()
+    assert not [i for i, _n, _p in rows if _attachment_bytes(i)[1000:1064] in raw]
+
+
+def test_only_attachment_findings_explain_why_rows_cannot_be_chosen(tmp_path, monkeypatch, trash):
+    """検出が添付の中にしか無いときは、行の削除を選んでも「検出がありません」だけで断らず、理由とファイルの削除を示す。"""
+    if not available("ace"):
+        pytest.skip("ACE が要る")
+    meibo = ("氏名,電話\n" + "山田 太郎,090-1234-5678\n" * 10).encode("utf-8")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "", "")], tmp_path, files_of=lambda i: ("名簿.txt", meibo))
+    svc, store, job = make_service(tmp_path, [p])
+    analyze(svc, job, p)
+    with pytest.raises(RemedyError, match="位置を持たない検出.*Access の添付ファイル.*ファイルの削除を選んでください"):
+        svc.preview(job, str(p), {"method": "delete_rows", "types": ["phone"], "confidences": ALL_RANKS})
+
+
+def test_too_large_attachment_is_left_as_uncheckable(tmp_path, monkeypatch):
+    """大きすぎる添付は取り出さず、黙って捨てずに検査不能の項目として残す（ODBC の経路。上限を小さくして試す）。"""
+    from pii_checker.formats import database
+
+    if not available("ace"):
+        pytest.skip("ACE が要る")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "x", "")], tmp_path)
+    monkeypatch.setattr(database, "FORCED_READERS", ["odbc"])
+    monkeypatch.setattr(database, "ATTACHMENT_LIMIT", 1000)
+    items = _scan_items(p, tmp_path)
+    big = [it for it in items if "の添付「photo1.jpg」" in it.path]
+    assert big and big[0].status.name == "UNCHECKABLE" and "大きすぎる" in big[0].reason, [
+        (it.path, it.status) for it in items
+    ]
 
 
 def test_ace_drop_column_removes_attachment_contents(tmp_path):

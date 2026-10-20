@@ -1534,6 +1534,13 @@ class RemedyService:
             "convert_zip": convert,
         }
         if method not in ("delete_file", "remove_entry") and not select_from_args(a.positions, out).detections:
+            others = a.info.get("other_findings") or 0
+            if others:
+                raise RemedyError(
+                    f"選んだ種類・確度の検出のうち、この方法で消せるもの（行・列の位置を持つもの）はありません。"
+                    f"このファイルの検出のうち {others:,} 件は、位置を持たない検出（コメント・内側のファイル・"
+                    "Access の添付ファイル・ファイル名など）で、行や列の削除・ダミー化では変わりません。ファイルの削除を選んでください"
+                )
             raise RemedyError("選んだ種類・確度の検出がありません")
         return out
 
@@ -1646,7 +1653,7 @@ class RemedyService:
             out["notes"].append("文字コード・BOM・改行・区切り・引用符の付け方は元のまま保ちます")
         if a.info.get("other_findings"):
             out["warnings"].append(
-                f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
+                f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・Access の添付ファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
                 "それらはこの対処では変わらず、実行のあとの検査し直しで残りとして出ます"
             )
         if arch:

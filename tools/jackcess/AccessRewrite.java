@@ -40,7 +40,8 @@ import java.util.TreeSet;
  *   readall table max [digest] … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
  *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す。digest を付けると、バイナリは中身の SHA-256（"h"+16進）、
  *                            読めなかった値は "e"+例外の名前で出す（塗りつぶしの前後で中身を比べる指紋用）
- *   attachments table      … 添付ファイル型の列のファイルを流す。att\tord\t列名\tファイル名\t中身（展開済みの Base64）を1つずつ、end
+ *   attachments table      … 添付ファイル型の列のファイルを流す。att\tord\t列名\tファイル名\t中身（展開済みの Base64）を1つずつ、end。
+ *                            64MB を超える（載らない）ものは big\tord\t列名\tファイル名\t大きさ（載らなければ -1）
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
@@ -57,6 +58,8 @@ import java.util.TreeSet;
  */
 public class AccessRewrite {
     private static Database db;
+    /** attachments で中身を送る添付の大きさの上限（これを超えるものは big の行で大きさだけ知らせる。ヒープは -Xmx768m） */
+    private static final int ATTACHMENT_LIMIT = 64 * 1024 * 1024;
     private static final PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
 
     private static String b64(String s) {
@@ -287,10 +290,23 @@ public class AccessRewrite {
                                 continue;
                             }
                             for (Attachment a : fk.getAttachments()) {
-                                byte[] data = a.getFileData();
                                 String name = a.getFileName() == null ? "" : a.getFileName();
-                                out.println("att\t" + ord + "\t" + b64(c.getName()) + "\t" + b64(name) + "\t"
-                                        + Base64.getEncoder().encodeToString(data == null ? new byte[0] : data));
+                                String head = ord + "\t" + b64(c.getName()) + "\t" + b64(name);
+                                byte[] data;
+                                try {
+                                    data = a.getFileData();
+                                } catch (OutOfMemoryError e) {
+                                    out.println("big\t" + head + "\t-1");  // ヒープに載らない大きさ
+                                    continue;
+                                }
+                                if (data == null) {
+                                    data = new byte[0];
+                                }
+                                if (data.length > ATTACHMENT_LIMIT) {
+                                    out.println("big\t" + head + "\t" + data.length);
+                                    continue;
+                                }
+                                out.println("att\t" + head + "\t" + Base64.getEncoder().encodeToString(data));
                             }
                         }
                     }

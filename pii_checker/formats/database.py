@@ -213,33 +213,57 @@ def _scan_odbc_attachments(
 
     添付の列は「表.列.FileName」で SELECT できるかで見分ける（普通のメモの列は断られる）。
     """
+    from ..remedy_access import bracket
+
+    t = bracket(table)
+    limit = ctx.options.max_rows_per_table or 0
     for cname in memo_like:
+        c = f"{t}.{bracket(cname)}"
         cur = conn.cursor()
         try:
             try:
-                cur.execute(f"SELECT [{table}].[{cname}].[FileName] FROM [{table}] WHERE 1=0")
+                cur.execute(f"SELECT {c}.[FileName] FROM {t} WHERE 1=0")
             except Exception:  # noqa: BLE001  添付の列ではない
                 continue
             try:
-                cur.execute(f"SELECT [{table}].[{cname}].[FileName], [{table}].[{cname}].[FileData] FROM [{table}]")
+                cur.execute(f"SELECT {c}.[FileName], {c}.[FileData] FROM {t}")
             except Exception as e:  # noqa: BLE001
                 _failed_table(ctx, display, table, f"添付ファイル型の列「{cname}」を読めなかった: {e}", depth)
                 continue
             k = 0
-            while True:
-                batch = cur.fetchmany(50)
-                if not batch:
+            while not (limit and k >= limit):
+                row = cur.fetchone()  # 1件ずつ（大きな添付を何件も同時に持たない）
+                if row is None:
                     break
-                for fname, data in batch:
-                    if data is None:
-                        continue
-                    k += 1
-                    _scan_attachment(
-                        ctx, bytes(data), f"{display}!表「{table}」列「{cname}」の添付「{fname}」", depth, fname
-                    )
+                fname, data = row
+                if data is None:
+                    continue
+                k += 1
+                where = f"{display}!表「{table}」列「{cname}」の添付「{fname}」"
+                if len(data) > ATTACHMENT_LIMIT:
+                    _big_attachment(ctx, where, len(data), depth)
+                    continue
+                _scan_attachment(ctx, bytes(data), where, depth, fname)
             item.notes.append(f"表「{table}」の添付ファイル型の列「{cname}」: ファイル {k} 件")
         finally:
             cur.close()
+
+
+ATTACHMENT_LIMIT = 64 * 1024 * 1024  # 取り出して検査する添付の大きさの上限（Jackcess の補助の上限と同じ）
+
+
+def _big_attachment(ctx: ScanContext, display: str, size: int, depth: int) -> None:
+    """大きすぎて取り出さなかった添付を、黙って捨てずに検査不能の項目として残す。"""
+    shown = f"{size / 1024 / 1024:,.0f}MB" if size >= 0 else "メモリに載らない大きさ"
+    ctx.items.append(
+        ItemResult(
+            path=display,
+            kind="Access の添付ファイル",
+            status=Status.UNCHECKABLE,
+            reason=f"添付ファイルが大きすぎる（{shown}）ため取り出さなかった。Access で添付を保存して、別に検査してください",
+            depth=depth + 1,
+        )
+    )
 
 
 def _scan_attachment(ctx: ScanContext, data: bytes, display: str, depth: int, name: str | None) -> None:
@@ -489,16 +513,20 @@ def _read_access_jackcess(
             if has_complex:
                 counts: dict[str, int] = {}
                 for p in call("attachments", ra._b64(name)):
-                    if p[0] != "att" or len(p) < 5:
+                    if p[0] not in ("att", "big") or len(p) < 5:
                         continue
                     cname, fname = ra._unb64(p[2]), ra._unb64(p[3])
+                    where = f"{display}!表「{name}」列「{cname}」の添付「{fname}」"
+                    if p[0] == "big":
+                        _big_attachment(ctx, where, int(p[4]), depth)
+                        continue
                     counts[cname] = counts.get(cname, 0) + 1
+                    if limit and counts[cname] > limit:
+                        continue  # 表の行数の上限と同じだけ（残りは読み捨てる。やり取りをずらさないため）
                     ctx.scan_nested(
-                        f"{display}!表「{name}」列「{cname}」の添付「{fname}」",
-                        data=base64.b64decode(p[4]),
-                        depth=depth + 1,
-                        name_hint=fname or "attachment.bin",
+                        where, data=base64.b64decode(p[4]), depth=depth + 1, name_hint=fname or "attachment.bin"
                     )
+                    last_line[0] = time.monotonic()  # 重い添付の検査の間に、止まったとみなして Java を止めない
                 for cname, k in counts.items():
                     item.notes.append(f"表「{name}」の添付ファイル型の列「{cname}」: ファイル {k} 件")
         if n_tables == 0:
@@ -601,8 +629,8 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             used = fn()
             if key in ("helper32", "parser") and _is_ace_format(path):
                 item.notes.append(
-                    "この読み方では、添付ファイル型の列の中のファイルは取り出していない"
-                    "（列があれば、その中身は生データ走査で文字として見えた分だけ）"
+                    f"{label}で読んだため、添付ファイル型の列があっても、中のファイルは取り出していない"
+                    "（圧縮されて入った添付の中の個人情報は見逃すことがある。ACE か Jackcess のある PC で読むと取り出せる）"
                 )
             break
         except NeedPassword:

@@ -363,6 +363,59 @@ def test_columns_named_like_constraint_words_are_columns(tmp_path, trash, one_li
     mem.close()
 
 
+@pytest.mark.parametrize(
+    "create,names",
+    [
+        pytest.param(
+            "CREATE TABLE people (id INTEGER, key varchar(10), memo TEXT, email TEXT, other TEXT);",
+            ["id", "key", "memo", "email", "other"],
+            id="key varchar(10)",
+        ),
+        pytest.param(
+            "CREATE TABLE people (id INTEGER, memo, email TEXT, other TEXT, extra TEXT);",
+            ["id", "memo", "email", "other", "extra"],
+            id="型の無い列",
+        ),
+        pytest.param(
+            "CREATE TABLE people (\n  id INTEGER,\n  memo TEXT\n    REFERENCES other(id),\n  email TEXT,\n  other TEXT,\n"
+            "  extra TEXT\n);",
+            ["id", "memo", "email", "other", "extra"],
+            id="2行にまたがる列の定義",
+        ),
+    ],
+)
+def test_column_delete_never_drops_the_wrong_column(tmp_path, trash, create, names):
+    """CREATE の読み取りがずれうる形でも、列の削除は「正しく消す」か「断って元のまま」のどちらか（別の列を消して完了しない）。"""
+
+    def value(name: str, i: int):
+        return i if name == "id" else (f"user{i}@example.com" if name == "email" else f"{name}{i}")
+
+    def sql(v):
+        return str(v) if isinstance(v, int) else f"'{v}'"
+
+    rows = "\n".join(
+        "INSERT INTO people VALUES(" + ",".join(sql(value(n, i)) for n in names) + ");" for i in range(1, 31)
+    )
+    p = tmp_path / "src" / "people.sql"
+    p.parent.mkdir()
+    original = f"{create}\n{rows}\n"
+    p.write_text(original, encoding="utf-8", newline="\n")
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_columns", confidences=ALL_RANKS)
+    if r["state"] != "done":
+        assert p.read_text(encoding="utf-8") == original, r  # 断ったなら元のまま
+        return
+    mem = sqlite3.connect(":memory:")
+    mem.execute("CREATE TABLE other (id INTEGER)")
+    mem.executescript(p.read_text(encoding="utf-8"))
+    left = [row[1] for row in mem.execute("PRAGMA table_info(people)")]
+    assert "email" not in left and set(left) == set(names) - {"email"}, left
+    for i in (1, 3, 30):
+        got = dict(zip(left, mem.execute("SELECT * FROM people WHERE id=?", (i,)).fetchone()))
+        assert got == {n: value(n, i) for n in left}, got  # 残った列の値は、元の同じ列の値のまま
+    mem.close()
+
+
 def test_dropping_a_column_missing_from_create_is_refused(tmp_path, trash):
     """CREATE の列の並びを読み取れず、INSERT だけ列が減る形になるなら、断って元を残す。"""
     text = "CREATE TABLE people (id INTEGER, memo TEXT, email TEXT);\n" + "".join(

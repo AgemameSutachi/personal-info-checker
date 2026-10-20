@@ -55,19 +55,26 @@ RE_CONSTRAINT_ITEM = re.compile(
       | FOREIGN\s+KEY\b
       | CONSTRAINT\s+\S+
       | CHECK\s*\(
-      | UNIQUE\s*(?:\(|(?:KEY|INDEX)\b)
+      | UNIQUE\s*(?:\(|(?:KEY|INDEX|CLUSTERED|NONCLUSTERED)\b)
       | (?:FULLTEXT|SPATIAL)\s+(?:KEY|INDEX)\b
-      | (?:KEY|INDEX)\s+(?:[`"\[\]\w.]+\s*)?\(
-      | (?:KEY|INDEX)\s*\(
+      | (?:KEY|INDEX)\s+(?:`[^`]*`|"[^"]*"|\[[^\]]*\]|[\w.]+)\s*(?:(?:USING\s+\w+|CLUSTERED|NONCLUSTERED)\s*)?\(
+      | (?:KEY|INDEX)\s*(?:USING\s+\w+\s*)?\(
       | EXCLUDE\s+(?:USING\b|\()
+      | PERIOD\s+FOR\b
+      | LIKE\s+\S+
     )""",
     re.I | re.X,
 )
+# 「key varchar(10)」「index numeric(10,2)」のように、KEY・INDEX の次が型で括弧の中が数字だけなら、列（key・index という名前の列）
+RE_KEY_NAMED_COLUMN = re.compile(r"^(?:KEY|INDEX)\s+[\w.]+\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\)", re.I)
 
 
 def is_constraint_item(text: str) -> bool:
     """CREATE TABLE の本体の1項目が、列ではなく制約（主キー・索引・外部キー・検査など）か。"""
-    return bool(RE_CONSTRAINT_ITEM.match(text.strip()))
+    t = text.strip()
+    if RE_KEY_NAMED_COLUMN.match(t):
+        return False
+    return bool(RE_CONSTRAINT_ITEM.match(t))
 
 
 def split_top_level(text: str) -> list[str]:

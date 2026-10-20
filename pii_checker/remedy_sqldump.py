@@ -624,6 +624,16 @@ class DumpRewriter:
             raise RemedyError(
                 f"表「{tgt.name}」の INSERT の値の数が列名の数と合わない組があります。書き換えません（元のファイルは変えていません）"
             )
+        if drop_idx and not explicit:
+            # 列名の無い INSERT は、CREATE TABLE から読んだ列の並びで列を落とす。その読み取りが1列でもずれると
+            # （型の無い列・制約と紛らわしい列・複数行にまたがる列の定義など）別の列を消すので、値の数と列の数が
+            # 合わなければ書き換えない（判定に穴が残っていても、壊れたダンプは作らない）
+            canon = self.canonical.get(norm_ident(tgt.name)) or []
+            if not canon or any(len(t[3]) != len(canon) for t in tuples):
+                raise RemedyError(
+                    f"表「{tgt.name}」の CREATE TABLE から読んだ列の数（{len(canon)}）と INSERT の値の数が合わないため、"
+                    "どの値がどの列か確かめられません。列の削除はしません（元のファイルは変えていません）"
+                )
         tgt.touched = True
         if not keep:
             self._require_clean_prefix(stmt, mi)

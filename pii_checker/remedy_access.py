@@ -508,6 +508,12 @@ JACKCESS_REASONS = (
         "置き換えた値が列の長さに収まらないため、Access に断られました。「固定の＊＊＊」のダミーを選んでください。",
     ),
     ("foreign key", "ほかの表から参照されている値のため、Access に断られました。ダミーに置き換えを選んでください。"),
+    (
+        "sort order",
+        "このファイルの並び順（「日本語」など、「一般」以外）の文字の索引は、Jackcess では書き換えられないため断られました"
+        "（添付ファイル型の列の中身を消すときにも当たります）。IT 担当の方に「Microsoft Access Database Engine"
+        "（64bit）」を入れてもらうと書き換えられます。",
+    ),
 )
 
 
@@ -628,6 +634,40 @@ class SqlSession:
     def __init__(self, backend):
         self.b = backend
         self.strategy = backend.strategy
+        self._complex: dict[str, list[tuple[str, str]]] = {}
+
+    def complex_columns(self, table: str, cols: list[ColInfo]) -> list[tuple[str, str]]:
+        """複合列（添付ファイル・複数の値）の（列名, 中身を消すときの部分の名前）。ODBC ではメモの列に見えるので、
+        部分の名前（添付は FileName、複数の値は Value）で SELECT できるかで見分ける。
+
+        Access は、行を消しても列を消しても、隠れた表に入った複合列の中身を消さない（最適化しても残る）。
+        行・列を消す前に「DELETE 表.列.部分 FROM 表」で中身を消すために使う。Jet（.mdb）には複合列が無い。
+        """
+        if self.strategy != "ace":
+            return []
+        if table not in self._complex:
+            found = []
+            t = bracket(table)
+            for c in cols:
+                if c.kind != "memo":
+                    continue
+                for probe, part in (("FileName", "FileData"), ("Value", "Value")):
+                    try:
+                        self.b.execute(f"SELECT {t}.{bracket(c.name)}.{bracket(probe)} FROM {t} WHERE 1=0")
+                    except RemedyError:
+                        continue
+                    found.append((c.name, part))
+                    break
+            self._complex[table] = found
+        return self._complex[table]
+
+    def _delete_complex_values(self, table: str, cols: list[ColInfo], where: str | None, only=None) -> None:
+        t = bracket(table)
+        for name, part in self.complex_columns(table, cols):
+            if only is None or name in only:
+                self.b.execute(
+                    f"DELETE {t}.{bracket(name)}.{bracket(part)} FROM {t}" + (f" WHERE {where}" if where else "")
+                )
 
     def tables(self) -> list[str]:
         return self.b.tables()
@@ -648,6 +688,7 @@ class SqlSession:
             signatures[w] = signatures.get(w, 0) + 1
         total = 0
         for w in signatures:
+            self._delete_complex_values(table, cols, w)  # 行より先に、その行の添付などの中身を消す
             n = self.b.execute(f"DELETE FROM {bracket(table)} WHERE {w}")
             total += max(n, 0)
         if total != len(rows):
@@ -678,6 +719,7 @@ class SqlSession:
         return total
 
     def drop_columns(self, table: str, names: list[str]) -> None:
+        self._delete_complex_values(table, self.columns(table), None, only=set(names))  # 列より先に、全行の中身を消す
         for name in names:
             try:
                 self.b.execute(f"ALTER TABLE {bracket(table)} DROP COLUMN {bracket(name)}")

@@ -103,6 +103,8 @@ class ItemResult:
     # 位置の意味: "csv,"・"csv\t"（行・列）/ "lines"（行）/ "xlsx"（シート・行・列）/ ""（位置を持たない）
     pos_layout: str = ""
     pos_overflow: bool = False  # 位置の数が上限を超えて、途中までしか集めていない
+    # 位置の集め直しのときだけ、形式ごとの処理が足す構造の情報（Oracle ダンプの表ごとの列名など。値は含めない・保存しない）
+    pos_info: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -1,5 +1,6 @@
 """検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル、
-T2-b: SQLite・SQL のダンプ。Access・Oracle のダンプはファイルの削除だけ、T2-c: PDF の黒塗り・docx・pptx）。
+T2-b: SQLite・SQL のダンプ。T2-c: PDF の黒塗り・docx・pptx。T2-d: Oracle のダンプ（exp は行・列・表・ダミー化、expdp は行・ダミー化）。
+Access はファイルの削除だけ）。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
@@ -86,11 +87,17 @@ LAYOUT_METHODS = {
     "xlsx": ("delete_rows", "delete_columns", "dummy", "delete_sheet"),
     "sqlite": ("delete_rows", "delete_columns", "dummy", "delete_table"),
     "sqldump": ("delete_rows", "delete_columns", "dummy", "delete_table"),
+    "oracle_exp": ("delete_rows", "delete_columns", "dummy", "delete_table"),
+    "oracle_expdp": ("delete_rows", "dummy"),  # 列・表の削除は、圧縮された DDL を書き換えられないため選べない
     "pdf": ("redact", "delete_pages"),
     "docx": ("dummy", "delete_paragraphs", "delete_rows", "delete_columns"),
     "pptx": ("dummy", "delete_slides"),
 }
-DB_LAYOUTS = ("sqlite", "sqldump")  # 位置の「シート」が表の名前になる形式
+ORACLE_LAYOUTS = (
+    "oracle_exp",
+    "oracle_expdp",
+)  # Oracle のダンプ（T2-d）。位置のシートは表の名前、行は表の中の行の通し番号
+DB_LAYOUTS = ("sqlite", "sqldump", *ORACLE_LAYOUTS)  # 位置の「シート」が表の名前になる形式
 OFFICE_LAYOUTS = ("pdf", "docx", "pptx")  # 位置の「シート」がページ・部品・スライドになる形式（T2-c）
 # ある形式にだけ出す方法
 LAYOUT_ONLY_METHODS = {
@@ -537,6 +544,8 @@ def collect_task(args: dict) -> dict:
             db_schema = schema_notes(args["path"], sorted({k[0] for k in top.positions}))
         except Exception:  # noqa: BLE001  下見の注意が取れなくても、対処そのものは止めない
             db_schema = {}
+    elif top.pos_layout in ORACLE_LAYOUTS and top.pos_info.get("tables"):
+        db_schema = {"tables": top.pos_info["tables"]}  # 表ごとの列名（下見に「表.列名」を出す。値は含まない）
     return {
         "source": result.source,
         "status": top.status.value,
@@ -613,6 +622,10 @@ def rewrite_file(
         from .remedy_sqldump import rewrite_sql_dump_file
 
         return rewrite_sql_dump_file(src, dst, method, sel, maker)
+    if layout in ORACLE_LAYOUTS:
+        from .remedy_oracle import rewrite_oracle_dump_file
+
+        return rewrite_oracle_dump_file(src, dst, layout, method, sel, maker)
     return rewrite_text_file(src, dst, layout, method, sel, maker)
 
 
@@ -824,18 +837,28 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     status = info.get("status")
     if status == Status.NEEDS_PASSWORD.value:
         return "パスワードが必要な（暗号化された）ファイルは、中身を書き換えられません。ファイルの削除はできます"
-    kind_reason = file_only_reason(info.get("kind") or "")
+    kind = info.get("kind") or ""
+    kind_reason = file_only_reason(kind)
     if kind_reason:
         return kind_reason
     if status != Status.SCANNED.value:
+        if "Oracle" in kind and "ダンプ" in kind:
+            return (
+                "Oracle のダンプを、表として最後まで読み解けなかった（圧縮・暗号化・未対応の型の列・切れたダンプ・知らない形の表など）ため、"
+                "位置が分からず、中身を書き換えられません。ファイルの削除はできます"
+            )
         return "中身を最後まで構造どおりに読めなかったファイルは、位置が分からないため中身を書き換えられません。ファイルの削除はできます"
     layout = info.get("layout") or ""
     family = "csv" if layout.startswith("csv") else layout
     if family not in LAYOUT_METHODS:
         return (
             "この形式の中身の書き換えには、まだ対応していません"
-            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
+            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ・Oracle のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
         )
+    if family == "oracle_expdp" and method in ("delete_columns", "delete_table"):
+        from .remedy_oracle import EXPDP_UNSUPPORTED_REASON
+
+        return EXPDP_UNSUPPORTED_REASON
     if family == "xlsx" and not path.lower().endswith(XLSX_EXTS):
         return "xlsx・xlsm 以外の Excel 形式は、中身を書き換えられません。ファイルの削除はできます"
     if info.get("overflow"):
@@ -866,11 +889,6 @@ def file_only_reason(kind: str) -> str:
         return (
             "Access（.accdb・.mdb）は、書き換えの手段（ODBC ドライバ・Access 本体）が環境によって違うため、"
             "いまはファイルの削除だけに対応しています"
-        )
-    if "Oracle" in kind and "ダンプ" in kind:
-        return (
-            "Oracle のダンプ（exp・expdp）は、長さ・区画の作りが細かく、書き換えて読み込める形を保つのが難しいため、"
-            "いまはファイルの削除だけに対応しています（中身の対処は今後対応します）"
         )
     if "97-2003" in kind and ("doc" in kind or "ppt" in kind):
         what = "Word（doc）" if "Word" in kind else "PowerPoint（ppt）"
@@ -1579,6 +1597,8 @@ def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> 
         from .ooxml_text import split_pptx_sheet
 
         return f"{split_pptx_sheet(sheet)[0]} 段落 {key}"
+    if layout in ORACLE_LAYOUTS:
+        return f"{sheet}: {key} 行目"  # 表の中の行の通し番号（検査の「N行目」と同じ）
     if layout == "sqldump":
         from .formats.dbdump import ROW_KEY_SHIFT
 
@@ -1821,6 +1841,8 @@ def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[
         out.append(
             "-wal・-shm・-journal の付属ファイルが元のファイルのそばにあるときは、他のプログラムが開いている可能性があるため実行を断ります"
         )
+    elif layout in ORACLE_LAYOUTS:
+        out.extend(oracle_warnings(layout, method, sel, schema))
     else:
         out.append(
             "SQL のダンプを1行ずつ読みながら新しいファイルへ書きます。触らない行は元のバイト列のまま写し、文字コード・改行も元のままです"
@@ -1841,8 +1863,49 @@ def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[
                 "CREATE TABLE・COPY のブロック・INSERT 文・DROP TABLE・LOCK TABLES・索引・制約・権限・コメントなど、その表の文を取り除きます。"
                 "表のデータはすべて消えます（検出した行だけではありません）。ほかの表の外部キーがその表を参照している場合は、読み込み時に失敗します"
             )
+        out.append("pg_dump のカスタム形式・ディレクトリ形式は、いまはファイルの削除だけです（平文の SQL のみ対応）")
+    return out
+
+
+def oracle_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[str]:
+    """Oracle のダンプの下見の注意（値は含めない）。"""
+    out = [
+        "書き換えたダンプは、そのまま使わずに、読み込みの確かめ（旧 exp は imp、expdp は impdp。テスト用のデータベースで）をしてから、"
+        "元の場所へ戻してください。このアプリは Oracle へ読み込んで確かめることはしていません",
+    ]
+    if layout == "oracle_expdp":
         out.append(
-            "pg_dump のカスタム形式・ディレクトリ形式、Oracle のダンプは、いまはファイルの削除だけです（平文の SQL のみ対応）"
+            "表の行を詰め直して、行の合計・索引・ブロックの見出しの値を直し、残りをゼロで埋めます。ファイルの大きさは変わりません"
+            "（マスターテーブルが持つ各表の位置を保つため）。ダンプの大きさ分の書き出しをします"
+        )
+        out.append(
+            "圧縮された管理情報の区画（列の統計の最小値・最大値、DDL など）は書き換えられず、そこに元の値が残っていることがあります。"
+            "完全に消したいときは、EXCLUDE=STATISTICS を付けて取り直したダンプを使ってください"
+        )
+        if method == "delete_rows":
+            out.append(
+                "消した行の数は、マスターテーブルが持つ行数の記録とは合わなくなります（読み込みの結果の行数は実際の行数です）"
+            )
+    else:
+        if method == "delete_rows":
+            out.append("行のバイト列を写さずに取り除きます。表の定義・索引・制約はそのままです")
+        elif method == "dummy":
+            out.append(
+                "文字の値は同じ文字セットで書き直し、数値・日付の列は Oracle の内部形式で正しい値を作ります（数値は 0 または同じ桁数の数、"
+                "日付は 1900 年代の日付）。列の長さに収まらないダミーは、同じ文字数の「*」にします"
+            )
+        elif method == "delete_columns":
+            out.append(
+                "CREATE TABLE の列・INSERT の列名と :n・列の定義・各行のその列を取り除き、その列を使う索引・制約・列のコメントの文も取り除きます。"
+                "ほかの表の外部キーがその列を参照している場合は、読み込み時に失敗します"
+            )
+        elif method == "delete_table":
+            out.append(
+                "表の定義・データ・索引・制約・権限・統計の区画を取り除きます。表のデータはすべて消えます（検出した行だけではありません）。"
+                "ほかの表の外部キーがその表を参照している場合は、読み込み時に失敗します"
+            )
+        out.append(
+            "書き換えた表の統計（ANALSTATS）は取り除きます（列の最小値・最大値に元の値が入っているため。読み込みのあとに取り直せます）"
         )
     return out
 

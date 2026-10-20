@@ -1,4 +1,4 @@
-"""データベースへの対処（T2-b: SQLite・SQL のダンプ。Access・Oracle のダンプはファイルの削除だけ）の試験。
+"""データベースへの対処（T2-b: SQLite・SQL のダンプ。Access はファイルの削除だけ。Oracle のダンプは tests/test_remediate_oracle.py）の試験。
 
 守ること: T2-a と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
 - SQLite: 各方法のあと検査し直して消え、関係ない行・表・索引・ビュー・トリガーが元のまま・integrity_check が ok・消した値がファイルのバイト列に残らない
@@ -431,11 +431,11 @@ def test_sqlite_crash_during_commit_is_recovered(tmp_path, monkeypatch, trash, k
     assert not new_tmp_files(p.parent) and not list(p.parent.glob("*対処前*"))
 
 
-def test_access_and_oracle_only_allow_file_delete():
+def test_access_and_pg_custom_only_allow_file_delete():
+    """Access・pg_dump のカスタム形式は、ファイルの削除だけ（Oracle のダンプは T2-d で中身の対処に対応した。tests/test_remediate_oracle.py）。"""
     access = {"status": "scanned", "kind": "Access 2007以降（ACE・accdb）", "layout": ""}
-    oracle = {"status": "scanned", "kind": "Oracle ダンプ（exp/expdp）", "layout": ""}
     pgc = {"status": "scanned", "kind": "PostgreSQL ダンプ（custom 形式）", "layout": ""}
-    for info, word in ((access, "Access"), (oracle, "Oracle"), (pgc, "カスタム形式")):
+    for info, word in ((access, "Access"), (pgc, "カスタム形式")):
         for method in ("delete_rows", "delete_columns", "dummy", "delete_sheet"):
             reason = remediate.unsupported_reason(method, "x.bin", info)
             assert word in reason and "ファイルの削除" in reason, (info["kind"], method)

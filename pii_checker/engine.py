@@ -228,6 +228,8 @@ class Collector:
     # 表を読んでいる間だけ形式ごとの処理が入れる。None のときは通し番号をそのまま使う
     row_key: Callable[[int], int] | None = None
     pos_off: bool = False  # True の間は位置を集めない（書き換えられない表を読んでいるとき）
+    # 形式ごとの処理が足す構造の情報（Oracle ダンプの {"tables": {表名: {"columns": [列名...]}}} など）。位置の集め直しのときだけ使う
+    pos_info: dict = field(default_factory=dict)
     # 集めた位置（行, 列, 開始, 終了）を、別の鍵の位置の並び [(シート, 行, 列, 開始, 終了), ...] に置き換える関数。
     # docx の表のセルの文字の範囲を、その中の段落ごとの範囲にするために、表を読んでいる間だけ入れる
     pos_map: Callable[[int, int, int, int], list[tuple]] | None = None
@@ -358,7 +360,16 @@ class Collector:
 
     def _record_position(self, hit, rank: int, norm: str) -> None:
         """検出1件の構造の位置（行・列・値の開始と終了）を集める。rank 0 は「人の手がかり待ち」（finish で決める）。"""
-        if self.pos_layout.startswith("csv") or self.pos_layout in ("xlsx", "sqlite", "sqldump", "docx", "pptx"):
+        if self.pos_layout.startswith("csv") or self.pos_layout in (
+            "xlsx",
+            "sqlite",
+            "sqldump",
+            "docx",
+            "pptx",
+            "oracle_exp",
+            "oracle_expdp",
+        ):
+            # oracle_exp・oracle_expdp: シートは表の名前、行は表の中の行の通し番号（1 始まり）、列は列の番号（0 始まり）
             # docx・pptx: シートは部品名（表のセルは「部品名#tblN」）、行は段落の通し番号（表のセルは表の行）、列は図形・表の列
             if self.cell_pos is None or self.pos_off:
                 return
@@ -401,6 +412,7 @@ class Collector:
         self.item.positions = self.positions
         self.item.pos_layout = self.pos_layout
         self.item.pos_overflow = self.pos_overflow
+        self.item.pos_info = self.pos_info
 
     def _count_distinct(self) -> None:
         """種類×確度ごとの異なる値の数を item.distinct_counts に入れ、ファイル全体の集計先にも足す。

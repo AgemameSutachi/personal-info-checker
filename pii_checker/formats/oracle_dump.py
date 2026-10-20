@@ -96,6 +96,22 @@ class OracleScanResult:
     truncated: list[str] = field(default_factory=list)  # 途中で切れていた表
     chunks_high: int = 0  # 圧縮・暗号化されていそうな区画の数（表の外側のみ）
     chunks_total: int = 0
+    # 表の名前ごとに、何回目の区画か（同じ名前の区画を見分ける）
+    name_counts: dict[str, int] = field(default_factory=dict)
+
+
+# Data Pump が管理に使う表（マスターテーブル）。行は表の中身ではないので、対処の位置は集めない・書き換えない
+DP_MASTER_PREFIXES = ("SYS_EXPORT_", "SYS_IMPORT_", "SYS_SQL_FILE_")
+
+
+def unique_table_name(counts: dict[str, int], name: str) -> str:
+    """同じ名前の区画が複数あるとき（パーティション・複数のスキーマ）に、2つ目からは「名前 (2)」にして見分ける。
+
+    検査（位置の集め直し）と対処（書き換え）が、同じ順で同じ名前を付けるための共通の道具。
+    """
+    n = counts.get(name, 0) + 1
+    counts[name] = n
+    return name if n == 1 else f"{name} ({n})"
 
 
 # ------------------------------------------------------------------ 値の解き方
@@ -311,9 +327,11 @@ def _parse_exp_header(st: _Stream, head_codec: str):
         return None
     # 列の定義: 列数(2) + 列ごとに 型(2)・長さ(2)（文字型はさらに 文字セット ID(2)・形(2)）+ 終わりの 00 00
     rel = m.end() - st.pos
-    if not st.ensure(rel + 2 + 8 * ncols + 2):
-        raise _Bad("列の定義が途中で切れている")
+    # 列の定義は 1 列 4〜8 バイト。ファイルの終わりが近いときは足りなくてもよい（下で境目を確かめる）
+    st.ensure(rel + 2 + 8 * ncols + 2)
     buf = st.buf
+    if len(buf) - st.pos < rel + 2 + 4 * ncols + 2:
+        raise _Bad("列の定義が途中で切れている")
     p = st.pos + rel
     if int.from_bytes(buf[p : p + 2], "little") != ncols:
         raise _Bad("列数が INSERT 文と合わない")
@@ -321,11 +339,15 @@ def _parse_exp_header(st: _Stream, head_codec: str):
     descs: list[tuple] = []
     decoders = []
     for _ in range(ncols):
+        if p + 4 > len(buf):
+            raise _Bad("列の定義が途中で切れている")
         t = int.from_bytes(buf[p : p + 2], "little")
         ln = int.from_bytes(buf[p + 2 : p + 4], "little")
         p += 4
         csid = 0
         if t in EXP_CHAR_TYPES:
+            if p + 4 > len(buf):
+                raise _Bad("列の定義が途中で切れている")
             csid = int.from_bytes(buf[p : p + 2], "little")
             p += 4
         elif t not in EXP_PLAIN_TYPES:
@@ -390,6 +412,16 @@ class _DpTable:
     columns: list[str]
     types: list[int]
     decoders: list
+    # 列ごとの文字セット ID（対処が値を書き戻すときの文字コードを決めるのに使う）
+    csids: list[int] = field(default_factory=list)
+    # XML の <CHARSET> の名前から決めた文字コード（列の ID が表に無いときの代わり）
+    default_codec: str = "utf-8"
+
+
+def dp_xml_codec(xml: bytes) -> str:
+    """列定義の XML の先頭近くにある <CHARSET> の名前から、XML 全体を読む文字コードを決める。"""
+    mcs = RE_XML_CHARSET.search(xml[:4096].decode("ascii", "replace"))
+    return CHARSET_NAMES.get(mcs.group(1), "utf-8") if mcs else "utf-8"
 
 
 def _parse_dp_xml(xml: bytes, default_codec: str):
@@ -399,7 +431,7 @@ def _parse_dp_xml(xml: bytes, default_codec: str):
     if not m:
         return None
     name = html.unescape(m.group(1))
-    cols, types, decoders = [], [], []
+    cols, types, decoders, csids = [], [], [], []
     for item in RE_XML_COL.findall(text):
         fields = dict(re.findall(r"<([A-Z_]+)>([^<]*)</\1>", item))
         if "NAME" not in fields or "TYPE_NUM" not in fields:
@@ -411,10 +443,11 @@ def _parse_dp_xml(xml: bytes, default_codec: str):
             return None
         cols.append(html.unescape(fields["NAME"]))
         types.append(t)
+        csids.append(csid)
         decoders.append(_make_decoder(t, csid, default_codec if t in (TYPE_VARCHAR2, TYPE_CHAR) else None))
     if not cols:
         return None
-    return _DpTable(name, cols, types, decoders)
+    return _DpTable(name, cols, types, decoders, csids, default_codec)
 
 
 def _dp_row(buf: bytes, pos: int, n: int, tbl: _DpTable):
@@ -528,6 +561,7 @@ def _read_table(
         if parsed is None:
             return False
         tbl, header_len = parsed
+        tbl.name = unique_table_name(res.name_counts, tbl.name)
         st.pos += header_len
         decoders = tbl.decoders
         col_types = [d[0] for d in tbl.descs]
@@ -538,12 +572,10 @@ def _read_table(
                 return False
             end = st.buf.find(b"</ROWSET>", st.pos)
         xml = st.buf[st.pos : end + 9]
-        # 文字セット名は XML の先頭近くにある
-        mcs = RE_XML_CHARSET.search(xml[:4096].decode("ascii", "replace"))
-        codec = CHARSET_NAMES.get(mcs.group(1), "utf-8") if mcs else "utf-8"
-        tbl = _parse_dp_xml(xml, codec)
+        tbl = _parse_dp_xml(xml, dp_xml_codec(xml))
         if tbl is None:
             return False
+        tbl.name = unique_table_name(res.name_counts, tbl.name)
         st.pos = end + 9
         # XML の後ろは数バイトのゼロを挟んで行が始まる
         while True:
@@ -599,12 +631,24 @@ def _read_table(
             st.pos = pos  # 読めたところまで進める（残りは表の外側と同じく文字列の走査へ）
 
     name, columns = tbl.name, tbl.columns
-    col.add_records(
-        columns,
-        rows(),
-        lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
-        method="Oracle ダンプの行データ",
-    )
+    if getattr(col, "collect_positions", False):
+        # 対処のための位置: シート=表の名前・行=表の中の行の通し番号（1 始まり）・列=列の番号（0 始まり）。値は持たない。
+        # マスターテーブルは位置を集めない（Data Pump の管理用の表なので書き換えない）
+        col.pos_layout = "oracle_exp" if kind == "exp" else "oracle_expdp"
+        col.pos_sheet = name
+        col.row_key = None
+        col.pos_off = kind == "expdp" and name.upper().startswith(DP_MASTER_PREFIXES)
+        col.pos_info.setdefault("tables", {})[name] = {"columns": list(columns)}
+    try:
+        col.add_records(
+            columns,
+            rows(),
+            lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
+            method="Oracle ダンプの行データ",
+        )
+    finally:
+        if getattr(col, "collect_positions", False):
+            col.pos_off = False
     res.rows += state["rows"]
     res.row_bytes += state["bytes"]
     for i in sorted(bad_cols):

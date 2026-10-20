@@ -1219,7 +1219,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
           ${RM_CONF.map(([k, label]) => `<label class="check"><input type="checkbox" name="rm-conf" value="${k}"${k !== "low" ? " checked" : ""}> ${label}</label>`).join("")}
           <span class="small muted">低は要確認の検出です。含めるかを選べます。</span>
         </fieldset>
-        ${a.sheets.length ? `<fieldset class="rm-set"><legend>対象にする${a.layout === "sqlite" || a.layout === "sqldump" ? "表" : "シート"}</legend>${a.sheets.map((s) => `<label class="check"><input type="checkbox" name="rm-sheet" value="${esc(s)}" checked> ${esc(s)}</label>`).join("")}</fieldset>` : ""}
+        ${a.sheets.length ? `<fieldset class="rm-set"><legend>対象にする${["sqlite", "sqldump", "oracle_exp", "oracle_expdp"].includes(a.layout) ? "表" : "シート"}</legend>${a.sheets.map((s) => `<label class="check"><input type="checkbox" name="rm-sheet" value="${esc(s)}" checked> ${esc(s)}</label>`).join("")}</fieldset>` : ""}
         <fieldset class="rm-set hidden" id="rm-dummy-set"><legend>ダミーの作り方</legend>
           ${Object.entries(a.dummy_modes).map(([k, label], i) => `<label class="check"><input type="radio" name="rm-dummy" value="${esc(k)}"${i === 0 ? " checked" : ""}> ${esc(label)}</label>`).join("")}
         </fieldset>
@@ -1255,7 +1255,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
       if (a.sheets.length) body.sheets = checks("rm-sheet");
       if (method === "dummy") body.dummy_mode = checks("rm-dummy")[0];
       if (!body.types.length || !body.confidences.length || (body.sheets && !body.sheets.length)) {
-        $("#rm-msg").textContent = `種類・確度・${a.layout === "sqlite" || a.layout === "sqldump" ? "表" : "シート"}を1つ以上選んでください`;
+        $("#rm-msg").textContent = `種類・確度・${["sqlite", "sqldump", "oracle_exp", "oracle_expdp"].includes(a.layout) ? "表" : "シート"}を1つ以上選んでください`;
         return;
       }
     }

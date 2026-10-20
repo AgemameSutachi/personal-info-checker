@@ -1107,11 +1107,13 @@ def _attachment_bytes(i: int) -> bytes:
     return random.Random(i).randbytes(6000)
 
 
-def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409") -> None:
+def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409", files_of=None) -> None:
     """添付ファイル型の列を持つ表 people（id・氏名・電話・添付）を DAO で作る。rows は (id, 氏名, 電話)。
 
     langid は新しいデータベースの並び順（0x0409 は「一般」。0x0411 は「日本語」で、Jackcess はその文字の索引を書けない）。
+    files_of は id →（ファイル名, 中身）。省くと photo{id}.jpg（圧縮の効かない中身）。
     """
+    files_of = files_of or (lambda i: (f"photo{i}.jpg", _attachment_bytes(i)))
     eng = _dao()
     files = tmp / "att_src"
     files.mkdir(exist_ok=True)
@@ -1123,8 +1125,9 @@ def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409") -> 
         td.Fields.Append(td.CreateField("添付", 101))  # dbAttachment
         rs = db.OpenRecordset("people")
         for i, name, phone in rows:
-            f = files / f"photo{i}.jpg"
-            f.write_bytes(_attachment_bytes(i))
+            fname, content = files_of(i)
+            f = files / fname
+            f.write_bytes(content)
             rs.AddNew()
             rs.Fields("id").Value = i
             rs.Fields("氏名").Value = name
@@ -1169,6 +1172,32 @@ def read_attachments(path: Path, tmp: Path) -> dict[int, bytes]:
     copy.unlink()
     shutil.rmtree(out_dir)
     return got
+
+
+@pytest.mark.parametrize("reader", ["odbc", "jackcess"])
+def test_scan_reads_files_in_attachment_columns(reader, tmp_path, monkeypatch):
+    """添付ファイル型の列に入ったファイルの中身も検査する（表の値として見えるのはファイル名だけ）。
+
+    txt の添付は Access が圧縮して入れるので、ファイル全体の生データ走査では見えない（ここが拾えるのは取り出したときだけ）。
+    """
+    from pii_checker.formats import database
+
+    if reader == "odbc" and not available("ace"):
+        pytest.skip("ACE が要る")
+    if reader == "jackcess" and not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    meibo = ("氏名,電話,メール\n" + "山田 太郎,090-1234-5678,taro.yamada@example.com\n" * 30).encode("utf-8")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "x", "")], tmp_path, files_of=lambda i: ("名簿.txt", meibo))
+    assert b"taro.yamada" not in p.read_bytes(), "前提: 添付は圧縮されていて、生データには文字として出ない"
+    monkeypatch.setattr(database, "FORCED_READERS", [reader])
+    items = _scan_items(p, tmp_path)
+    assert items[0].status.name != "UNCHECKABLE", items[0].reason
+    nested = [it for it in items if "の添付「名簿.txt」" in it.path]
+    assert nested, [it.path for it in items]
+    kinds = {f.pii_type for it in nested for f in it.findings}
+    assert {"email", "phone"} <= kinds, kinds
+    assert any("添付ファイル型の列「添付」: ファイル 1 件" in n for n in items[0].notes), items[0].notes
 
 
 def test_content_digest_covers_attachment_contents(tmp_path):

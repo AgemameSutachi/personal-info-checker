@@ -40,6 +40,7 @@ import java.util.TreeSet;
  *   readall table max [digest] … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
  *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す。digest を付けると、バイナリは中身の SHA-256（"h"+16進）、
  *                            読めなかった値は "e"+例外の名前で出す（塗りつぶしの前後で中身を比べる指紋用）
+ *   attachments table      … 添付ファイル型の列のファイルを流す。att\tord\t列名\tファイル名\t中身（展開済みの Base64）を1つずつ、end
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
@@ -261,6 +262,37 @@ public class AccessRewrite {
                             sb.append('\t').append(digest ? digestCell(v) : cell(v));
                         }
                         out.println(sb);
+                    }
+                    out.println("end");
+                } else if (cmd.equals("attachments")) {
+                    Table t = db.getTable(unb64(f[1]));
+                    List<Column> attCols = new ArrayList<>();
+                    for (Column c : t.getColumns()) {
+                        if (c.getType() == DataType.COMPLEX_TYPE) {
+                            attCols.add(c);
+                        }
+                    }
+                    Cursor cur = t.getDefaultCursor();
+                    cur.reset();
+                    long ord = 0;
+                    while (!attCols.isEmpty() && cur.moveToNextRow()) {
+                        ord++;
+                        for (Column c : attCols) {
+                            Object v = cur.getCurrentRowValue(c);
+                            if (!(v instanceof ComplexValueForeignKey)) {
+                                continue;
+                            }
+                            ComplexValueForeignKey fk = (ComplexValueForeignKey) v;
+                            if (fk.getComplexType() != com.healthmarketscience.jackcess.complex.ComplexDataType.ATTACHMENT) {
+                                continue;
+                            }
+                            for (Attachment a : fk.getAttachments()) {
+                                byte[] data = a.getFileData();
+                                String name = a.getFileName() == null ? "" : a.getFileName();
+                                out.println("att\t" + ord + "\t" + b64(c.getName()) + "\t" + b64(name) + "\t"
+                                        + Base64.getEncoder().encodeToString(data == null ? new byte[0] : data));
+                            }
+                        }
                     }
                     out.println("end");
                 } else if (cmd.equals("create")) {

@@ -198,6 +198,55 @@ def _dump_odbc(ctx: ScanContext, conn, col: Collector, item: ItemResult, depth: 
             method="表のレコード",
         )
         item.notes.append(f"表「{name}」{n}行")
+        memo_like = [d[0] for d in c2.description if d[1] is str and (d[3] or 0) >= MEMO_SIZE]
+        c2.close()
+        _scan_odbc_attachments(ctx, conn, name, memo_like, item, depth, display)
+
+
+MEMO_SIZE = 1073741823  # ODBC がメモ型（と、メモに見える添付ファイル型・複数の値の列）に返す長さ
+
+
+def _scan_odbc_attachments(
+    ctx: ScanContext, conn, table: str, memo_like: list[str], item: ItemResult, depth: int, display: str
+) -> None:
+    """添付ファイル型の列のファイルを取り出して検査する（ODBC の SELECT * では、添付の列はファイル名しか見えない）。
+
+    添付の列は「表.列.FileName」で SELECT できるかで見分ける（普通のメモの列は断られる）。
+    """
+    for cname in memo_like:
+        cur = conn.cursor()
+        try:
+            try:
+                cur.execute(f"SELECT [{table}].[{cname}].[FileName] FROM [{table}] WHERE 1=0")
+            except Exception:  # noqa: BLE001  添付の列ではない
+                continue
+            try:
+                cur.execute(f"SELECT [{table}].[{cname}].[FileName], [{table}].[{cname}].[FileData] FROM [{table}]")
+            except Exception as e:  # noqa: BLE001
+                _failed_table(ctx, display, table, f"添付ファイル型の列「{cname}」を読めなかった: {e}", depth)
+                continue
+            k = 0
+            while True:
+                batch = cur.fetchmany(50)
+                if not batch:
+                    break
+                for fname, data in batch:
+                    if data is None:
+                        continue
+                    k += 1
+                    _scan_attachment(
+                        ctx, bytes(data), f"{display}!表「{table}」列「{cname}」の添付「{fname}」", depth, fname
+                    )
+            item.notes.append(f"表「{table}」の添付ファイル型の列「{cname}」: ファイル {k} 件")
+        finally:
+            cur.close()
+
+
+def _scan_attachment(ctx: ScanContext, data: bytes, display: str, depth: int, name: str | None) -> None:
+    """ODBC が返す添付の中身（先頭に見出し: 4 バイトの見出しの長さ・形式の番号・拡張子）を外して、中のファイルを検査する。"""
+    hlen = int.from_bytes(data[:4], "little") if len(data) >= 4 else 0
+    payload = data[hlen:] if 8 <= hlen <= min(len(data), 1024) else data
+    ctx.scan_nested(display, data=payload, depth=depth + 1, name_hint=name or "attachment.bin")
 
 
 def _failed_table(
@@ -409,7 +458,9 @@ def _read_access_jackcess(
         for name in sorted(names):
             if name.startswith(("MSys", "~")):
                 continue
-            columns = [ra._unb64(p[1]) for p in call("columns", ra._b64(name)) if p[0] == "col"]
+            col_rows = [p for p in call("columns", ra._b64(name)) if p[0] == "col"]
+            columns = [ra._unb64(p[1]) for p in col_rows]
+            has_complex = any(len(p) > 2 and p[2] == "other" for p in col_rows)  # 添付ファイル型などの複合列は other
             n_tables += 1
             col.pos_sheet = name
             if col.collect_positions:
@@ -435,6 +486,21 @@ def _read_access_jackcess(
             # 途中で読むのをやめても、残りの行を読み捨てる（残すと次の命令の返事として読まれ、やり取りがずれる）
             for _ in stream:
                 pass
+            if has_complex:
+                counts: dict[str, int] = {}
+                for p in call("attachments", ra._b64(name)):
+                    if p[0] != "att" or len(p) < 5:
+                        continue
+                    cname, fname = ra._unb64(p[2]), ra._unb64(p[3])
+                    counts[cname] = counts.get(cname, 0) + 1
+                    ctx.scan_nested(
+                        f"{display}!表「{name}」列「{cname}」の添付「{fname}」",
+                        data=base64.b64decode(p[4]),
+                        depth=depth + 1,
+                        name_hint=fname or "attachment.bin",
+                    )
+                for cname, k in counts.items():
+                    item.notes.append(f"表「{name}」の添付ファイル型の列「{cname}」: ファイル {k} 件")
         if n_tables == 0:
             raise RuntimeError("表を1つも読めなかった")
     except BaseException:
@@ -495,6 +561,16 @@ def _read_access_parser(ctx: ScanContext, path: str, col: Collector, item: ItemR
     return "access_parser（純 Python）"
 
 
+def _is_ace_format(path: str) -> bool:
+    """.accdb（ACE 形式。添付ファイル型の列を持てる）か。"""
+    from .. import remedy_access as ra
+
+    try:
+        return ra.access_format(path) == "ace"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     head = blob.head(0x80)
     version = head[0x14] if len(head) > 0x14 else -1
@@ -523,6 +599,11 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             continue
         try:
             used = fn()
+            if key in ("helper32", "parser") and _is_ace_format(path):
+                item.notes.append(
+                    "この読み方では、添付ファイル型の列の中のファイルは取り出していない"
+                    "（列があれば、その中身は生データ走査で文字として見えた分だけ）"
+                )
             break
         except NeedPassword:
             need_pw = True

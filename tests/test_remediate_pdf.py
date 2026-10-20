@@ -1,6 +1,6 @@
-"""PDF への対処（T2-c: 黒塗り・ページの削除）の試験。
+"""PDF への対処（黒塗り・ページの削除）の試験。
 
-守ること: T2-a と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
+守ること: ほかの形式と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
 黒塗りのあと、検査し直して消え・ページのテキストの抽出にも生のバイト列（全オブジェクトを展開して）にも値が無く・関係ない文字は残り・
 メタデータ（作成者・題・XMP）・注釈・しおり・埋め込みファイルの値も消え・増分保存にならず・暗号化された PDF は同じパスワードで暗号化し直す。
 検体はすべて pytest の tmp_path に作る。本物のごみ箱へは送らない（送る関数を差し替える）。画面・Acrobat は開かない。
@@ -164,6 +164,7 @@ def test_pdf_redact_removes_text_everywhere_and_keeps_the_rest(tmp_path, trash):
     a = analyze(svc, job, p)
     assert a.info["methods"]["redact"]["available"] and a.info["methods"]["delete_pages"]["available"]
     assert "delete_rows" not in a.info["methods"] and "dummy" not in a.info["methods"] and a.view()["sheets"] == []
+    assert a.view()["sheet_word"] == "シート"
     pv = svc.preview(job, str(p), {"method": "redact", "confidences": ALL_RANKS})
     assert "文字そのもの" in pv["summary"] and any("元に戻せません" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="redact", confidences=ALL_RANKS)

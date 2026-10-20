@@ -1,4 +1,4 @@
-"""Access（.accdb・.mdb）への対処（T2-e）の試験。
+"""Access（.accdb・.mdb）への対処の試験。
 
 使える手段ごとに（無い手段の試験は skip）: ACE（64bit の ODBC）・Jet（Windows 標準の 32bit・同梱の 32bit Python の補助）・
 Jackcess（Java。tools/jackcess の補助を試験の中で javac でビルドして使う）。守ること:
@@ -778,6 +778,7 @@ def test_no_strategy_only_file_deletion(tmp_path, monkeypatch):
     svc, store, job = make_service(tmp_path, [p])
     monkeypatch.setattr(ra, "FORCED_STRATEGIES", [])  # 使える手段が1つも無い状況
     a = analyze(svc, job, p)
+    assert a.view()["sheet_word"] == "表"  # 絞り込みの欄は「対象にする表」
     methods = a.info["methods"]
     assert methods["delete_file"]["available"]
     for m in ("delete_rows", "delete_columns", "dummy", "delete_table"):
@@ -1083,6 +1084,265 @@ def test_content_digest_covers_binary_columns(tmp_path):
         conn.close()
     after = ra.content_digest(str(p), "ace")
     assert before is not None and after is not None and before != after
+
+
+def _dao():
+    """DAO（ACE）の DBEngine。pywin32 か ACE が無ければ skip。"""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        pytest.skip("pywin32 が無い")
+    pythoncom.CoInitialize()
+    try:
+        return win32com.client.Dispatch("DAO.DBEngine.120")
+    except Exception:  # noqa: BLE001  ACE が入っていない
+        pytest.skip("DAO（ACE）が使えない")
+
+
+def _attachment_bytes(i: int) -> bytes:
+    """行ごとに違う、圧縮の効かない添付の中身（jpg として入れると Access は圧縮せずに長い値のページへ置く）。"""
+    import random
+
+    return random.Random(i).randbytes(6000)
+
+
+def build_attachment_db(path: Path, rows, tmp: Path, langid: str = "0x0409", files_of=None) -> None:
+    """添付ファイル型の列を持つ表 people（id・氏名・電話・添付）を DAO で作る。rows は (id, 氏名, 電話)。
+
+    langid は新しいデータベースの並び順（0x0409 は「一般」。0x0411 は「日本語」で、Jackcess はその文字の索引を書けない）。
+    files_of は id →（ファイル名, 中身）。省くと photo{id}.jpg（圧縮の効かない中身）。
+    """
+    files_of = files_of or (lambda i: (f"photo{i}.jpg", _attachment_bytes(i)))
+    eng = _dao()
+    files = tmp / "att_src"
+    files.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = eng.CreateDatabase(str(path), f";LANGID={langid};CP=1252;COUNTRY=0")
+    try:
+        db.Execute("CREATE TABLE people (id LONG, [氏名] TEXT(50), [電話] TEXT(50))")
+        td = db.TableDefs("people")
+        td.Fields.Append(td.CreateField("メモ", 12))  # 普通のメモの列（複合列と見分けられることの確かめ）
+        td.Fields.Append(td.CreateField("添付", 101))  # dbAttachment
+        rs = db.OpenRecordset("people")
+        for i, name, phone in rows:
+            fname, content = files_of(i)
+            f = files / fname
+            f.write_bytes(content)
+            rs.AddNew()
+            rs.Fields("id").Value = i
+            rs.Fields("氏名").Value = name or None
+            rs.Fields("電話").Value = phone or None
+            rs.Fields("メモ").Value = f"連絡事項{i} " + "あ" * 300
+            child = rs.Fields("添付").Value
+            child.AddNew()
+            child.Fields("FileData").LoadFromFile(str(f))
+            child.Update()
+            child.Close()
+            rs.Update()
+        rs.Close()
+    finally:
+        db.Close()
+    shutil.rmtree(files)
+
+
+def read_attachments(path: Path, tmp: Path) -> dict[int, bytes]:
+    """id → 添付の中身（DAO で写しを開いて書き出す。元にロックファイルを作らない）。"""
+    eng = _dao()
+    copy = tmp / "att_read.accdb"
+    shutil.copyfile(path, copy)
+    out_dir = tmp / "att_out"
+    out_dir.mkdir(exist_ok=True)
+    got = {}
+    db = eng.OpenDatabase(str(copy), False, True)
+    try:
+        rs = db.OpenRecordset("people")
+        while not rs.EOF:
+            i = int(rs.Fields("id").Value)
+            child = rs.Fields("添付").Value
+            while not child.EOF:
+                name = child.Fields("FileName").Value
+                child.Fields("FileData").SaveToFile(str(out_dir))
+                got[i] = (out_dir / name).read_bytes()
+                (out_dir / name).unlink()
+                child.MoveNext()
+            child.Close()
+            rs.MoveNext()
+        rs.Close()
+    finally:
+        db.Close()
+    copy.unlink()
+    shutil.rmtree(out_dir)
+    return got
+
+
+@pytest.mark.parametrize("reader", ["odbc", "jackcess"])
+def test_scan_reads_files_in_attachment_columns(reader, tmp_path, monkeypatch):
+    """添付ファイル型の列に入ったファイルの中身も検査する（表の値として見えるのはファイル名だけ）。
+
+    txt の添付は Access が圧縮して入れるので、ファイル全体の生データ走査では見えない（ここが拾えるのは取り出したときだけ）。
+    """
+    from pii_checker.formats import database
+
+    if reader == "odbc" and not available("ace"):
+        pytest.skip("ACE が要る")
+    if reader == "jackcess" and not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    meibo = ("氏名,電話,メール\n" + "山田 太郎,090-1234-5678,taro.yamada@example.com\n" * 30).encode("utf-8")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "x", "")], tmp_path, files_of=lambda i: ("名簿.txt", meibo))
+    assert b"taro.yamada" not in p.read_bytes(), "前提: 添付は圧縮されていて、生データには文字として出ない"
+    monkeypatch.setattr(database, "FORCED_READERS", [reader])
+    items = _scan_items(p, tmp_path)
+    assert items[0].status.name != "UNCHECKABLE", items[0].reason
+    nested = [it for it in items if "の添付「名簿.txt」" in it.path]
+    assert nested, [it.path for it in items]
+    kinds = {f.pii_type for it in nested for f in it.findings}
+    assert {"email", "phone"} <= kinds, kinds
+    assert any("添付ファイル型の列「添付」: ファイル 1 件" in n for n in items[0].notes), items[0].notes
+
+
+def test_content_digest_covers_attachment_contents(tmp_path):
+    """指紋に添付ファイル型の列の中身も入る（行に入っているのは隠れた表への番号だけなので、番号ではなく中身を読む）。"""
+    if not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    p = tmp_path / "att.accdb"
+    build_attachment_db(p, [(1, "山田 太郎", "090-1234-5678")], tmp_path)
+    before = ra.content_digest(str(p), "ace")
+    eng = _dao()
+    db = eng.OpenDatabase(str(p))
+    try:
+        rs = db.OpenRecordset("people")
+        rs.Edit()
+        child = rs.Fields("添付").Value
+        child.Delete()
+        child.AddNew()
+        swap = tmp_path / "swap" / "photo1.jpg"  # 同じ名前・同じ長さで中身だけ違う
+        swap.parent.mkdir()
+        swap.write_bytes(bytes(len(_attachment_bytes(1))))
+        child.Fields("FileData").LoadFromFile(str(swap))
+        child.Update()
+        child.Close()
+        rs.Update()
+        rs.Close()
+    finally:
+        db.Close()
+    assert read_attachments(p, tmp_path)[1] == bytes(len(_attachment_bytes(1))), "陽性対照: 添付は差し替わった"
+    after = ra.content_digest(str(p), "ace")
+    assert before is not None and after is not None and before != after
+
+
+@pytest.mark.parametrize("strategy", ["ace", "jackcess"])
+def test_delete_rows_removes_attachments_of_deleted_rows_and_keeps_the_rest(strategy, tmp_path, monkeypatch, trash):
+    """行を消すと、その行の添付ファイルの中身もファイルから消える。残す行の添付は元のまま（Jackcess は指紋の門も通る）。
+
+    Access も Jackcess も、行を消しても隠れた表の添付を消さない（Access は最適化しても残る）ので、行より先に中身を消す。
+    """
+    if not available(strategy):
+        pytest.skip(f"{strategy} が使えない環境")
+    rows = [(i, f"山田 太郎{i}", f"090-1234-{i:04d}" if i % 2 == 0 else "") for i in range(1, 31)]
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, rows, tmp_path)
+    before = read_attachments(p, tmp_path)
+    assert sorted(before) == list(range(1, 31))
+    raw = p.read_bytes()
+    assert all(before[i][1000:1064] in raw for i in before), "陽性対照: 添付の中身はファイルのバイト列で見つかる"
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", [strategy])
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_rows", types=["phone"], confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    after = read_attachments(p, tmp_path)
+    kept = [i for i, _n, phone in rows if not phone]
+    assert sorted(after) == kept
+    assert all(after[i] == before[i] for i in kept)
+    raw = p.read_bytes()
+    left = [i for i, _n, phone in rows if phone and before[i][1000:1064] in raw]
+    assert not left, f"消した行の添付の中身がファイルに残っている: {left}"
+
+
+@pytest.mark.parametrize("strategy", ["ace", "jackcess"])
+def test_delete_table_removes_attachment_contents(strategy, tmp_path, monkeypatch, trash):
+    """表の削除（ACE は DROP TABLE、Jackcess は全行の削除）でも、添付の中身はファイルに残らない。"""
+    if not available(strategy):
+        pytest.skip(f"{strategy} が使えない環境")
+    rows = [(i, f"山田 太郎{i}", f"090-1234-{i:04d}") for i in range(1, 7)]
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, rows, tmp_path)
+    assert all(_attachment_bytes(i)[1000:1064] in p.read_bytes() for i, _n, _p in rows), "陽性対照"
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", [strategy])
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_table", types=["phone"], confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    raw = p.read_bytes()
+    assert not [i for i, _n, _p in rows if _attachment_bytes(i)[1000:1064] in raw]
+
+
+def test_only_attachment_findings_explain_why_rows_cannot_be_chosen(tmp_path, monkeypatch, trash):
+    """検出が添付の中にしか無いときは、行の削除を選んでも「検出がありません」だけで断らず、理由とファイルの削除を示す。"""
+    if not available("ace"):
+        pytest.skip("ACE が要る")
+    meibo = ("氏名,電話\n" + "山田 太郎,090-1234-5678\n" * 10).encode("utf-8")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "", "")], tmp_path, files_of=lambda i: ("名簿.txt", meibo))
+    svc, store, job = make_service(tmp_path, [p])
+    analyze(svc, job, p)
+    with pytest.raises(RemedyError, match="位置を持たない検出.*Access の添付ファイル.*ファイルの削除を選んでください"):
+        svc.preview(job, str(p), {"method": "delete_rows", "types": ["phone"], "confidences": ALL_RANKS})
+
+
+def test_too_large_attachment_is_left_as_uncheckable(tmp_path, monkeypatch):
+    """大きすぎる添付は取り出さず、黙って捨てずに検査不能の項目として残す（ODBC の経路。上限を小さくして試す）。"""
+    from pii_checker.formats import database
+
+    if not available("ace"):
+        pytest.skip("ACE が要る")
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, [(1, "x", "")], tmp_path)
+    monkeypatch.setattr(database, "FORCED_READERS", ["odbc"])
+    monkeypatch.setattr(database, "ATTACHMENT_LIMIT", 1000)
+    items = _scan_items(p, tmp_path)
+    big = [it for it in items if "の添付「photo1.jpg」" in it.path]
+    assert big and big[0].status.name == "UNCHECKABLE" and "大きすぎる" in big[0].reason, [
+        (it.path, it.status) for it in items
+    ]
+
+
+def test_ace_drop_column_removes_attachment_contents(tmp_path):
+    """添付ファイル型の列を消すと、全行の添付の中身もファイルから消える（Access は列を消しても最適化しても中身を残す）。"""
+    if not available("ace"):
+        pytest.skip("ACE が要る")
+    rows = [(i, f"山田 太郎{i}", "") for i in range(1, 6)]
+    src = tmp_path / "src" / "att.accdb"
+    build_attachment_db(src, rows, tmp_path)
+    work = tmp_path / "work.accdb"
+    shutil.copyfile(src, work)
+    sess = ra.SqlSession(ra.OdbcBackend(str(work), ra.ace_odbc_driver()))
+    try:
+        cols = sess.columns("people")
+        assert sess.complex_columns("people", cols) == [("添付", "FileData")]  # 普通の列は複合列と見なさない
+        sess.drop_columns("people", ["添付"])
+    finally:
+        sess.close()
+    out = tmp_path / "compacted.accdb"
+    ra.compact_database(str(work), str(out), "ace", "ace")
+    raw = out.read_bytes()
+    assert not [i for i, _n, _p in rows if _attachment_bytes(i)[1000:1064] in raw]
+    assert all(_attachment_bytes(i)[1000:1064] in src.read_bytes() for i, _n, _p in rows), "陽性対照"
+
+
+def test_jackcess_refuses_attachment_table_with_japanese_sort_order(tmp_path, monkeypatch, trash):
+    """並び順が「日本語」のファイルは、Jackcess が添付の隠れた表の索引を書けない。分かる理由を添えて断り、元は変えない。"""
+    if not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    rows = [(i, f"山田 太郎{i}", f"090-1234-{i:04d}" if i % 2 == 0 else "") for i in range(1, 7)]
+    p = tmp_path / "src" / "att.accdb"
+    build_attachment_db(p, rows, tmp_path, langid="0x0411")
+    original = p.read_bytes()
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_rows", types=["phone"], confidences=ALL_RANKS)
+    assert r["state"] == "error" and "並び順" in r["message"], r
+    assert p.read_bytes() == original
 
 
 def test_content_digest_that_cannot_read_refuses_the_scrub(tmp_path, monkeypatch, trash):

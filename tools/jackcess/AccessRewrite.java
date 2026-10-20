@@ -6,6 +6,10 @@ import com.healthmarketscience.jackcess.Database;
 import com.healthmarketscience.jackcess.DatabaseBuilder;
 import com.healthmarketscience.jackcess.Table;
 import com.healthmarketscience.jackcess.TableBuilder;
+import com.healthmarketscience.jackcess.complex.Attachment;
+import com.healthmarketscience.jackcess.complex.ComplexValueForeignKey;
+import com.healthmarketscience.jackcess.complex.SingleValue;
+import com.healthmarketscience.jackcess.complex.Version;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -36,6 +40,8 @@ import java.util.TreeSet;
  *   readall table max [digest] … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
  *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す。digest を付けると、バイナリは中身の SHA-256（"h"+16進）、
  *                            読めなかった値は "e"+例外の名前で出す（塗りつぶしの前後で中身を比べる指紋用）
+ *   attachments table      … 添付ファイル型の列のファイルを流す。att\tord\t列名\tファイル名\t中身（展開済みの Base64）を1つずつ、end。
+ *                            64MB を超える（載らない）ものは big\tord\t列名\tファイル名\t大きさ（載らなければ -1）
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
@@ -52,6 +58,8 @@ import java.util.TreeSet;
  */
 public class AccessRewrite {
     private static Database db;
+    /** attachments で中身を送る添付の大きさの上限（これを超えるものは big の行で大きさだけ知らせる。ヒープは -Xmx768m） */
+    private static final int ATTACHMENT_LIMIT = 64 * 1024 * 1024;
     private static final PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
 
     private static String b64(String s) {
@@ -114,15 +122,69 @@ public class AccessRewrite {
         return "x";
     }
 
-    /** 中身の指紋を取るための値の書き出し。cell と同じで、バイナリ（OLE・添付など）だけは中身の SHA-256 を出す。 */
+    /**
+     * 中身の指紋を取るための値の書き出し。cell と同じで、バイナリ（OLE など）だけは中身の SHA-256 を出す。
+     * 複合列（添付ファイル・複数の値・メモの版の履歴）の値は、行に入っているのが別の隠れた表への番号だけなので、
+     * 番号ではなく、その番号が指す中身（添付ならファイル名・種類・ファイルの中身）を読んで SHA-256 にする
+     * （番号だけだと、塗りつぶしで添付の中身を壊しても指紋が変わらない）。
+     */
     private static String digestCell(Object v) throws Exception {
+        if (v instanceof ComplexValueForeignKey) {
+            return "c" + hex(complexDigest((ComplexValueForeignKey) v));
+        }
         String c = cell(v);
         if (!c.equals("x")) {
             return c;
         }
         byte[] raw = v instanceof byte[] ? (byte[]) v : String.valueOf(v).getBytes(StandardCharsets.UTF_8);
-        byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(raw);
-        StringBuilder sb = new StringBuilder("h");
+        return "h" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(raw));
+    }
+
+    private static byte[] complexDigest(ComplexValueForeignKey fk) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        md.update((fk.getComplexType().name() + "\n").getBytes(StandardCharsets.UTF_8));
+        switch (fk.getComplexType()) {
+            case ATTACHMENT:
+                for (Attachment a : fk.getAttachments()) {
+                    md.update(("a\t" + a.getFileName() + "\t" + a.getFileType() + "\n").getBytes(StandardCharsets.UTF_8));
+                    byte[] data = a.getFileData();
+                    md.update(data == null ? new byte[0] : java.security.MessageDigest.getInstance("SHA-256").digest(data));
+                }
+                break;
+            case MULTI_VALUE:
+                for (SingleValue s : fk.getMultiValues()) {
+                    md.update(("m\t" + digestCell(s.get()) + "\n").getBytes(StandardCharsets.UTF_8));
+                }
+                break;
+            case VERSION_HISTORY:
+                for (Version ver : fk.getVersions()) {
+                    md.update(("v\t" + digestCell(ver.getValue()) + "\t" + ver.getModifiedDateObject() + "\n").getBytes(StandardCharsets.UTF_8));
+                }
+                break;
+            default:
+                md.update(("u\t" + fk.intValue() + "\n").getBytes(StandardCharsets.UTF_8));
+        }
+        return md.digest();
+    }
+
+    /**
+     * いまの行の複合列（添付ファイル・複数の値・版の履歴）の中身を消す。Jackcess は行を消しても、隠れた表に入っている
+     * 複合列の中身を消さないので、行を消す前・列を空にする前にこれを呼ぶ（呼ばないと、消した行の添付がファイルに残る）。
+     */
+    private static void deleteComplexValues(Cursor cur, Iterable<? extends Column> cols) throws Exception {
+        for (Column c : cols) {
+            if (c.getType() != DataType.COMPLEX_TYPE) {
+                continue;
+            }
+            Object v = cur.getCurrentRowValue(c);
+            if (v instanceof ComplexValueForeignKey) {
+                ((ComplexValueForeignKey) v).deleteAllValues();
+            }
+        }
+    }
+
+    private static String hex(byte[] h) {
+        StringBuilder sb = new StringBuilder();
         for (byte b : h) {
             sb.append(String.format("%02x", b));
         }
@@ -203,6 +265,50 @@ public class AccessRewrite {
                             sb.append('\t').append(digest ? digestCell(v) : cell(v));
                         }
                         out.println(sb);
+                    }
+                    out.println("end");
+                } else if (cmd.equals("attachments")) {
+                    Table t = db.getTable(unb64(f[1]));
+                    List<Column> attCols = new ArrayList<>();
+                    for (Column c : t.getColumns()) {
+                        if (c.getType() == DataType.COMPLEX_TYPE) {
+                            attCols.add(c);
+                        }
+                    }
+                    Cursor cur = t.getDefaultCursor();
+                    cur.reset();
+                    long ord = 0;
+                    while (!attCols.isEmpty() && cur.moveToNextRow()) {
+                        ord++;
+                        for (Column c : attCols) {
+                            Object v = cur.getCurrentRowValue(c);
+                            if (!(v instanceof ComplexValueForeignKey)) {
+                                continue;
+                            }
+                            ComplexValueForeignKey fk = (ComplexValueForeignKey) v;
+                            if (fk.getComplexType() != com.healthmarketscience.jackcess.complex.ComplexDataType.ATTACHMENT) {
+                                continue;
+                            }
+                            for (Attachment a : fk.getAttachments()) {
+                                String name = a.getFileName() == null ? "" : a.getFileName();
+                                String head = ord + "\t" + b64(c.getName()) + "\t" + b64(name);
+                                byte[] data;
+                                try {
+                                    data = a.getFileData();
+                                } catch (OutOfMemoryError e) {
+                                    out.println("big\t" + head + "\t-1");  // ヒープに載らない大きさ
+                                    continue;
+                                }
+                                if (data == null) {
+                                    data = new byte[0];
+                                }
+                                if (data.length > ATTACHMENT_LIMIT) {
+                                    out.println("big\t" + head + "\t" + data.length);
+                                    continue;
+                                }
+                                out.println("att\t" + head + "\t" + Base64.getEncoder().encodeToString(data));
+                            }
+                        }
                     }
                     out.println("end");
                 } else if (cmd.equals("create")) {
@@ -286,6 +392,7 @@ public class AccessRewrite {
                     while (ord < last && cur.moveToNextRow()) {
                         ord++;
                         if (want.contains(ord)) {
+                            deleteComplexValues(cur, t.getColumns());
                             cur.deleteCurrentRow();
                             n++;
                         }
@@ -329,7 +436,11 @@ public class AccessRewrite {
                     int n = 0;
                     while (cur.moveToNextRow()) {
                         for (int i : idxs) {
-                            cur.setCurrentRowValue(cols.get(i), null);
+                            if (cols.get(i).getType() == DataType.COMPLEX_TYPE) {
+                                deleteComplexValues(cur, Collections.singletonList(cols.get(i)));
+                            } else {
+                                cur.setCurrentRowValue(cols.get(i), null);
+                            }
                         }
                         n++;
                     }
@@ -340,6 +451,7 @@ public class AccessRewrite {
                     cur.reset();
                     int n = 0;
                     while (cur.moveToNextRow()) {
+                        deleteComplexValues(cur, t.getColumns());
                         cur.deleteCurrentRow();
                         n++;
                     }

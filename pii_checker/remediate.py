@@ -1,6 +1,6 @@
-"""検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル、
-T2-b: SQLite・SQL のダンプ。T2-c: PDF の黒塗り・docx・pptx。T2-d: Oracle のダンプ（exp は行・列・表・ダミー化、expdp は行・ダミー化）。
-T2-e: Access（ACE・Jet・Jackcess のうち使える手段で、写しの中を直接書き換える。remedy_access.py））。
+"""検出した個人情報への対処（土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm・書庫の中のファイル・
+SQLite・SQL のダンプ・PDF の黒塗り・docx・pptx・Oracle のダンプ（exp は行・列・表・ダミー化、expdp は行・ダミー化）・
+Access（ACE・Jet・Jackcess のうち使える手段で、写しの中を直接書き換える。remedy_access.py））。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
@@ -17,7 +17,7 @@ T2-e: Access（ACE・Jet・Jackcess のうち使える手段で、写しの中�
   ごみ箱へ送った場合は、ごみ箱から「元の名前（対処前 …）」を戻してもらう。ごみ箱の無い場所は戻せない。
 - 「ファイルを削除」も元の写しは作らない。ごみ箱のある場所はごみ箱へ送り（SHFileOperationW）、無い場所（ネットワーク・外付け）はそのまま消す。
   どちらにしたかを結果・記録に残す。書庫ごとの削除・zip に作り直すときの元の書庫の削除も同じ扱い。
-- 書庫の中のファイル（T2-a2）: item_path（検査のパス「外!内」）を対象に、取り出して同じ書き換えを当て、書庫全体を作り直す
+- 書庫の中のファイル: item_path（検査のパス「外!内」）を対象に、取り出して同じ書き換えを当て、書庫全体を作り直す
   （archive_write.py）。rar など書けない形式は zip に作り直す（元の書庫は削除）。
 """
 
@@ -57,10 +57,10 @@ METHOD_LABELS = {
     "dummy": "ダミー化（該当する値だけを置き換える）",
     "delete_sheet": "該当するシートを削除",
     "delete_table": "該当する表を削除（その表のデータはすべて消える）",
-    # 書庫の中のファイルに対する方法（T2-a2）
+    # 書庫の中のファイルに対する方法
     "remove_entry": "圧縮ファイルから取り除く（中のファイルを削除）",
     "convert_zip": "zip に作り直す（形式が変わる）",
-    # PDF・docx・pptx（T2-c）
+    # PDF・docx・pptx
     "redact": "黒塗り（文字ごと消す。元に戻せない）",
     "delete_pages": "該当するページを削除",
     "delete_paragraphs": "該当する段落を削除",
@@ -98,9 +98,9 @@ LAYOUT_METHODS = {
 ORACLE_LAYOUTS = (
     "oracle_exp",
     "oracle_expdp",
-)  # Oracle のダンプ（T2-d）。位置のシートは表の名前、行は表の中の行の通し番号
+)  # Oracle のダンプ。位置のシートは表の名前、行は表の中の行の通し番号
 DB_LAYOUTS = ("sqlite", "sqldump", "access", *ORACLE_LAYOUTS)  # 位置の「シート」が表の名前になる形式
-OFFICE_LAYOUTS = ("pdf", "docx", "pptx")  # 位置の「シート」がページ・部品・スライドになる形式（T2-c）
+OFFICE_LAYOUTS = ("pdf", "docx", "pptx")  # 位置の「シート」がページ・部品・スライドになる形式
 # ある形式にだけ出す方法
 LAYOUT_ONLY_METHODS = {
     "delete_table": DB_LAYOUTS,
@@ -977,7 +977,7 @@ def prepare_plain(args: dict) -> dict:
 def prepare_inner(args: dict) -> dict:
     """書庫の中のファイルへの対処を、一時の新しい書庫まで作って検査し直す（別プロセスで動く）。
 
-    流れ: 対象の項目だけを取り出す → T2-a と同じ書き換えを当てる（または取り除く）→ 書庫を作り直す（一時の名前）→
+    流れ: 対象の項目だけを取り出す → 書庫の外のファイルと同じ書き換えを当てる（または取り除く）→ 書庫を作り直す（一時の名前）→
     書庫を検査し直す。入れ子は内側から作り直す。形式が rar・cab・iso など書けないものは、convert_zip=True のときだけ、
     同じフォルダの「元の名前.zip」に作り直す（元の書庫は確定のときに消す）。
     """
@@ -1265,7 +1265,9 @@ class Analysis:
             d[str(rank)] = d.get(str(rank), 0) + len(arr) // 4
         # 「対象にするシート・表」の絞り込みは、Excel と DB だけ（PDF・docx・pptx の「シート」はページ・部品・スライドの名前）
         sheets = [] if self.info.get("layout") in OFFICE_LAYOUTS else sorted({k[0] for k in self.positions if k[0]})
-        return {"state": "done", **self.info, "counts": counts, "sheets": sheets}
+        # 絞り込みの欄の呼び名（DB と Access の「シート」は表の名前）
+        sheet_word = "表" if self.info.get("layout") in DB_LAYOUTS else "シート"
+        return {"state": "done", **self.info, "counts": counts, "sheets": sheets, "sheet_word": sheet_word}
 
 
 class RunState:
@@ -1532,6 +1534,13 @@ class RemedyService:
             "convert_zip": convert,
         }
         if method not in ("delete_file", "remove_entry") and not select_from_args(a.positions, out).detections:
+            others = a.info.get("other_findings") or 0
+            if others:
+                raise RemedyError(
+                    f"選んだ種類・確度の検出のうち、この方法で消せるもの（行・列の位置を持つもの）はありません。"
+                    f"このファイルの検出のうち {others:,} 件は、位置を持たない検出（コメント・内側のファイル・"
+                    "Access の添付ファイル・ファイル名など）で、行や列の削除・ダミー化では変わりません。ファイルの削除を選んでください"
+                )
             raise RemedyError("選んだ種類・確度の検出がありません")
         return out
 
@@ -1644,7 +1653,7 @@ class RemedyService:
             out["notes"].append("文字コード・BOM・改行・区切り・引用符の付け方は元のまま保ちます")
         if a.info.get("other_findings"):
             out["warnings"].append(
-                f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
+                f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・Access の添付ファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
                 "それらはこの対処では変わらず、実行のあとの検査し直しで残りとして出ます"
             )
         if arch:

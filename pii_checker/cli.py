@@ -684,7 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--port", type=int, default=8765)
     w.add_argument(
         "--token",
-        help="他の PC から使うときの合言葉（127.0.0.1 以外で待ち受けるときは必須）",
+        help="他の PC から使うときの合言葉（127.0.0.1・localhost・::1 以外で待ち受けるときは必須）",
     )
     w.add_argument("--no-browser", action="store_true", help="起動時にブラウザを開かない")
     w.set_defaults(func=cmd_serve)

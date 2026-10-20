@@ -1,4 +1,4 @@
-"""build.py の、Java 実行環境と Jackcess を配布フォルダへ入れる部分（Access の中身の対処。T2-e）の試験。
+"""build.py の、Java 実行環境と Jackcess を配布フォルダへ入れる部分（Access の中身の対処）の試験。
 
 ネットワークも本物の JDK も使わない（取得する関数を差し替える）。exe のビルドはしない。
 本物の JDK・Maven Central を使った取り込み（jlink・javac・jdeps・Java 補助の起動の確認）は、手元で

@@ -37,6 +37,33 @@ def _find_maturin() -> list[str] | None:
     return [found] if found else None
 
 
+def _remap_env() -> dict[str, str]:
+    """作業環境のパス（利用者名を含む）を拡張に埋め込まないための環境変数。
+
+    rustc は panic の位置としてソースのパスを文字列で埋め込む（依存の crate は CARGO_HOME の下の registry）。
+    CARGO_HOME・rustup のホーム・このリポジトリの3つを --remap-path-prefix で中立な名前へ写す。
+    パスに空白があっても割れないように、区切りが \\x1f の CARGO_ENCODED_RUSTFLAGS で渡す
+    （これがあると cargo は RUSTFLAGS を読まないので、既にある RUSTFLAGS は引き継ぐ）。
+    """
+    home = os.path.expanduser("~")
+    targets = (
+        (os.environ.get("CARGO_HOME") or os.path.join(home, ".cargo"), "/cargo-home"),
+        (os.environ.get("RUSTUP_HOME") or os.path.join(home, ".rustup"), "/rustup-home"),
+        (ROOT, "/pii-checker"),
+    )
+    encoded = os.environ.get("CARGO_ENCODED_RUSTFLAGS")
+    if encoded is not None:
+        flags = [f for f in encoded.split("\x1f") if f]
+    else:
+        flags = os.environ.get("RUSTFLAGS", "").split()
+    for path, neutral in targets:
+        flags.append(f"--remap-path-prefix={os.path.abspath(path)}={neutral}")
+    env = dict(os.environ)
+    env.pop("RUSTFLAGS", None)
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+    return env
+
+
 def build_and_install() -> bool:
     """wheel を作って入れる。入れられたら True。"""
     if not shutil.which("cargo"):
@@ -50,7 +77,7 @@ def build_and_install() -> bool:
         os.remove(old)  # 古い版を拾わないように、作る前に空にする
     cmd = maturin + ["build", "--release", "-m", os.path.join(CRATE, "Cargo.toml"), "-i", sys.executable]
     print(">", " ".join(cmd))
-    if subprocess.run(cmd).returncode != 0:
+    if subprocess.run(cmd, env=_remap_env()).returncode != 0:
         _warn("maturin build が失敗しました")
         return False
     wheels = sorted(glob.glob(os.path.join(WHEELS, "pii_rs_detect-*.whl")), key=os.path.getmtime)

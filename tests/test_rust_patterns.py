@@ -52,3 +52,36 @@ def test_installed_extension_uses_same_patterns():
     assert ext.patterns_json().replace("\r\n", "\n") == PATTERNS.read_text(
         encoding="utf-8"
     ), "入っている拡張が古い表で作られています。python tools/build_rust_ext.py で作り直してください"
+
+
+def test_installed_extension_has_no_build_paths():
+    """入っている拡張に、作った環境のパス（利用者名を含むホーム・リポジトリの置き場）が埋め込まれていない。
+
+    rustc は panic の位置としてソースのパスを埋め込む。tools/build_rust_ext.py が --remap-path-prefix で写す。拡張が無ければ飛ばす。
+    """
+    import os
+    import re
+
+    import pytest
+
+    ext = pytest.importorskip("pii_rs_detect")
+    # maturin は pii_rs_detect/__init__.py と同じフォルダに本体（.pyd／.so）を置く
+    binaries = [p for p in Path(ext.__file__).parent.iterdir() if p.suffix in (".pyd", ".so")]
+    assert binaries, f"拡張の本体が見つかりません: {Path(ext.__file__).parent}"
+    data = b"".join(p.read_bytes() for p in binaries).lower()
+    hint = (
+        "python tools/build_rust_ext.py で作り直してください（--remap-path-prefix を付けて組みます）。"
+        "それでも出るときは、CARGO_HOME の場所と、写す前のパスの書き方（短い名前・リンク）を確かめてください"
+    )
+    paths = [os.path.expanduser("~"), str(ROOT)]
+    if os.environ.get("CARGO_HOME"):
+        paths.append(os.environ["CARGO_HOME"])
+    for path in paths:
+        for variant in (path, path.replace("\\", "/")):
+            needle = variant.lower().encode("utf-8")
+            assert (
+                needle not in data
+            ), f"拡張に作った環境のパスが埋め込まれています（{data.count(needle)} か所）。{hint}"
+    # 別の PC で組んだ拡張でも、Windows の利用者フォルダの形が残っていれば見つける
+    users = re.findall(rb"[a-z]:[\\/]users[\\/]", data)
+    assert not users, f"拡張に Windows の利用者フォルダのパスが埋め込まれています（{len(users)} か所）。{hint}"

@@ -428,6 +428,33 @@ def test_scrub_keeps_rows_that_a_live_overflow_pointer_points_to():
     assert access_scrub.live_overflow_targets(dead) == []
 
 
+@pytest.mark.parametrize("last", [True, False])
+def test_scrub_file_keeps_overflow_targets_on_every_page_including_the_last(tmp_path, last):
+    """ファイル全体の塗りつぶしで、指し示しの行き先を集めるときに、最後のページも読む。
+
+    行き先を集める走査が0ページ目から読み始めて1ページずれ、最後のページを読み落としていた。ダミー化で行が大きくなり、
+    最後のページの中で繰り越すと、移った先の行が塗りつぶされ、置き換えた行の値が全部消えていた（確かめの門が止めていた）。
+    """
+    head = bytearray(4096)
+    head[4:19] = b"Standard ACE DB"
+    head[0x14] = 2
+    filler, _ = _synthetic_page([(b"f" * 8, 0)])
+    n_pages = 4
+    at = n_pages - 1 if last else 2
+    pointer = (1).to_bytes(1, "little") + at.to_bytes(3, "little")  # 同じページの行 1 への指し示し
+    moved, _ = _synthetic_page(
+        [(pointer + b"\x00" * 8, 0x4000), (b"MOVED-BODY" * 3, 0x8000), (b"DEAD-ROW" * 3, 0x8000)]
+    )
+    pages = [bytes(head)] + [bytes(filler)] * (n_pages - 1)
+    pages[at] = bytes(moved)
+    p = tmp_path / "a.accdb"
+    p.write_bytes(b"".join(pages))
+    access_scrub.scrub_file(str(p))
+    raw = p.read_bytes()
+    assert b"MOVED-BODY" in raw, "生きている行き先は残す"
+    assert b"DEAD-ROW" not in raw, "陽性対照: 本当に消した行は消える"
+
+
 def test_orphan_long_values_are_all_zeroed_but_live_values_and_chains_are_kept(tmp_path):
     """指されていない長い値の本文の塗りつぶし（合成したページ）:
     - 指されていない本文は、選んだ値を含まなくても消す（消した行のほかの列のメモ・ページの境目で割れた値が残らないように）
@@ -1336,13 +1363,94 @@ def test_jackcess_refuses_attachment_table_with_japanese_sort_order(tmp_path, mo
         pytest.skip("Jackcess が要る")
     rows = [(i, f"山田 太郎{i}", f"090-1234-{i:04d}" if i % 2 == 0 else "") for i in range(1, 7)]
     p = tmp_path / "src" / "att.accdb"
+    from pii_checker.formats import database
+
     build_attachment_db(p, rows, tmp_path, langid="0x0411")
     original = p.read_bytes()
     monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])  # ACE の無い PC と同じ読み方（表の索引の印を付ける）
+    svc, store, job = make_service(tmp_path, [p])
+    # 下見より前（方法を選ぶ段）で、理由を添えて選べなくする（下見が通って実行で断られると、利用者が二度手間になる）
+    a = analyze(svc, job, p)
+    for m in ("delete_rows", "delete_columns", "dummy", "delete_table"):
+        spec = a.info["methods"][m]
+        assert not spec["available"] and "並び順" in spec["reason"] and "「people」" in spec["reason"], (m, spec)
+    assert a.info["methods"]["delete_file"]["available"]
+    with pytest.raises(RemedyError, match="並び順"):
+        svc.preview(job, str(p), {"method": "delete_rows", "types": ["phone"], "confidences": ALL_RANKS})
+    # 下見で決められなかったとき（並び順を読めなかった等）も、実行の段の Jackcess の断りが同じ理由で止める
+    monkeypatch.setattr(ra, "sort_order", lambda path: None)
     svc, store, job = make_service(tmp_path, [p])
     r = run(svc, job, p, method="delete_rows", types=["phone"], confidences=ALL_RANKS)
     assert r["state"] == "error" and "並び順" in r["message"], r
     assert p.read_bytes() == original
+
+
+def build_plain_db(path: Path, langid: str, text_index: bool, tables=("people",)) -> None:
+    """DAO で、添付の無い表（id・氏名・電話）を作る。text_index なら氏名の列に索引を付ける。"""
+    eng = _dao()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = eng.CreateDatabase(str(path), f";LANGID={langid};CP=1252;COUNTRY=0")
+    try:
+        for ti, t in enumerate(tables):
+            db.Execute(f"CREATE TABLE {t} (id LONG, [氏名] TEXT(50), [電話] TEXT(50))")
+            if text_index and t == tables[0]:
+                db.Execute(f"CREATE INDEX idx_name ON {t} ([氏名])")
+            for i in range(1, 7):  # 表ごとに違う値（片方の表だけ消しても、もう片方に同じ値が残らないように）
+                db.Execute(
+                    f"INSERT INTO {t} (id, [氏名], [電話]) VALUES ({i}, '山田 太郎{ti}{i}', '090-12{ti}4-{i:04d}')"
+                )
+    finally:
+        db.Close()
+
+
+def test_sort_order_is_read_from_the_file_header(tmp_path):
+    """並び順は、ファイルの見出しの伏せた領域から読む（Java を起こさずに下見で使う）。"""
+    for langid, want in (("0x0409", 1033), ("0x0411", 1041)):
+        p = tmp_path / f"{langid}.accdb"
+        build_plain_db(p, langid, False)
+        assert ra.sort_order(str(p)) == want
+    junk = tmp_path / "junk.accdb"
+    junk.write_bytes(b"not access" * 20)
+    assert ra.sort_order(str(junk)) is None
+
+
+@pytest.mark.parametrize("method", ["delete_rows", "delete_columns", "dummy", "delete_table"])
+def test_jackcess_japanese_sort_order_refuses_only_tables_with_text_index(tmp_path, monkeypatch, trash, method):
+    """並び順が「日本語」でも、文字の索引の無い表は Jackcess で書き換えられる。索引のある表は下見の前に断る。"""
+    from pii_checker.formats import database
+
+    if not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])  # ACE の無い PC と同じ読み方（表の索引の印を付ける）
+    p = tmp_path / "src" / "two.accdb"
+    build_plain_db(p, "0x0411", True, tables=("indexed", "plain"))
+    original = p.read_bytes()
+    svc, store, job = make_service(tmp_path, [p])
+    a = analyze(svc, job, p)
+    assert a.info["methods"][method]["available"], "索引の無い表もあるので、方法は選べる"
+    with pytest.raises(RemedyError, match="「indexed」"):
+        svc.preview(job, str(p), {"method": method, "confidences": ALL_RANKS})
+    assert p.read_bytes() == original
+    r = run(svc, job, p, method=method, confidences=ALL_RANKS, sheets=["plain"])
+    assert r["state"] == "done", r
+
+
+def test_jackcess_dummy_keeps_rows_moved_on_the_last_page(tmp_path, monkeypatch, trash):
+    """ダミーが元の値より長いと、行が同じページの中で繰り越す。それがファイルの最後のページでも、置き換えた行が消えない
+    （行き先を集める走査が最後のページを読み落とし、塗りつぶしの確かめが「残す行が変わる」で取りやめていた）。"""
+    if not available("jackcess"):
+        pytest.skip("Jackcess が要る")
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    p = tmp_path / "src" / "a.accdb"
+    build_plain_db(p, "0x0409", False)
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="dummy", confidences=ALL_RANKS)
+    assert r["state"] == "done", r
+    rows = snapshot(p, tmp_path)["people"]
+    assert len(rows) == 6 and all(v is not None for row in rows for v in row), rows
+    assert not any("山田" in str(v) for row in rows for v in row)
 
 
 def test_content_digest_that_cannot_read_refuses_the_scrub(tmp_path, monkeypatch, trash):

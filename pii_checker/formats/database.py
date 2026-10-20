@@ -488,7 +488,12 @@ def _read_access_jackcess(
             n_tables += 1
             col.pos_sheet = name
             if col.collect_positions:
-                col.pos_info.setdefault("tables", {})[name] = {"columns": list(columns)}
+                info = {"columns": list(columns), "complex": has_complex}
+                try:  # 文字の索引の有無（並び順が「一般」以外のとき、Jackcess で書き換えられる表かを下見で決めるため）
+                    info["text_index"] = any(int(p[1]) > 0 for p in call("textindex", ra._b64(name)) if len(p) > 1)
+                except (RuntimeError, ValueError):
+                    pass  # 分からない（下見では決めず、実行の段の断りに任せる）
+                col.pos_info.setdefault("tables", {})[name] = info
             limit = ctx.options.max_rows_per_table or 0
 
             def rows(name=name, columns=columns, limit=limit):

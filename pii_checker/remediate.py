@@ -1174,8 +1174,33 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
             return (
                 "データベースパスワードの掛かった Access は、いまは中身を書き換えられません。ファイルの削除はできます"
             )
-        return availability_reason(path, method, info.get("kind") or "")
+        problem = availability_reason(path, method, info.get("kind") or "")
+        if problem or not os.path.isabs(path):
+            return problem
+        # 検出のある表がどれも、並び順のために Jackcess で書き換えられないなら、方法そのものを選べなくする
+        # （一部だけなら選べる。下見で、書き換えられない表を選んだときに断る）
+        return access_sort_problem(path, info.get("db_schema") or {}, {k[0] for k in info.get("positions") or {}}, True)
     return ""
+
+
+def access_sort_problem(path: str, schema: dict, tables: set[str], all_blocked_only: bool = False) -> str:
+    """並び順のために Jackcess で書き換えられない表があれば、断る理由（remedy_access.jackcess_sort_problem）。
+
+    all_blocked_only なら、tables がすべて書き換えられないときだけ断る（方法の選べる・選べないを決めるとき）。
+    """
+    from .remedy_access import jackcess_sort_problem
+
+    if not tables:
+        return ""
+    strategies = (schema.get("access") or {}).get("strategies") or []
+    known = schema.get("tables") or {}
+    problem = jackcess_sort_problem(path, strategies, known, tables)
+    if problem and all_blocked_only:
+        blocked = [t for t in tables if (known.get(t) or {}).get("text_index") or (known.get(t) or {}).get("complex")]
+        if len(blocked) < len(tables):
+            return ""
+        return problem + "。ファイルの削除はできます"
+    return problem
 
 
 def layout_from_kind(kind: str) -> str:
@@ -1542,6 +1567,13 @@ class RemedyService:
                     "Access の添付ファイル・ファイル名など）で、行や列の削除・ダミー化では変わりません。ファイルの削除を選んでください"
                 )
             raise RemedyError("選んだ種類・確度の検出がありません")
+        if a.info.get("layout") == "access" and not arch and method != "delete_file":
+            # 並び順のために Jackcess で書き換えられない表を選んでいたら、実行で断られる前に、ここで断る
+            problem = access_sort_problem(
+                a.top_path, a.info.get("db_schema") or {}, set(select_from_args(a.positions, out).sheets())
+            )
+            if problem:
+                raise RemedyError(problem + "。「対象にする表」でほかの表だけを選ぶか、ファイルの削除を選んでください")
         return out
 
     def preview(self, job_id: str, top_path: str, params: dict) -> dict:
@@ -1655,6 +1687,11 @@ class RemedyService:
             out["warnings"].append(
                 f"このファイルには、行・列の位置を持たない検出（コメント・内側のファイル・Access の添付ファイル・ファイル名など）も {a.info['other_findings']:,} 件あります。"
                 "それらはこの対処では変わらず、実行のあとの検査し直しで残りとして出ます"
+                + (
+                    "。ただし Access の添付ファイルは、入っている行・表を消すと、一緒に消えます"
+                    if layout == "access" and method in ("delete_rows", "delete_table")
+                    else ""
+                )
             )
         if arch:
             out["summary"] = f"圧縮ファイルの中の「{arch['item']}」: {out['summary']}"

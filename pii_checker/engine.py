@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import time
 import traceback
+from array import array
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -44,6 +45,8 @@ CHECKPOINT_SECONDS = 10
 CHECKPOINT_EVERY = 500  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
 # 住所・固定電話を「人の手がかり待ち」で値ごとに覚えておく上限（1件ごとに本文を抱える。超えた分は種類ごとの件数だけ数える）
 DEFER_LIMIT = 200_000
+# 対処のために集める検出の位置の上限（超えたら「多すぎる」として、位置を使う対処はしない。1件 32 バイトで 64MB）
+POSITIONS_LIMIT = 2_000_000
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:
@@ -210,6 +213,18 @@ class Collector:
     ticks: int = 0
     # 画面の詳細のための読み直し: 明細に検出した値そのものと伏せていない文脈も入れる（メモリの中だけ。保存しない）
     reveal: bool = False
+    # 対処のための位置集め（ScanOptions.collect_positions）: 検出の構造の位置を、上限（POSITIONS_LIMIT）まで全部集める。
+    # 生の値は持たない（値の開始・終了の位置だけ。ダミー化のとき書き換える側が、その場で読み直した文字から値を取る）
+    collect_positions: bool = False
+    positions: dict = field(
+        default_factory=dict
+    )  # (シート名, 種類, 確度の順位) → array('q')（行, 列, 開始, 終了 の繰り返し）
+    pos_total: int = 0
+    pos_overflow: bool = False
+    pos_layout: str = ""  # 取り込み側（形式ごとの処理）が決める。空のあいだは位置を集めない
+    pos_sheet: str = ""
+    cell_pos: tuple | None = None  # 表のセルを検査している間だけ（行, 列。どちらも 1 始まり・0 始まり）
+    line_base: int | None = None  # 行の塊を検査している間だけ（塊の先頭の行番号）
 
     def add_text(
         self,
@@ -290,6 +305,8 @@ class Collector:
                 and not self.person_cue
                 and seen_conf.rank < Confidence.MEDIUM.rank  # 同じ住所を既に手がかりつきで見ていれば待たない
             )
+            if self.collect_positions and not raw:
+                self._record_position(hit, 0 if defer else confidence.rank, norm)
             if defer:
                 confidence = Confidence.LOW
                 counted = prev is None or not (raw or skip_seen)  # 数えない重複は待ちの件数にも足さない
@@ -329,6 +346,46 @@ class Collector:
         """
         self._finish_cues()
         self._count_distinct()
+        if self.collect_positions:
+            self._finish_positions()
+
+    def _record_position(self, hit, rank: int, norm: str) -> None:
+        """検出1件の構造の位置（行・列・値の開始と終了）を集める。rank 0 は「人の手がかり待ち」（finish で決める）。"""
+        if self.pos_layout.startswith("csv") or self.pos_layout == "xlsx":
+            if self.cell_pos is None:
+                return
+            row, col = self.cell_pos
+            start, end = hit.start, hit.end
+        elif self.pos_layout == "lines" and self.line_base is not None:
+            row = self.line_base + norm.count("\n", 0, hit.start)
+            col = 0
+            line_start = norm.rfind("\n", 0, hit.start) + 1
+            line_end = norm.find("\n", hit.start)
+            line_end = len(norm) if line_end < 0 else line_end
+            start, end = hit.start - line_start, min(hit.end, line_end) - line_start
+        else:
+            return
+        if self.pos_total >= POSITIONS_LIMIT:
+            self.pos_overflow = True
+            return
+        arr = self.positions.get((self.pos_sheet, hit.pii_type, rank))
+        if arr is None:
+            arr = self.positions[(self.pos_sheet, hit.pii_type, rank)] = array("q")
+        arr.extend((row, col, start, end))
+        self.pos_total += 1
+
+    def _finish_positions(self) -> None:
+        """待たせていた住所・固定電話の位置を、人の手がかりがあれば確度 中、無ければ 低 の位置へ移し、項目に渡す。"""
+        for key in [k for k in self.positions if k[2] == 0]:
+            moved = self.positions.pop(key)
+            target = (key[0], key[1], Confidence.MEDIUM.rank if self.person_cue else Confidence.LOW.rank)
+            if target in self.positions:
+                self.positions[target].extend(moved)
+            else:
+                self.positions[target] = moved
+        self.item.positions = self.positions
+        self.item.pos_layout = self.pos_layout
+        self.item.pos_overflow = self.pos_overflow
 
     def _count_distinct(self) -> None:
         """種類×確度ごとの異なる値の数を item.distinct_counts に入れ、ファイル全体の集計先にも足す。
@@ -508,10 +565,13 @@ class Collector:
             self._count(hit.pii_type, hit.confidence)
             self._add_sample(hit, hit.confidence, norm, location, None, method, False, [])
 
-    def add_lines(self, text: str, location_prefix: str = "", method: str = "", ocr: bool = False) -> None:
+    def add_lines(
+        self, text: str, location_prefix: str = "", method: str = "", ocr: bool = False, line_offset: int = 0
+    ) -> None:
         """長い本文を行の塊に分けて検査する（位置は「N行目」で示す）。
 
         ocr=True は OCR で読んだ1項目分の文字（本人確認書類の写しの判別もする）。
+        line_offset は、text がファイルの途中から始まるときの、それまでの行数（位置を集めるときの行番号に使う）。
         """
         if ocr:
             self.add_id_documents(text, location_prefix.strip() or "OCR", method or "OCR")
@@ -524,7 +584,11 @@ class Collector:
             def loc(pos: int, chunk=chunk, base=base) -> str:
                 return f"{location_prefix}{base + chunk.count(chr(10), 0, pos)}行目"
 
-            self.add_text(chunk, "", method=method, location_fn=loc)
+            self.line_base = base + line_offset
+            try:
+                self.add_text(chunk, "", method=method, location_fn=loc)
+            finally:
+                self.line_base = None
 
     def add_table(
         self,
@@ -597,14 +661,18 @@ class Collector:
                         if strength != HEADER_NONE:
                             header, weak = values[j], strength == HEADER_WEAK
                         break
-            self.add_text(
-                v,
-                location_fn(r_idx, c_idx),
-                header=header,
-                method=method,
-                skip_seen=getattr(self, "_skip_seen", False),
-                weak_header=weak,
-            )
+            self.cell_pos = (r_idx, c_idx)
+            try:
+                self.add_text(
+                    v,
+                    location_fn(r_idx, c_idx),
+                    header=header,
+                    method=method,
+                    skip_seen=getattr(self, "_skip_seen", False),
+                    weak_header=weak,
+                )
+            finally:
+                self.cell_pos = None
 
 
 RE_ANNOTATION = re.compile(r"[（(【\[〔<＜][^）)】\]〕>＞]{0,20}[）)】\]〕>＞]")
@@ -768,8 +836,8 @@ class ScanContext:
         壊れた状態を読ませないよう、別名で書いてから置き換える。
         """
         now = time.time()
-        if self.options.reveal:
-            return  # 値を持つ読み直しでは書かない（生の値が一時フォルダに出てしまう）
+        if self.options.reveal or self.options.collect_positions:
+            return  # 値を持つ読み直し・位置集めでは書かない（生の値・位置が一時フォルダに出てしまう）
         if not self.checkpoint_file or now - self._last_checkpoint < max(CHECKPOINT_SECONDS, self._checkpoint_gap):
             return
         import pickle
@@ -800,6 +868,7 @@ class ScanContext:
             distinct_sink=self.distinct,
             on_tick=self.maybe_checkpoint,
             reveal=self.options.reveal,
+            collect_positions=self.options.collect_positions and depth == 0,  # 対処の対象は実ファイルそのものだけ
         )
         try:
             item.size = blob.size
@@ -1092,7 +1161,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     book = passwords or PasswordBook()
     ctx = ScanContext(path, options, book.candidates_for(path))
     # 値を持つ読み直し（reveal）は途中経過を書かない・消さない（生の値を一時フォルダに出さない。検査の分を壊さない）
-    ctx.checkpoint_file = None if options.reveal else checkpoint_path(options, path)
+    ctx.checkpoint_file = None if options.reveal or options.collect_positions else checkpoint_path(options, path)
     if ctx.checkpoint_file:
         try:
             os.remove(ctx.checkpoint_file)  # 前の検査が残した途中経過を、今回の分として読ませない

@@ -97,6 +97,12 @@ class ItemResult:
     distinct_counts: dict[str, int] = field(default_factory=dict)
     # 利用者の規則の名前→件数（全数。finding_counts の「custom」を規則ごとに分けたもの。内訳の表示に使う）
     rule_counts: dict[str, int] = field(default_factory=dict)
+    # 対処のための位置の集め直し（ScanOptions.collect_positions）のときだけ入る。通常の検査では空のまま・保存しない。
+    # （シート名, 種類, 確度の順位）→ 4つ組（行, 列, 値の開始, 値の終了）を並べた array('q')。生の値は持たない
+    positions: dict = field(default_factory=dict)
+    # 位置の意味: "csv,"・"csv\t"（行・列）/ "lines"（行）/ "xlsx"（シート・行・列）/ ""（位置を持たない）
+    pos_layout: str = ""
+    pos_overflow: bool = False  # 位置の数が上限を超えて、途中までしか集めていない
 
 
 @dataclass
@@ -142,6 +148,9 @@ class ScanOptions:
     # 画面の詳細用の読み直しだけ True（Finding に raw_value・raw_context を入れ、途中経過は書かない）。
     # ジョブの設定としては保存しない（store.create_job が外す）・検査器の版にも含めない
     reveal: bool = False
+    # 対処（remediate）のための読み直しだけ True（構造の位置を全部集める。生の値は持たず、途中経過は書かない）。
+    # reveal と同じく、ジョブの設定としては保存しない・検査器の版にも含めない
+    collect_positions: bool = False
 
 
 @dataclass

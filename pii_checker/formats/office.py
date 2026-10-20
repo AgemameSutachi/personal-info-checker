@@ -134,6 +134,7 @@ def handle_xlsx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
                     if hasattr(ws, "reset_dimensions"):
                         ws.reset_dimensions()  # 記録された範囲を信用せず、全セルを読む
                     title = ws.title
+                    col.pos_layout, col.pos_sheet = "xlsx", title  # 対処のために、シート・行・列で位置を集める
                     col.add_table(
                         ws.iter_rows(min_row=1, min_col=1, values_only=True),
                         lambda r, c, title=title: f"{title}!{_col_letter(c)}{r}",
@@ -142,7 +143,10 @@ def handle_xlsx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
                 sheets_done = True
             finally:
                 wb.close()
+                col.pos_sheet = ""
     except Exception as e:
+        col.pos_layout = ""  # 途中までしか読めていない位置は、対処に使わない
+        col.positions.clear()
         item.notes.append(f"openpyxl で読めなかったため XML 部品として読んだ（{type(e).__name__}: {e}）")
     if sheet_notes:
         item.notes.append("非表示のシートも検査した: " + "、".join(sheet_notes))

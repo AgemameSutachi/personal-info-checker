@@ -42,6 +42,7 @@ def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
     elif blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(text):
         _scan_delimited(text, col, item)
     else:
+        col.pos_layout = "lines"  # 対処のために、行番号で位置を集める（空のままなら集めない）
         col.add_lines(text, method="本文")
     scan_embedded_base64(ctx, blob, item, text, depth)
 
@@ -198,6 +199,7 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
 
             from openpyxl.utils import get_column_letter
 
+            col.pos_layout = "csv" + delim
             col.add_table(
                 csv.reader(lines(), delimiter=delim),
                 lambda r, c: f"{r}行目 {get_column_letter(c + 1)}列",
@@ -208,10 +210,17 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         line_no = 0
         buf: list[str] = []
 
+        col.pos_layout = "lines"
+
         def flush():
             nonlocal buf
             if buf:
-                col.add_lines("".join(buf), location_prefix=f"{line_no - len(buf) + 1}行目から ", method="本文")
+                col.add_lines(
+                    "".join(buf),
+                    location_prefix=f"{line_no - len(buf) + 1}行目から ",
+                    method="本文",
+                    line_offset=line_no - len(buf),
+                )
                 buf = []
 
         for ln in io.StringIO(sample):
@@ -250,6 +259,7 @@ def _scan_delimited(text: str, col: Collector, item: ItemResult) -> None:
     reader = csv.reader(io.StringIO(text), delimiter=delim)
     from openpyxl.utils import get_column_letter
 
+    col.pos_layout = "csv" + delim  # 対処のために、行・列で位置を集める
     col.add_table(reader, lambda r, c: f"{r}行目 {get_column_letter(c + 1)}列", method="区切り文字の表")
     item.method += f"・表として読み取り（区切り「{'タブ' if delim == chr(9) else 'カンマ'}」）"
 

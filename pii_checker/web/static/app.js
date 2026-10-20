@@ -803,6 +803,7 @@ const EMPTY_TEXT = {
   all: "ファイルがありません。",
   items: "項目がありません。",
   diff: "該当する違いはありません。",
+  remedy: "対処の記録はありません。検出のあるファイルの詳細から「対処する…」で、削除・置き換えができます。",
 };
 
 async function loadTable() {
@@ -837,6 +838,24 @@ async function loadTable() {
         + "※ 前回との違いの要約は、上の「前回との違い」の枠にあります。「無くなった」の行を押すと今回の結果を開きます（今回は無いファイルは中身が出ません）。"
       : "";
     EMPTY_TEXT.diff = r.previous ? "該当する違いはありません。" : r.summary_text;
+  } else if (state.tab === "remedy") {
+    const all = await api(`/api/jobs/${id}/remediations`);
+    const q0 = $("#q").value.trim().toLowerCase();
+    const list = all.rows.filter((x) => !q0 || x.top_path.toLowerCase().includes(q0));
+    r = { total: list.length, rows: list.slice(state.offset, state.offset + state.limit) };
+    head = ["日時", "ファイル", "方法", "変わった数", "残った検出", "退避先", "状態"];
+    rows = r.rows.map((x) => [
+      `<td class="nowrap">${esc(fmtTime(x.at))}</td>`,
+      pathCell(x.top_path),
+      `<td>${esc(x.method_label)}</td>`,
+      `<td class="small">${esc(changedText(x.changed))}</td>`,
+      `<td class="small">${esc(remainingText(x.remaining))}</td>`,
+      `<td class="small mono">${esc(x.backup_path || "")}</td>`,
+      x.state === "applied"
+        ? `<td class="nowrap"><span class="pill medium">対処済み</span> <button type="button" class="rm-undo small" data-id="${esc(x.id)}" title="退避の写しを元の場所へ戻します（対処のあとにファイルが変わっていれば断ります）">元に戻す</button></td>`
+        : `<td class="nowrap"><span class="pill scanned">戻した（${esc(fmtTime(x.restored_at))}）</span></td>`,
+    ]);
+    click = r.rows.map((x) => x.top_path);
   } else if (state.tab === "items") {
     r = await api(`/api/jobs/${id}/all_items?${base}`);
     head = ["パス", "形式", "状態", "理由・読み方", "大きさ", "検出件数"];
@@ -865,6 +884,7 @@ async function loadTable() {
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target === tr) open(); });
   });
   if (state.tab === "findings") setupRevealButtons();
+  if (state.tab === "remedy") setupUndoButtons();
   if (focusIdx !== null) {
     const again = $(`#table tbody tr[data-i="${focusIdx}"]`);
     if (again) again.focus();
@@ -909,9 +929,11 @@ async function openDetail(topPath) {
       <div class="mono small detail-path">${esc(topPath)}</div>
       ${fileInfo}
       <button type="button" id="btn-copy-path">パスをコピー</button>
+      ${fileRow && fileRow.n_findings ? '<button type="button" id="btn-remedy" title="検出した個人情報を削除・置き換えます（元は退避に写します。自動では何も変わりません）">対処する…</button>' : ""}
       ${state.desktop ? '<button type="button" id="btn-reveal">エクスプローラーで場所を開く</button>' : ""}
       <span id="detail-msg" class="msg small" role="status"></span>
-    </div>`;
+    </div>
+    <div id="rm-area"></div>`;
   $("#detail-body").innerHTML =
     actions +
     marks +
@@ -934,6 +956,9 @@ async function openDetail(topPath) {
     $("#detail-msg").textContent = (await copyText(topPath.split("!")[0])) ? "コピーしました" : "コピーできませんでした";
     $("#btn-copy-path").focus(); // 代わりの経路でコピーしたときにフォーカスが外れるので戻す
   });
+  rmToken++; // 前のファイルの対処の画面の状態確認を止める
+  const remedyBtn = $("#btn-remedy");
+  if (remedyBtn) remedyBtn.addEventListener("click", () => { remedyBtn.disabled = true; startRemedy(topPath); });
   const reveal = $("#btn-reveal");
   if (reveal) reveal.addEventListener("click", async () => {
     const r = await window.pywebview.api.reveal(topPath);
@@ -1079,6 +1104,231 @@ $("#show-secret").addEventListener("change", (e) => {
   });
 });
 
+
+// ---------------------------------------------------------------- 対処（検出した個人情報を消す・置き換える）
+// 検査は何も書き込まない。ここで選んで実行したときだけ、そのファイルを書き換える（元は退避に写す・削除はごみ箱）。
+// 流れ: 分析（ファイルを読み直して検出の位置を全部集める）→ 選ぶ → 下見 → 確認 → 実行 → 結果（元に戻す）
+let rmToken = 0; // 対処の画面を開き直すたびに増やす（閉じた・別のファイルを開いた後の状態確認を止める）
+const rmSleep = (ms) => new Promise((res) => setTimeout(res, ms));
+const RM_CONF = [["high", "高", 3], ["medium", "中", 2], ["low", "低", 1]];
+
+function changedText(c) {
+  if (!c) return "";
+  const parts = [];
+  if (c.files) parts.push(`ファイル ${fmtNum(c.files)}`);
+  if (c.rows) parts.push(`行 ${fmtNum(c.rows)}`);
+  if (c.cols) parts.push(`列 ${fmtNum(c.cols)}`);
+  if (c.sheets) parts.push(`シート ${fmtNum(c.sheets)}`);
+  if (c.cells) parts.push(`置き換え ${fmtNum(c.cells)}`);
+  if (c.skipped_formula) parts.push(`数式は未変更 ${fmtNum(c.skipped_formula)}`);
+  return parts.join("・") || "変更なし";
+}
+function remainingText(r) {
+  if (r === null || r === undefined) return "（検査し直していない）";
+  return `全体 ${fmtNum(r.total)} 件（選んだ分 ${fmtNum(r.selected)} 件）`;
+}
+
+async function startRemedy(topPath) {
+  const area = $("#rm-area");
+  const mine = ++rmToken;
+  const alive = () => rmToken === mine && $("#detail-dialog").open;
+  const id = encodeURIComponent(state.jobId);
+  area.innerHTML = `<div class="item-card rm-card"><strong>対処する</strong> <span class="muted small" id="rm-status" role="status">ファイルを読み直して、検出した位置を全部集めています…</span></div>`;
+  let a;
+  for (;;) {
+    try {
+      a = await api(`/api/jobs/${id}/remedy/analyze`, { method: "POST", body: JSON.stringify({ top_path: topPath }) });
+    } catch (e) {
+      a = { state: "error", message: e.message };
+    }
+    if (!alive()) return;
+    if (a.state !== "running") break;
+    const st = $("#rm-status");
+    if (st) st.textContent = `ファイルを読み直して、検出した位置を全部集めています…${a.elapsed >= 5 ? ` ${Math.floor(a.elapsed)} 秒経過` : ""}`;
+    await rmSleep(1000);
+  }
+  const btn = $("#btn-remedy");
+  if (a.state !== "done") {
+    area.innerHTML = `<div class="item-card rm-card"><strong>対処する</strong><p class="msg error">対処を始められません: ${esc(a.message)}</p><button type="button" id="rm-close">閉じる</button></div>`;
+    $("#rm-close").addEventListener("click", () => { area.innerHTML = ""; if (btn) btn.disabled = false; });
+    return;
+  }
+  renderRemedyForm(topPath, a, btn);
+}
+
+function renderRemedyForm(topPath, a, btn) {
+  const area = $("#rm-area");
+  const id = encodeURIComponent(state.jobId);
+  const types = state.info.pii_types || {};
+  const methods = Object.entries(a.methods);
+  const total = (c) => Object.values(c).reduce((p, q) => p + q, 0);
+  const typeRows = Object.entries(a.counts).sort((x, y) => total(y[1]) - total(x[1]));
+  const confCount = (k) => RM_CONF.map(([, label, rank]) => (k[rank] ? `${label} ${fmtNum(k[rank])}` : "")).filter(Boolean).join("・");
+  area.innerHTML = `
+    <div class="item-card rm-card">
+      <h4>対処する <span class="small muted">（${esc(leafName(topPath))}）</span></h4>
+      <p class="small muted">自動では何も変わりません。ここで選んで実行したときだけ書き換えます。元のファイルは先に退避の場所へ写し（${esc(a.backup_root)}）、あとから「元に戻す」で戻せます。ファイルの削除はごみ箱へ送ります。</p>
+      <fieldset class="rm-set"><legend>方法</legend>
+        ${methods.map(([k, m]) => `<label class="check rm-method${m.available ? "" : " disabled"}"><input type="radio" name="rm-method" value="${esc(k)}"${m.available ? "" : " disabled"}> ${esc(m.label)}${m.available ? "" : `<span class="small muted"> — 選べません: ${esc(m.reason)}</span>`}</label>`).join("")}
+      </fieldset>
+      <div id="rm-filters" class="hidden">
+        <fieldset class="rm-set"><legend>対象にする種類（実行の時点で見つけた全部の検出が対象です）</legend>
+          ${typeRows.map(([k, c]) => `<label class="check"><input type="checkbox" name="rm-type" value="${esc(k)}" checked> ${esc(types[k] || k)} <span class="small muted">（${esc(confCount(c))}）</span></label>`).join("")}
+        </fieldset>
+        <fieldset class="rm-set"><legend>対象にする確度</legend>
+          ${RM_CONF.map(([k, label]) => `<label class="check"><input type="checkbox" name="rm-conf" value="${k}"${k !== "low" ? " checked" : ""}> ${label}</label>`).join("")}
+          <span class="small muted">低は要確認の検出です。含めるかを選べます。</span>
+        </fieldset>
+        ${a.sheets.length ? `<fieldset class="rm-set"><legend>対象にするシート</legend>${a.sheets.map((s) => `<label class="check"><input type="checkbox" name="rm-sheet" value="${esc(s)}" checked> ${esc(s)}</label>`).join("")}</fieldset>` : ""}
+        <fieldset class="rm-set hidden" id="rm-dummy-set"><legend>ダミーの作り方</legend>
+          ${Object.entries(a.dummy_modes).map(([k, label], i) => `<label class="check"><input type="radio" name="rm-dummy" value="${esc(k)}"${i === 0 ? " checked" : ""}> ${esc(label)}</label>`).join("")}
+        </fieldset>
+      </div>
+      <div class="row">
+        <button type="button" id="rm-preview" class="primary" disabled>下見（まだ何も変わりません）</button>
+        <button type="button" id="rm-cancel">やめる</button>
+        <span id="rm-msg" class="msg small" role="status"></span>
+      </div>
+      <div id="rm-preview-out"></div>
+    </div>`;
+  const chosen = () => (area.querySelector('input[name="rm-method"]:checked') || {}).value;
+  const checks = (name) => [...area.querySelectorAll(`input[name="${name}"]:checked`)].map((x) => x.value);
+  area.querySelectorAll('input[name="rm-method"]').forEach((r) => r.addEventListener("change", () => {
+    const m = chosen();
+    $("#rm-filters").classList.toggle("hidden", m === "delete_file");
+    $("#rm-dummy-set").classList.toggle("hidden", m !== "dummy");
+    $("#rm-preview").disabled = false;
+    $("#rm-preview-out").innerHTML = ""; // 選び直したら、前の下見は無効
+  }));
+  area.addEventListener("change", (e) => {
+    if (e.target.name && e.target.name.startsWith("rm-") && e.target.name !== "rm-method") $("#rm-preview-out").innerHTML = "";
+  });
+  $("#rm-cancel").addEventListener("click", () => { rmToken++; area.innerHTML = ""; if (btn) btn.disabled = false; });
+  $("#rm-preview").addEventListener("click", async () => {
+    const method = chosen();
+    const body = { top_path: topPath, method };
+    if (method !== "delete_file") {
+      body.types = checks("rm-type");
+      body.confidences = checks("rm-conf");
+      if (a.sheets.length) body.sheets = checks("rm-sheet");
+      if (method === "dummy") body.dummy_mode = checks("rm-dummy")[0];
+      if (!body.types.length || !body.confidences.length || (body.sheets && !body.sheets.length)) {
+        $("#rm-msg").textContent = "種類・確度・シートを1つ以上選んでください";
+        return;
+      }
+    }
+    $("#rm-msg").textContent = "下見を作っています…";
+    try {
+      const pv = await api(`/api/jobs/${id}/remedy/preview`, { method: "POST", body: JSON.stringify(body) });
+      $("#rm-msg").textContent = "";
+      renderRemedyPreview(topPath, body, pv, btn);
+    } catch (e) {
+      $("#rm-msg").textContent = e.message;
+      $("#rm-preview-out").innerHTML = "";
+    }
+  });
+}
+
+function renderRemedyPreview(topPath, body, pv, btn) {
+  const out = $("#rm-preview-out");
+  const more = (pv.changes.rows || pv.changes.cells || 0) > (pv.sample_rows || []).length;
+  out.innerHTML = `
+    <div class="rm-preview" role="status">
+      <h4>下見（まだ何も変わっていません）</h4>
+      <p><strong>${esc(pv.summary)}</strong></p>
+      ${pv.sample_rows && pv.sample_rows.length ? `<p class="small">変わる行の番号の例: ${esc(pv.sample_rows.join("、"))}${more ? " …" : ""}</p>` : ""}
+      ${pv.sample_cols && pv.sample_cols.length ? `<p class="small">変わる列の例: ${esc(pv.sample_cols.join("、"))}</p>` : ""}
+      ${pv.warnings.length ? `<ul class="small rm-warn">${pv.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      <div class="row"><button type="button" id="rm-run" class="danger">実行…</button></div>
+      <div id="rm-confirm"></div>
+    </div>`;
+  $("#rm-run").addEventListener("click", () => {
+    // 確かめの一手間: 対象のファイル名と内容をもう一度見せ、「実行する」をもう一度押してもらう
+    $("#rm-run").disabled = true;
+    $("#rm-confirm").innerHTML = `
+      <div class="rm-confirm" role="alertdialog" aria-label="実行の確認">
+        <p>ファイル <strong class="mono">${esc(pv.file_name)}</strong> に対して、次を実行します。</p>
+        <p><strong>${esc(pv.method_label)}</strong>: ${esc(pv.summary)}</p>
+        <p class="small muted">元のファイルは先に退避へ写します。よろしければ「実行する」を押してください。</p>
+        <div class="row"><button type="button" id="rm-go" class="danger">実行する</button> <button type="button" id="rm-back">やめる</button></div>
+      </div>`;
+    $("#rm-back").addEventListener("click", () => { $("#rm-confirm").innerHTML = ""; $("#rm-run").disabled = false; });
+    $("#rm-go").addEventListener("click", async () => {
+      $("#rm-go").disabled = true;
+      $("#rm-back").disabled = true;
+      await runRemedy(topPath, { ...body, confirmed: true, expected_sha256: pv.expected_sha256 }, btn);
+    });
+    $("#rm-go").focus();
+  });
+}
+
+async function runRemedy(topPath, body, btn) {
+  const area = $("#rm-area");
+  const mine = rmToken;
+  const alive = () => rmToken === mine && $("#detail-dialog").open;
+  const id = encodeURIComponent(state.jobId);
+  const box = $("#rm-confirm");
+  box.innerHTML = `<p class="small" id="rm-run-status" role="status">実行しています…（元のファイルを退避へ写し、新しいファイルを書いて置き換え、検査し直します）</p>`;
+  let r;
+  try {
+    const started = await api(`/api/jobs/${id}/remedy/run`, { method: "POST", body: JSON.stringify(body) });
+    r = started;
+    while (r.state === "running") {
+      await rmSleep(1000);
+      if (!alive()) return;
+      const st = $("#rm-run-status");
+      if (st) st.textContent = `実行しています…${r.elapsed >= 5 ? ` ${Math.floor(r.elapsed)} 秒経過` : ""}`;
+      r = await api(`/api/jobs/${id}/remedy/runs/${encodeURIComponent(started.run_id)}`);
+    }
+  } catch (e) {
+    r = { state: "error", message: e.message };
+  }
+  if (!alive()) return;
+  if (r.state !== "done") {
+    box.innerHTML = `<p class="msg error">実行できませんでした: ${esc(r.message)}</p><p class="small muted">元のファイルは、置き換える前なら変わっていません。</p>`;
+    return;
+  }
+  const rem = r.remaining;
+  area.innerHTML = `
+    <div class="item-card rm-card rm-done" role="status">
+      <h4>対処しました</h4>
+      <p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}（${esc(r.file_name)}）</p>
+      <p>残った検出: ${rem ? `全体 <strong>${fmtNum(rem.total)}</strong> 件（選んだ種類・確度の分は <strong>${fmtNum(rem.selected)}</strong> 件）` : "検査し直していません（ファイルの削除、または検査し直せませんでした）"}</p>
+      ${rem && rem.selected === 0 && rem.total > 0 ? `<p class="small muted">残りは、選ばなかった種類・確度か、行や列の位置を持たない場所（コメント・内側のファイルなど）の検出です。</p>` : ""}
+      <p class="small">退避先: <span class="mono">${esc(r.backup_path)}</span></p>
+      <p class="small muted">この検査の結果（検出の一覧）は対処の前のままです。反映するには検査し直してください。ダミーにした値そのものは、残りの数に入れていません。</p>
+      <div class="row"><button type="button" id="rm-undo">元に戻す</button> <button type="button" id="rm-done-close">閉じる</button> <span id="rm-undo-msg" class="msg small" role="status"></span></div>
+    </div>`;
+  $("#rm-done-close").addEventListener("click", () => { area.innerHTML = ""; if (btn) btn.disabled = false; });
+  $("#rm-undo").addEventListener("click", async () => {
+    $("#rm-undo").disabled = true;
+    try {
+      const u = await api(`/api/jobs/${id}/remediations/${encodeURIComponent(r.remediation_id)}/undo`, { method: "POST", body: "{}" });
+      $("#rm-undo-msg").textContent = u.message;
+    } catch (e) {
+      $("#rm-undo-msg").textContent = e.message;
+      $("#rm-undo").disabled = false;
+    }
+  });
+}
+
+// 「対処の記録」の表の「元に戻す」
+function setupUndoButtons() {
+  const table = $("#table");
+  const id = encodeURIComponent(state.jobId);
+  table.querySelectorAll(".rm-undo").forEach((b) => b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    b.disabled = true;
+    try {
+      const u = await api(`/api/jobs/${id}/remediations/${encodeURIComponent(b.dataset.id)}/undo`, { method: "POST", body: "{}" });
+      b.parentElement.innerHTML = `<span class="pill scanned">${esc(u.message)}</span>`;
+    } catch (err) {
+      b.disabled = false;
+      b.textContent = "戻せません";
+      b.parentElement.insertAdjacentHTML("beforeend", `<div class="small msg error">${esc(err.message)}</div>`);
+    }
+  }));
+}
 
 // ---------------------------------------------------------------- レポート（結果をまとめたページ）
 // Excel の6シート（判定・要対応・ファイル別・前回との違い・検出明細・全項目）と同じ中身を1つのページで見せる。

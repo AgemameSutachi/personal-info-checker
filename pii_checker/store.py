@@ -89,6 +89,24 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+-- 対処（remediate）の記録。生の値は書かない（方法・絞り込みの種類と確度・数・退避先・ハッシュだけ）
+CREATE TABLE IF NOT EXISTS remediations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT,
+    at REAL,
+    top_path TEXT,
+    method TEXT,
+    filters TEXT,
+    changed TEXT,
+    remaining TEXT,
+    backup_path TEXT,
+    orig_sha256 TEXT,
+    new_sha256 TEXT,
+    state TEXT,
+    restored_at REAL,
+    note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS remediations_job ON remediations(job_id, at);
 """
 
 
@@ -330,6 +348,7 @@ class Store:
         job_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         saved_options = asdict(options)
         saved_options.pop("reveal", None)  # 読み直し専用の設定は保存しない
+        saved_options.pop("collect_positions", None)  # 対処の位置集め専用の設定も保存しない
         with self.tx() as c:
             c.execute(
                 "INSERT INTO jobs(id, created, name, roots, options, state) VALUES (?,?,?,?,?,?)",
@@ -399,9 +418,53 @@ class Store:
 
     def delete_job(self, job_id: str) -> None:
         with self.tx() as c:
-            for t in ("findings", "items", "files", "folder_errors"):
+            for t in ("findings", "items", "files", "folder_errors", "remediations"):
                 c.execute(f"DELETE FROM {t} WHERE job_id=?", (job_id,))
             c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
+    # ------------------------------------------------------------ 対処の記録（生の値は書かない）
+
+    def add_remediation(self, job_id: str, top_path: str, method: str, filters: dict, changed: dict, **kw) -> int:
+        """対処の記録を1件足して ID を返す。kw: remaining・backup_path・orig_sha256・new_sha256・note。"""
+        with self.tx() as c:
+            cur = c.execute(
+                "INSERT INTO remediations(job_id, at, top_path, method, filters, changed, remaining, backup_path,"
+                " orig_sha256, new_sha256, state, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job_id,
+                    time.time(),
+                    top_path,
+                    method,
+                    json.dumps(filters, ensure_ascii=False),
+                    json.dumps(changed, ensure_ascii=False),
+                    json.dumps(kw.get("remaining"), ensure_ascii=False),
+                    kw.get("backup_path"),
+                    kw.get("orig_sha256"),
+                    kw.get("new_sha256"),
+                    "applied",
+                    kw.get("note", ""),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def remediation(self, job_id: str, rid: int) -> dict | None:
+        rows = self.query("SELECT * FROM remediations WHERE job_id=? AND id=?", (job_id, rid))
+        return self._remediation_row(rows[0]) if rows else None
+
+    def remediations(self, job_id: str) -> list[dict]:
+        rows = self.query("SELECT * FROM remediations WHERE job_id=? ORDER BY at DESC, id DESC", (job_id,))
+        return [self._remediation_row(r) for r in rows]
+
+    @staticmethod
+    def _remediation_row(r) -> dict:
+        d = dict(r)
+        for k in ("filters", "changed", "remaining"):
+            d[k] = json.loads(d[k]) if d.get(k) else None
+        return d
+
+    def mark_remediation_restored(self, rid: int) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE remediations SET state='restored', restored_at=? WHERE id=?", (time.time(), rid))
 
     # ------------------------------------------------------------ 列挙
 

@@ -102,6 +102,16 @@ button:hover { border-color: var(--primary); }
 button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
 button.danger-outline { color: var(--danger); }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+/* 対処（検出した個人情報の削除・置き換え）の画面 */
+.rm-card { background: var(--panel); }
+.rm-set { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 4px 10px 8px; }
+.rm-set legend { font-weight: 600; padding: 0 6px; }
+.rm-method.disabled { opacity: .7; }
+.rm-preview { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 6px; }
+.rm-warn { margin: 6px 0 6px 18px; color: var(--danger); }
+.rm-confirm { border: 2px solid var(--danger); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.rm-done { border-color: var(--primary); }
 button.wide { width: 100%; }
 input[type=text], input[type=password], input[type=number], input[type=search], select, textarea {
   border: 1px solid var(--input-border); background: var(--panel); border-radius: 8px; padding: 7px 10px; width: 100%;

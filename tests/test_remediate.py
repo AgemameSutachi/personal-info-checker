@@ -1473,3 +1473,21 @@ def test_real_worker_process_round_trip(tmp_path, trash):
     assert p.read_bytes() == encode_csv(kept, "cp932", "\r\n")
     assert r["remaining"]["total"] == 0
     assert [f.read_bytes() for f in trash.files()] == [original]  # 別プロセスで準備し、確定は親が行って、元はごみ箱へ
+
+
+def test_same_dummy_is_not_counted_as_remaining():
+    """「同じ値は同じダミー」（種類_xxxxxxxx）が、ダミーの一部だけ検出し直されて「残り」に数えられない。
+
+    保険証の記号番号・雇用保険は語の後ろの英数字を拾い、口座番号は語の後ろの 7 桁を拾うので、
+    末尾だけが当たっていた（乱数の鍵しだいで、口座は約 2%、保険証はほぼ毎回）。
+    """
+    from pii_checker import detectors
+    from pii_checker.remedy_write import DummyMaker
+
+    for pii_type in detectors.PII_TYPES:
+        for i in range(300):
+            maker = DummyMaker("same", i.to_bytes(4, "big") * 8)
+            dummy = maker.make(pii_type, f"元の値{i}")
+            assert not re.search(r"\d{6}", dummy), dummy
+            left = [dummy[h.start : h.end] for h in detectors.detect(dummy)]
+            assert all(v in maker.produced for v in left), (dummy, left)

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 
 from .formats import oracle_dump as od
-from .remedy_write import DummyMaker, RemedyError, Selection, replace_spans
+from .remedy_write import DummyMaker, RemedyError, Selection, break_digit_runs, replace_spans
 
 GRANULE = 10_240_000  # expdp の索引の間隔（前の項目から数えて、この大きさ以上で最初の行の境界）
 BLOCK = 4096
@@ -137,7 +137,11 @@ def date_dummy(maker: DummyMaker, pii_type: str, raw: bytes) -> bytes:
         year, month, day = 1900 + d[0] % 100, 1 + d[1] % 12, 1 + d[2] % 28
     else:
         year, month, day = 1900, 1, 1
-    return bytes([year // 100 + 100, year % 100 + 100, month, day]) + raw[4:7]
+    out = bytes([year // 100 + 100, year % 100 + 100, month, day])
+    if out == raw[:4]:
+        # 元と同じ日付になった（約 1/33600。固定なら元が 1900-01-01 のとき）。同じままだと書き換えが飛ばされ、元の値が残るので日をずらす
+        out = out[:3] + bytes([day % 28 + 1])
+    return out + raw[4:7]
 
 
 class _StarMaker:
@@ -152,7 +156,8 @@ class _StarMaker:
 class _CompactMaker:
     """「同じ値は同じダミー」で、ダミーが列の長さ（expdp は元の値の長さ）に収まらないときの代わり。
 
-    値と同じバイト数の、鍵つき（実行ごとの鍵）の 16 進の文字列。同じ値は同じ文字列になる。3 文字に満たない値は「*」にする。
+    値と同じバイト数の、鍵つき（実行ごとの鍵）の英数字の文字列（16 進の数字が 5 桁を超えて続くところは g〜p にする）。
+    同じ値は同じ文字列になる。3 文字に満たない値は「*」にする。
     """
 
     def __init__(self, base: DummyMaker, codec: str):
@@ -165,7 +170,8 @@ class _CompactMaker:
         if chars < 3:
             return "*" * max(1, len(value))
         digest = hmac.new(self.base.key, f"{pii_type}\0compact\0{value}".encode("utf-8"), hashlib.sha256).hexdigest()
-        token = (digest * (chars // len(digest) + 1))[:chars]
+        # 数字が長く続くと、その部分がマイナンバー・電話番号などとして検出し直されるので切る（remedy_write.break_digit_runs）
+        token = break_digit_runs((digest * (chars // len(digest) + 1))[:chars])
         self.base.produced.add(token)
         return token
 
@@ -226,7 +232,7 @@ class CellEditor:
         limit = self._limit(i, raw)
         out = self._fit(codec, new, raw, is_char, limit)
         if out is None and self.maker.mode == "same":
-            # 収まらない: 「同じ値は同じダミー」を保ったまま、値と同じバイト数の鍵つきの 16 進の文字列にする
+            # 収まらない: 「同じ値は同じダミー」を保ったまま、値と同じバイト数の鍵つきの英数字の文字列にする（_CompactMaker）
             new = replace_spans(body, spans, _CompactMaker(self.maker, codec))
             out = self._fit(codec, new, raw, is_char, limit)
         if out is None:

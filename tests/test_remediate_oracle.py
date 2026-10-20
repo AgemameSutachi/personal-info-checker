@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pii_checker import remediate, remedy_oracle  # noqa: E402
 from pii_checker.formats import oracle_dump as od  # noqa: E402
 from pii_checker.models import ScanOptions  # noqa: E402
-from pii_checker.remedy_write import DummyMaker, RemedyError, select_positions  # noqa: E402
+from pii_checker.remedy_write import DummyMaker, RemedyError, break_digit_runs, select_positions  # noqa: E402
 from test_oracle_dump import EXP_HEAD, enc_date, enc_number  # noqa: E402
 from test_remediate import (  # noqa: E402
     ALL_RANKS,
@@ -463,8 +463,8 @@ def test_exp_dummy_all_types(tmp_path, trash):
         assert new[3] != old[3] and len(new[3]) == len(old[3])  # NUMBER: 同じ桁数の数
         assert new[4] != old[4] and new[4].startswith("19")  # DATE: 1900 年代の日付
         assert new[5] != old[5] and re.fullmatch(
-            r"[0-9a-f]{13}", new[5]
-        )  # 列の長さに収まらない → 同じ値は同じ（鍵つきの）16 進の 13 文字
+            r"[0-9a-p]{13}", new[5]
+        )  # 列の長さに収まらない → 同じ値は同じ（鍵つきの）英数字の 13 文字
         assert new[6] != old[6] and new[6].startswith("メール")
     # 同じ値は同じダミー・違う値は違うダミー
     assert len({row[2] for row in after if row[2]}) == len([1 for row in before if row[2]])
@@ -956,12 +956,12 @@ def test_dp_dummy(tmp_path, trash, small_granule):
             continue
         assert (
             nw[2] != old[2]
-            and re.fullmatch(r"[0-9a-f]{%d}" % len(old[2].encode()), nw[2])
+            and re.fullmatch(r"[0-9a-p]{%d}" % len(old[2].encode()), nw[2])
             and nw[3] != old[3]
             and len(nw[3]) == len(old[3])
             and nw[4].startswith("19")
         )
-        assert re.fullmatch(r"[0-9a-f]{13}", nw[5]) and re.fullmatch(r"[0-9a-f]{%d}" % len(old[6].encode()), nw[6])
+        assert re.fullmatch(r"[0-9a-p]{13}", nw[5]) and re.fullmatch(r"[0-9a-p]{%d}" % len(old[6].encode()), nw[6])
     assert r["remaining"]["total"] == 11 and _leak([str(p)], CUSTOMER_NEEDLES) == []
     assert [f.read_bytes() for f in trash.files()] == [original]
 
@@ -1380,9 +1380,9 @@ def test_cell_editor_fallbacks_keep_same_value_same_dummy_and_never_grow():
     maker = DummyMaker("same")
     cols = ["氏名"]
     ed = remedy_oracle.CellEditor(maker, cols, [1], ["utf-8"], [0], strict=True)
-    raw = "山田太郎".encode()  # 12 バイト。「氏名_xxxxxxxx」(15 バイト) は収まらない → 同じバイト数の 16 進
+    raw = "山田太郎".encode()  # 12 バイト。「氏名_xxxxxxxx」(15 バイト) は収まらない → 同じバイト数の英数字
     a = ed.edit(0, raw, [(0, 4, "name")])
-    assert a is not None and len(a) == len(raw) and re.fullmatch(rb"[0-9a-f]{12}", a)
+    assert a is not None and len(a) == len(raw) and re.fullmatch(rb"[0-9a-p]{12}", a)
     assert a == ed.edit(0, raw, [(0, 4, "name")])  # 同じ値は同じダミー
     assert a != ed.edit(0, "山田次郎".encode(), [(0, 4, "name")])
     assert ed.edit(0, b"ab", [(0, 2, "name")]) == b"**"  # 3 文字に満たない値は *
@@ -1537,3 +1537,33 @@ def test_failed_rewrite_keeps_original_and_leaves_no_temp_file(tmp_path, monkeyp
     assert r["state"] == "error" and "索引" in r["message"]
     assert p.read_bytes() == original and not trash.files() and not new_tmp_files(p.parent)
     assert store.remediations(job) == []
+
+
+def test_compact_dummy_never_has_long_digit_runs():
+    """列に収まらないときのダミーに数字が長く続かない（たまたまマイナンバー・電話番号として検出し直されないように）。"""
+    from pii_checker import detectors
+
+    assert break_digit_runs("ae86dc960221608970") == "ae86dc96022h60897g"
+    assert break_digit_runs("12345") == "12345"
+    assert break_digit_runs("123456789012") == "12345m78901i"
+    # 実際に落ちた鍵（ダミーの中の 12 桁が検査数字まで合ってマイナンバーに当たった）でも、再検出しない
+    maker = remedy_oracle._CompactMaker(DummyMaker("same", (8).to_bytes(4, "big") * 8), "utf-8")
+    rng = random.Random(0)
+    for _ in range(3000):
+        value = "".join(rng.choice("0123456789abcdef山田") for _ in range(rng.randint(3, 40)))
+        token = maker.make("name", value)
+        assert not re.search(r"\d{6}", token), token
+        assert not [h for h in detectors.detect(token) if h.pii_type in ("my_number", "phone", "credit_card")], token
+
+
+def test_date_dummy_never_returns_the_original_date():
+    """日付のダミーが元と同じ日付にならない（同じだと書き換えが飛ばされ、元の生年月日が残る）。1900 年代の全部の日付で確かめる。"""
+    for mode in ("same", "fixed"):
+        maker = DummyMaker(mode, b"k" * 32)
+        for year in range(1900, 2000):
+            for month in range(1, 13):
+                for day in range(1, 29):
+                    raw = bytes([year // 100 + 100, year % 100 + 100, month, day, 1, 1, 1])
+                    out = remedy_oracle.date_dummy(maker, "birthdate", raw)
+                    assert out[:4] != raw[:4], (mode, year, month, day)
+                    assert out[4:] == raw[4:7]  # 時刻の部分は変えない

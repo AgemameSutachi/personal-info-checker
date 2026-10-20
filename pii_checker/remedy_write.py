@@ -122,6 +122,9 @@ class DummyMaker:
     def make(self, pii_type: str, value: str) -> str:
         out = self._make(pii_type, value)
         self.produced.add(out)
+        if self.mode == "same":
+            # 「保険証の記号番号_xxxxxxxx」は、語の後ろの英数字を拾う規則が末尾だけを検出し直すので、末尾も数えない値に入れる
+            self.produced.add(out.rsplit("_", 1)[-1])
         return out
 
     def _make(self, pii_type: str, value: str) -> str:
@@ -132,7 +135,29 @@ class DummyMaker:
         from .engine import distinct_key
 
         digest = hmac.new(self.key, f"{pii_type}\0{distinct_key(pii_type, value)}".encode("utf-8"), hashlib.sha256)
-        return f"{detectors.PII_TYPES.get(pii_type, pii_type)}_{digest.hexdigest()[:8]}"
+        return f"{detectors.PII_TYPES.get(pii_type, pii_type)}_{break_digit_runs(digest.hexdigest()[:8])}"
+
+
+# ダミーの中で続けてよい数字の数。これより長いと、16 進の文字列の一部がたまたまマイナンバー（12 桁）・電話番号（10 桁〜）・
+# 口座番号（「銀行口座番号_3177413b」の 7 桁）などとして検出し直される（実測: 「ae86dc960221608970」の中の 12 桁が
+# 検査数字まで合ってマイナンバーに当たった）
+MAX_DIGIT_RUN = 5
+
+
+def break_digit_runs(token: str) -> str:
+    """数字が MAX_DIGIT_RUN を超えて続くところで、その数字を対応する英字（0→g … 9→p）に変える。同じ入力は同じ出力。"""
+    out = []
+    run = 0
+    for ch in token:
+        if ch.isdigit():
+            run += 1
+            if run > MAX_DIGIT_RUN:
+                ch = "ghijklmnop"[int(ch)]
+                run = 0
+        else:
+            run = 0
+        out.append(ch)
+    return "".join(out)
 
 
 def shape_of(value: str) -> str:

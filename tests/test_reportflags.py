@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pii_checker import reportflags  # noqa: E402
+from pii_checker import engine, reportflags  # noqa: E402
 from pii_checker.engine import Collector, scan_file  # noqa: E402
 from pii_checker.models import FileResult, ItemResult, ScanOptions, Status  # noqa: E402
 from pii_checker.store import Store  # noqa: E402
@@ -57,6 +57,56 @@ def test_distinct_uses_highest_confidence():
     col.add_text(f"個人番号 {my_number(5)}", "b")  # 同じ値を語つきで: 高
     col.finish()
     assert item.distinct_counts == {"my_number:high": 1}, item.distinct_counts
+
+
+def test_distinct_keeps_value_after_deferred_upgrade():
+    # 手がかり待ちの住所を後から 中 へ引き上げても（明細の位置と確度を書き換えても）、異なる値の数え方は残る
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_text("住所 東京都千代田区丸の内9-9-9", "a")
+    col.add_text("住所 東京都千代田区丸の内９－９－９", "b")
+    col.add_text("氏名 鬼瓦 権左衛門", "c")
+    col.finish()
+    assert reportflags.distinct_medium(item.distinct_counts).get("address") == 1, item.distinct_counts
+    assert "address:low" not in item.distinct_counts, item.distinct_counts
+
+
+def test_distinct_sink_merges_items():
+    # 集計先を共有する品目（zip の中の複数のファイルなど）: 先の品目の辞書をそのまま渡した後も、後の品目が正しく合流する
+    sink: dict = {}
+    first = ItemResult(path="a", kind="", status=Status.PENDING)
+    col = Collector(first, 20, distinct_sink=sink)
+    col.add_text("住所 東京都千代田区丸の内9-9-9", "a")  # 人の手がかりが無い: 低
+    col.finish()
+    second = ItemResult(path="b", kind="", status=Status.PENDING)
+    col = Collector(second, 20, distinct_sink=sink)
+    col.add_text("住所 東京都千代田区丸の内9-9-9", "a")
+    col.add_text("氏名 鬼瓦 権左衛門", "b")  # 手がかりがあるので同じ住所が 中
+    col.finish()
+    third = ItemResult(path="c", kind="", status=Status.PENDING)
+    col = Collector(third, 20, distinct_sink=sink)
+    col.add_text("携帯 090-1234-5678", "a")
+    col.add_text("携帯 080-1111-2222", "b")
+    col.finish()
+    assert first.distinct_counts == {"address:low": 1}, first.distinct_counts  # 後の合流で品目の数は変わらない
+    got = engine._count_by_rank(sink)
+    assert got == {"address:medium": 1, "name:medium": 1, "phone:medium": 2}, got
+
+
+def test_distinct_skips_values_over_limit(monkeypatch):
+    # 覚える上限を超えた値は件数だけ数え、異なる値には数えない（後から 中 へ引き上げた値も同じ）
+    monkeypatch.setattr(engine, "SEEN_LIMIT", 1)
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    sink: dict = {}
+    col = Collector(item, 20, distinct_sink=sink)
+    col.add_text("住所 東京都千代田区丸の内9-9-9", "a")  # これで上限
+    col.add_text("住所 大阪府大阪市北区梅田9-9-9", "b")  # 上限の外（手がかり待ち）
+    col.add_text("氏名 鬼瓦 権左衛門", "c")  # 手がかり: 2つの住所を 中 へ引き上げる
+    col.finish()
+    assert item.finding_counts["address"] == 2, item.finding_counts
+    assert item.conf_counts.get("address:medium") == 2, item.conf_counts
+    assert item.distinct_counts == {"address:medium": 1}, item.distinct_counts
+    assert engine._count_by_rank(sink) == {"address:medium": 1}, sink
 
 
 def test_compute_thresholds():

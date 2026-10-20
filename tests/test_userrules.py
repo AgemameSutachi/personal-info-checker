@@ -606,8 +606,8 @@ def test_busy_pc_does_not_let_a_slow_pattern_through(monkeypatch):
     線を超えて測り直し「遅くない」と出ても、そこで受け付けずに残りの試し文字列（本当に遅い並び）まで調べる。
     """
     monkeypatch.setattr(userrules, "_SPEED_ABORT", 0.0)
-    assert check_pattern("\w+\w?\d+x"), "遅い規則を通した"
-    for p in ("EMP-\d{6}", "\w+@\w+", "C\d{3}$"):
+    assert check_pattern(r"\w+\w?\d+x"), "遅い規則を通した"
+    for p in (r"EMP-\d{6}", r"\w+@\w+", r"C\d{3}$"):
         assert check_pattern(p) is None, p
 
 

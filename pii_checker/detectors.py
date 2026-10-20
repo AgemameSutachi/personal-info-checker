@@ -549,9 +549,33 @@ def _landline_context(context_text: str, start: int, end: int) -> tuple[str | No
     )
 
 
+RE_ASCII_ALPHA = re.compile(r"[A-Za-z]")
+
+
+def _scoped(p: re.Pattern[str]) -> str:
+    """パターンを、そのフラグを内側だけに効かせた (?i:…) / (?:…) の形にする。HEADER_CONTAINS のフラグは re.I の有無だけ
+    （ほかのフラグを足すときはここも直すこと）。"""
+    flag = "i" if p.flags & re.I else ""
+    return f"(?{flag}:{p.pattern})"
+
+
+# HEADER_CONTAINS のどれかに当たるかを1回で見る下見（当たらない文字列を25本の正規表現に通さない）
+_HEADER_ANY = re.compile("|".join(_scoped(p) for p, _ in HEADER_CONTAINS))
+
+
+def cannot_be_header(text: str) -> bool:
+    """英字を含まない ASCII だけの文字列（数・日付・記号）か。見出し語はどれも英字・かな・漢字・〒を含むので、
+    これに当たる文字列は見出しではない。表の値の大半（番号・日付）を、覚え込みの表を汚さずに素早く弾くために使う。"""
+    return text.isascii() and RE_ASCII_ALPHA.search(text) is None
+
+
 @functools.lru_cache(maxsize=65536)
 def header_category(header: str | None) -> str | None:
-    """列見出しから、その列が何の個人情報かを推定する。当てはまらなければ None。"""
+    """列見出しから、その列が何の個人情報かを推定する。当てはまらなければ None。
+
+    同じ見出しがセルごとに来るので覚えておく。表の値（番号・日付）を渡す側は、先に cannot_be_header で弾くこと
+    （覚え込みの表を値で押し流さないため）。
+    """
     if not header:
         return None
     h = normalize(str(header)).strip()
@@ -564,12 +588,29 @@ def header_category(header: str | None) -> str | None:
     key = re.sub(r"[\s_\-・()（）\[\]【】:：]", "", h).lower()
     if key in HEADER_EXACT:
         return HEADER_EXACT[key]
+    if not _HEADER_ANY.search(key):
+        return None
     if HEADER_NOT_PII.search(h.lower()):
         return None
     for pattern, category in HEADER_CONTAINS:
         if pattern.search(key):
             return category
     return None
+
+
+@functools.lru_cache(maxsize=4096)
+def _header_prefix(header: str | None) -> str:
+    """本文の前に置く見出し（正規化して空白を1つ足す）。同じ見出しがセルごとに来るので覚えておく。"""
+    return (normalize(header) + " ") if header else ""
+
+
+# _header_value_hit で値ごとに使う正規表現（文字列のまま渡すと、呼ぶたびに re のキャッシュを引くので先に作る）
+_RE_NON_DIGIT = re.compile(r"[^0-9]")
+_RE_NON_ALNUM = re.compile(r"[^0-9A-Za-z]")
+_RE_WORD_CHAR = re.compile(r"[A-Za-z一-龥ぁ-んァ-ヶ]")
+_RE_YYYYMMDD = re.compile(r"(19|20)[0-9]{6}")
+_RE_ISO_DATE_HEAD = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_RE_DATE_SERIAL = re.compile(r"[0-9]{4,5}(\.0+)?")
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -579,13 +620,13 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         return None
     if v.lower() in ("null", "none", "nan", "-", "ー", "なし", "無し", "n/a", "na", "0"):
         return None
-    if len(v) <= 12 and header_category(v) is not None:
+    if len(v) <= 12 and not cannot_be_header(v) and header_category(v) is not None:
         return None  # 「住所」「電話」などの見出し語そのもの（横持ちの表の項目名）は値ではない
     conf = Confidence.MEDIUM
-    digits = re.sub(r"[^0-9]", "", v)
+    digits = _RE_NON_DIGIT.sub("", v)
     if category == "name":
         # 数字だけ・記号だけの値は名前ではない
-        if not re.search(r"[A-Za-z一-龥ぁ-んァ-ヶ]", v):
+        if not _RE_WORD_CHAR.search(v):
             return None
         # 横持ちの表の項目名（入社日・所属・備考など）は名前ではない
         if len(v) <= 8 and RE_LABEL_WORD.fullmatch(v):
@@ -596,9 +637,9 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         elif len(digits) < 8:
             return None
     elif category == "birthdate":
-        if RE_DATE.search(v) or re.fullmatch(r"(19|20)[0-9]{6}", digits) or re.match(r"^\d{4}-\d{2}-\d{2}", v):
+        if RE_DATE.search(v) or _RE_YYYYMMDD.fullmatch(digits) or _RE_ISO_DATE_HEAD.match(v):
             conf = Confidence.HIGH
-        elif re.fullmatch(r"[0-9]{4,5}(\.0+)?", v) and 1000 < float(v) < 60000:
+        elif _RE_DATE_SERIAL.fullmatch(v) and 1000 < float(v) < 60000:
             conf = Confidence.HIGH  # Excel の日付シリアル値（xlsb・書式の無いセル）
         else:
             return None
@@ -612,11 +653,11 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         if category == "bank_account":
             conf = Confidence.HIGH
     elif category in ("drivers_license", "passport", "health_insurance"):
-        if len(re.sub(r"[^0-9A-Za-z]", "", v)) < 4:
+        if len(_RE_NON_ALNUM.sub("", v)) < 4:
             return None
         conf = Confidence.HIGH if category != "health_insurance" else Confidence.MEDIUM
     elif category == "residence_card":
-        if len(re.sub(r"[^0-9A-Za-z]", "", v)) < 8 or not digits:
+        if len(_RE_NON_ALNUM.sub("", v)) < 8 or not digits:
             return None
         conf = Confidence.HIGH
     elif category == "resident_code":
@@ -637,7 +678,7 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
     elif category == "sensitive":
         conf = Confidence.MEDIUM
     elif category == "address":
-        if not re.search(r"[一-龥ぁ-んァ-ヶA-Za-z]", v):
+        if not _RE_WORD_CHAR.search(v):
             return None
     return Hit(category, conf, v, 0, len(v), f"列見出しが「{PII_TYPES[category]}」の列の値")
 
@@ -652,7 +693,7 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
             hits.append(hv)
     if not text or len(text) < 3:
         return hits
-    context_text = (normalize(header) + " " if header else "") + text
+    context_text = _header_prefix(header) + text
     offset = len(context_text) - len(text)
 
     def ctx(start: int, end: int, pattern: re.Pattern[str]) -> bool:
@@ -1084,7 +1125,7 @@ def _detect_rust(text: str, header: str | None = None) -> list[Hit] | None:
             hdr = (hv.pii_type, _CONFIDENCE_NUM[hv.confidence], hv.value, hv.rule)
     if not text or len(text) < 3:
         return [hv] if hv else []
-    prefix = (normalize(header) + " ") if header else ""
+    prefix = _header_prefix(header)
     try:
         rows = _RUST.detect_body(text, prefix, category, hdr)
     except UnicodeEncodeError:

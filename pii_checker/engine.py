@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import re
 import shutil
@@ -234,6 +235,9 @@ class Collector:
     # docx の表のセルの文字の範囲を、その中の段落ごとの範囲にするために、表を読んでいる間だけ入れる
     pos_map: Callable[[int, int, int, int], list[tuple]] | None = None
     line_base: int | None = None  # 行の塊を検査している間だけ（塊の先頭の行番号）
+    # 明細の数（(種類, 確度) → 件数）と、数え終えた明細の数（-1 は数え直し）。_has_room だけが使う
+    _room: dict = field(default_factory=dict)
+    _room_len: int = -1
 
     def add_text(
         self,
@@ -489,6 +493,7 @@ class Collector:
         if own_sample and 0 <= pos < len(self.item.findings):
             f = self.item.findings[pos]
             f.confidence = Confidence.MEDIUM
+            self._room_len = -1  # 明細の確度を書き換えたので、枠の数を数え直させる
             f.rule = hit.rule
         else:
             # 低の明細の枠が埋まっていて載らなかった（pos=-1）ときも、引き上げた分は 中 の明細に載せる
@@ -522,9 +527,22 @@ class Collector:
         return TITLE_CUE_NOTE.format(self.cue_title) if self.cue_title else PERSON_CUE_NOTE
 
     def _has_room(self, pii_type: str, confidence: Confidence) -> bool:
-        """その種類×確度の明細に、まだ載せる枠があるか。"""
-        n_same = sum(1 for f in self.item.findings if f.pii_type == pii_type and f.confidence == confidence)
-        return n_same < self.max_samples
+        """その種類×確度の明細に、まだ載せる枠があるか。
+
+        明細の数は種類×確度ごとに数えて持つ（新しい値のたびに明細を全部数え直すと、明細が多い項目で遅い）。
+        明細が足されたら差分だけ数え足し、明細の確度を書き換えたとき（_room_len を -1 にする）は数え直す。
+        """
+        findings = self.item.findings
+        if self._room_len < 0 or self._room_len > len(findings):
+            self._room = {}
+            self._room_len = 0
+        if self._room_len < len(findings):
+            room = self._room
+            for f in findings[self._room_len :]:
+                k = (f.pii_type, f.confidence)
+                room[k] = room.get(k, 0) + 1
+            self._room_len = len(findings)
+        return self._room.get((pii_type, confidence), 0) < self.max_samples
 
     def _add_sample(self, hit, confidence, norm, location, location_fn, method, raw, hits) -> int:
         if not self._has_room(hit.pii_type, confidence):
@@ -568,6 +586,7 @@ class Collector:
         self.seen[key] = (pos, confidence)
         old = self.item.findings[pos]
         old.confidence = confidence
+        self._room_len = -1  # 明細の確度を書き換えたので、枠の数を数え直させる
         old.rule = hit.rule
         old.location = location_fn(hit.start) if location_fn else location
         old.method = method
@@ -716,8 +735,8 @@ def _header_strength(v: str) -> int:
     「マイナンバー 123456789018」のように値まで入ったセル（それ自体で検出される）は HEADER_WEAK。
     「2024/04/01時点の氏名」のように数字を含むだけの見出しは HEADER_SURE のまま。
     """
-    if not v:
-        return HEADER_NONE
+    if not v or detectors.cannot_be_header(v):
+        return HEADER_NONE  # 番号・日付のセル（表の大半）は見出しではない。正規表現にも覚え込みにも回さない
     core = RE_ANNOTATION.sub("", v).strip()
     if not core or len(core) > 20:
         return HEADER_NONE  # 長いセルは見出しではない（覚える前に弾く。長い本文を覚えるとメモリを食い潰す）
@@ -766,8 +785,8 @@ def _header_row_score(values: list[str]) -> tuple[int, int]:
 
 
 def _cell_to_str(v) -> str:
-    import datetime as _dt
-
+    if type(v) is str:
+        return v  # 表の値の大半。判定を重ねずに返す
     if isinstance(v, float) and v.is_integer() and abs(v) < 1e17:
         return str(int(v))
     if isinstance(v, (_dt.datetime, _dt.date)):

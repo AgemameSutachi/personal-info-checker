@@ -50,11 +50,16 @@ class Confidence(str, Enum):
 
     @property
     def label(self) -> str:
-        return {"high": "高", "medium": "中", "low": "低"}[self.value]
+        return _CONFIDENCE_LABEL[self._value_]
 
     @property
     def rank(self) -> int:
-        return {"high": 3, "medium": 2, "low": 1}[self.value]
+        # 検出1件ごとに何度も呼ばれるので、表を作り直さず、value（Enum の記述子を通る）も避けて _value_ を引く
+        return _CONFIDENCE_RANK[self._value_]
+
+
+_CONFIDENCE_LABEL = {"high": "高", "medium": "中", "low": "低"}
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
 @dataclass

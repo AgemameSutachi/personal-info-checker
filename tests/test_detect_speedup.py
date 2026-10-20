@@ -211,3 +211,111 @@ def test_dedupe_random_equivalence_large():
         got = snapshot(detectors._dedupe([Hit(**h.__dict__) for h in hits]))
         assert got == expected
         assert len(expected) > 50
+
+
+# ---- 列見出しの判定の下見（_HEADER_ANY・cannot_be_header）と、明細の枠の数え方 ----
+
+
+def old_header_category(header):
+    """速くする前の header_category（下見なしで、正規表現を順に当てる）。"""
+    if not header:
+        return None
+    h = detectors.normalize(str(header)).strip()
+    if not h or len(h) > 40:
+        return None
+    core = detectors.RE_ANNOTATION.sub("", h).strip()
+    if core:
+        h = core
+    key = re.sub(r"[\s_\-・()（）\[\]【】:：]", "", h).lower()
+    if key in detectors.HEADER_EXACT:
+        return detectors.HEADER_EXACT[key]
+    if detectors.HEADER_NOT_PII.search(h.lower()):
+        return None
+    for pattern, category in detectors.HEADER_CONTAINS:
+        if pattern.search(key):
+            return category
+    return None
+
+
+HEADER_PIECES = (
+    list(detectors.HEADER_EXACT)
+    + [w for p, _ in detectors.HEADER_CONTAINS for w in re.findall(r"[^()|?.{}0-9,\\]+", p.pattern)]
+    + ["ＴＥＬ", "℡", "〒", "Ｅメール", "MAIL", "Address", "e-Mail", "No.", "番号", "名", "(必須)", "（任意）"]
+    + ["1", "2024", "-", "/", ":", " ", "　", "_", "・", "a", "Z", "ｱ", "あ", "漢", "会社名", "所在地", "本社"]
+)
+
+
+def test_header_category_prefilter_is_equivalent():
+    rng = random.Random(20261021)
+    samples = list(HEADER_PIECES)
+    for _ in range(20000):
+        samples.append("".join(rng.choice(HEADER_PIECES) for _ in range(rng.randint(1, 4))))
+    detectors.header_category.cache_clear()
+    for s in samples:
+        assert detectors.header_category(s) == old_header_category(s), s
+        if detectors.cannot_be_header(s):
+            assert old_header_category(s) is None, s
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("12345678901", True),
+        ("1990-04-01", True),
+        ("03-1234-5678", True),
+        ("(7桁)", False),
+        ("TEL", False),
+        ("tel:", False),
+        ("〒", False),
+        ("℡", False),  # NFKC で TEL になる
+        ("１２３", False),  # 全角は ASCII ではないので本体で判定する
+        ("", True),
+    ],
+)
+def test_cannot_be_header(text, expected):
+    assert detectors.cannot_be_header(text) is expected
+    if expected:
+        assert old_header_category(text) is None
+
+
+def test_has_room_matches_recount():
+    """明細の枠の数（_has_room が持つ件数）が、明細を数え直した結果といつも一致する（確度の引き上げ・待ちの解決を含む）。"""
+    from pii_checker.engine import Collector
+    from pii_checker.models import ItemResult, Status
+
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 3)
+
+    def check():
+        for t in ("address", "name", "phone", "birthdate"):
+            for c in Confidence:
+                n = sum(1 for f in item.findings if f.pii_type == t and f.confidence == c)
+                assert col._has_room(t, c) is (n < 3), (t, c, n)
+
+    for i in range(6):
+        col.add_text(f"東京都千代田区丸の内9-9-{i + 1}", f"A{i}", header="住所")  # 人の手がかり待ち（低）
+        check()
+    col.add_text("03-1234-5678", "P1")
+    check()
+    col.add_text("鬼瓦 権左衛門", "N1", header="氏名")  # 人の手がかり → 待ちの住所を 中 へ
+    check()
+    for i in range(6):
+        col.add_text(f"東京都千代田区丸の内9-9-{i + 1}", f"B{i}", header="住所")
+        check()
+    col.finish()
+    check()
+    assert any(f.confidence == Confidence.MEDIUM and f.pii_type == "address" for f in item.findings)
+
+
+def test_header_category_prefilter_every_char():
+    """1文字ずつの総当たり（文字だけ・英字の前後に付けた形）でも、下見つきの判定が元と同じ。"""
+    detectors.header_category.cache_clear()
+    for cp in range(0x20, 0x10000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        for s in (ch, "x" + ch, ch + "tel"):
+            assert detectors.header_category(s) == old_header_category(s), hex(cp)
+            if detectors.cannot_be_header(s):
+                assert old_header_category(s) is None, hex(cp)
+    detectors.header_category.cache_clear()

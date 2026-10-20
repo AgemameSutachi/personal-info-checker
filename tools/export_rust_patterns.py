@@ -242,4 +242,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 日本語でない Windows では標準出力が cp1252 で、日本語の表示で落ちる。化けても続ける
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     sys.exit(main())

@@ -103,6 +103,10 @@ def write_guard() -> None:
 
 
 if __name__ == "__main__":
+    # 日本語でない Windows（GitHub Actions の runner など）では標準出力が cp1252 で、日本語の表示で落ちる。化けても続ける
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if "--write-guard" in sys.argv:
         write_guard()
         sys.exit(0)

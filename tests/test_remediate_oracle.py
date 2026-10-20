@@ -1062,6 +1062,11 @@ def test_dp_refuses_master_table_and_unexpected_layouts(tmp_path, small_granule)
     q3.write_bytes((DATA / "oracle_expdp_sample.bin").read_bytes())
     got3 = positions_of(q3, tmp_path)
     assert got3["status"] == "scanned"
+    # 分析の段で見つけて、下見の前に断る（下見が通って実行で断られると分かりにくい・VM で試して見つけた）
+    assert "想定した作り" in got3["structure_problem"]
+    for method in ("delete_rows", "dummy"):
+        assert "想定した作り" in remediate.unsupported_reason(method, str(q3), got3)
+    assert remediate.unsupported_reason("delete_file", str(q3), got3) == ""
     with pytest.raises(RemedyError, match="想定した作り"):
         remediate.rewrite_file(
             str(q3),

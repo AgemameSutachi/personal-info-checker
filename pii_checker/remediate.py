@@ -137,6 +137,8 @@ def drive_root(path: str) -> str:
 
 
 RECYCLE_DIR = "$Recycle.Bin"
+# ごみ箱へ送ったあと、$I が見つからなかったときに探し直すまでの待ち（秒。合わせて約 3 秒）
+RECYCLE_RECHECK_DELAYS = (0.2, 0.3, 0.5, 1.0, 1.0)
 
 
 def _read_recycle_info(path: str) -> str | None:
@@ -164,7 +166,7 @@ def _read_recycle_info(path: str) -> str | None:
 
 
 def _find_in_recycle_bin(root: str, abs_path: str, since: float) -> bool | None:
-    """送ったファイルが、そのドライブのごみ箱に入ったか（since 以降にできた $I ファイルの元のパスで見る）。
+    r"""送ったファイルが、そのドライブのごみ箱に入ったか（since 以降にできた $I ファイルの元のパスで見る）。
 
     件数を数え直す SHQueryRecycleBinW は大きなごみ箱で数分かかるため、利用者のごみ箱のフォルダ
     （<ドライブ>\$Recycle.Bin\<SID>。他人のフォルダは開けないので飛ばす）の新しい $I だけを読む。
@@ -285,7 +287,15 @@ def send_to_recycle_bin(path: str) -> str:
         raise RemedyError(
             f"ごみ箱へ送れませんでした（コード {ret}。ファイルが使用中・権限が無い可能性）。ファイルは消していません"
         )
-    if _find_in_recycle_bin(root, abs_path, since):
+    found = _find_in_recycle_bin(root, abs_path, since)
+    # $I は SHFileOperationW が戻った直後にはまだ見えないことがある（配布版を VM で試して約 1/17 で
+    # 「完全に削除」と誤って記録した）。見つからなかったときだけ、少し待って探し直す
+    for delay in RECYCLE_RECHECK_DELAYS:
+        if found is not False:
+            break
+        time.sleep(delay)
+        found = _find_in_recycle_bin(root, abs_path, since)
+    if found:
         return "recycle_bin"
     return "permanent"  # ごみ箱に入ったと確かめられないものは、完全に削除したと扱う
 
@@ -781,6 +791,11 @@ def collect_task(args: dict) -> dict:
             db_schema = {}
     elif top.pos_layout in ORACLE_LAYOUTS and top.pos_info.get("tables"):
         db_schema = {"tables": top.pos_info["tables"]}  # 表ごとの列名（下見に「表.列名」を出す。値は含まない）
+    structure_problem = ""
+    if top.pos_layout == "oracle_expdp" and top.positions:
+        from .remedy_oracle import expdp_structure_problem
+
+        structure_problem = expdp_structure_problem(args["path"], {k[0] for k in top.positions})
     elif top.pos_layout == "access" and top.pos_info.get("tables"):
         from .remedy_access import engine_summary
 
@@ -797,6 +812,7 @@ def collect_task(args: dict) -> dict:
         "other_findings": others,
         "db_schema": db_schema,
         "password_opened": password_opened,
+        "structure_problem": structure_problem,
     }
 
 
@@ -1136,6 +1152,8 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
         from .remedy_oracle import EXPDP_UNSUPPORTED_REASON
 
         return EXPDP_UNSUPPORTED_REASON
+    if family == "oracle_expdp" and info.get("structure_problem"):
+        return info["structure_problem"]
     if family == "xlsx" and not path.lower().endswith(XLSX_EXTS):
         return "xlsx・xlsm 以外の Excel 形式は、中身を書き換えられません。ファイルの削除はできます"
     if info.get("overflow"):
@@ -1307,6 +1325,8 @@ class RemedyService:
         with self._lock:
             self._purge()
             a = self._analyses.get((job_id, item_path or top_path))
+        if a is not None and a.state == "running":
+            raise RemedyError("まだファイルを読み直している途中です。終わってからもう一度押してください")
         if a is None or a.state != "done":
             raise RemedyError(
                 "分析の結果が見つかりません（時間が経って捨てました）。もう一度「対処する」から始めてください"

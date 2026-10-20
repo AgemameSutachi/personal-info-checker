@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import locale
 import os
 import shutil
 import subprocess
@@ -551,8 +552,13 @@ def check_layout() -> None:
         raise SystemExit(f"! 一番上の exe がアプリ版の1つだけになっていない: {top_exes}")
     from pii_checker import __version__
 
+    # 配布版の exe はパイプへの出力に PC の既定の文字コード（日本語の Windows なら cp932）を使う
     out = subprocess.run(
-        [str(CMD_DIR / CMD_EXE), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        [str(CMD_DIR / CMD_EXE), "--version"],
+        capture_output=True,
+        text=True,
+        encoding=locale.getpreferredencoding(False),
+        errors="replace",
     )
     if out.returncode != 0 or __version__ not in out.stdout:
         raise SystemExit(f"! cmd/{CMD_EXE} が起動しない（終了コード {out.returncode}）: {out.stdout}{out.stderr}")

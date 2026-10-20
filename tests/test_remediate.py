@@ -174,6 +174,16 @@ def test_collect_positions_beyond_sample_limit(tmp_path):
     assert not any(it.positions for it in plain.items)
 
 
+def test_preview_while_still_analyzing_says_so(tmp_path):
+    """読み直しの途中で下見を求めたら「捨てました」ではなく「途中です」と返す（VM で API を試して紛らわしかった文面）。"""
+    p = tmp_path / "a.csv"
+    p.write_text("氏名\n山田太郎\n", encoding="utf-8")
+    svc, _store, job = make_service(tmp_path, [p])
+    svc._analyses[(job, str(p))] = Analysis(job, str(p))  # 状態は running のまま
+    with pytest.raises(RemedyError, match="途中"):
+        svc.preview(job, str(p), {"method": "delete_rows"})
+
+
 def test_positions_option_is_not_saved_and_not_in_signature(tmp_path):
     from pii_checker.signature import engine_signature
 

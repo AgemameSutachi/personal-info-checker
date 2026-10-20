@@ -39,6 +39,21 @@ def test_version_is_printed(capsys):
     assert capsys.readouterr().out.strip() == f"個人情報チェッカー {__version__}"
 
 
+def test_version_does_not_crash_when_output_cannot_encode_japanese(monkeypatch):
+    """日本語以外の Windows でパイプへ出すとき（cp1252）も、--version で落ちない（配布版を VM で試して見つけた不具合）。"""
+    import io
+
+    import pytest
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", out)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    out.flush()
+    assert out.buffer.getvalue().decode("cp1252").strip().endswith(__import__("pii_checker").__version__)
+
+
 def test_db_in_new_folder_is_created(tmp_path):
     """--db で無いフォルダを指しても、置き場を作って検査結果を保存できる（exe の確認で落ちていた・2026-10-17）。"""
     db = tmp_path / "new" / "sub" / "jobs.sqlite3"

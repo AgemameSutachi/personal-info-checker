@@ -488,10 +488,20 @@ def cmd_app(args) -> int:
 
 
 def ensure_std_streams() -> None:
-    """標準出力・標準エラーが無いとき（窓の exe・pythonw）は捨て先へ向け、表示のための書き込みで落ちないようにする。"""
+    """標準出力・標準エラーが無いとき（窓の exe・pythonw）は捨て先へ向け、表示のための書き込みで落ちないようにする。
+
+    日本語を表せない文字コード（日本語以外の Windows でパイプやファイルへ出すときの cp1252 など）でも、
+    出せない文字を「?」にして書き続ける（そのままだと --version や --help の表示だけで落ちる）。
+    """
     for name in ("stdout", "stderr"):
-        if getattr(sys, name) is None:
+        stream = getattr(sys, name)
+        if stream is None:
             setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        elif hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
 
 
 def _alert(message: str) -> None:

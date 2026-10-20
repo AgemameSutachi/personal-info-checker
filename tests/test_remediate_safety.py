@@ -213,9 +213,24 @@ def test_send_that_does_not_enter_the_bin_is_permanent(tmp_path, monkeypatch):
         return 0, False
 
     monkeypatch.setattr(remediate, "_shell_delete", shell_delete)
-    monkeypatch.setattr(remediate, "_find_in_recycle_bin", lambda root, path, since: False)
+    calls = []
+    monkeypatch.setattr(remediate, "_find_in_recycle_bin", lambda root, path, since: calls.append(1) or False)
+    monkeypatch.setattr(remediate, "RECYCLE_RECHECK_DELAYS", (0, 0, 0))
     assert REAL_SEND_TO_RECYCLE_BIN(str(p)) == "permanent"
     assert not p.exists()
+    assert len(calls) == 4  # 最初の1回と、待って探し直した3回
+
+
+@windows_only
+def test_send_whose_bin_entry_appears_late_is_recycle_bin(tmp_path, monkeypatch):
+    """$I が送った直後にはまだ見えなくても、探し直して見つかればごみ箱へ入ったと扱う（VM で見つけた誤り）。"""
+    p = tmp_path / "a.txt"
+    p.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(remediate, "_shell_delete", lambda abs_path: (os.remove(abs_path), (0, False))[1])
+    answers = iter([False, False, True])
+    monkeypatch.setattr(remediate, "_find_in_recycle_bin", lambda root, path, since: next(answers))
+    monkeypatch.setattr(remediate, "RECYCLE_RECHECK_DELAYS", (0, 0, 0))
+    assert REAL_SEND_TO_RECYCLE_BIN(str(p)) == "recycle_bin"
 
 
 @windows_only

@@ -984,6 +984,22 @@ class _IndexBuilder:
         return self.entries if (n_rows or had_entries) else []
 
 
+def expdp_structure_problem(path: str, tables: set[str]) -> str:
+    """書き換える表（tables）の区画が、書き換えられる作りか。だめなら理由（利用者に見せる文）、よければ空。
+
+    分析の段で一度だけ確かめ、下見で断る（実行してから断ると、下見が通ったのに実行で断られて分かりにくい）。
+    """
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        for seg in find_dp_segments(f, size):
+            if seg.name in tables and _structure_ok(f, size, seg.xml_at - 2, seg.xml_len) is None:
+                return (
+                    f"表「{seg.name}」の区画が想定した作り（制御ブロック・見出し・行・索引）と違うため、"
+                    "中身を書き換えられません（切り出した・壊れたダンプなど）。ファイルの削除はできます"
+                )
+    return ""
+
+
 def rewrite_dp_unit(f, out, seg: _DpSeg, size: int, row_fn) -> tuple[int, int]:
     """expdp の表の単位（制御ブロック＋本体）を、同じ大きさで書き直す。
 

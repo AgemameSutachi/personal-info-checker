@@ -125,7 +125,7 @@ class ArchiveEnv:
         try:
             safeio.ensure_free(self.workdir, max(0, int(nbytes)), "作業用の一時フォルダ")
         except safeio.TempSpaceShort as e:
-            raise RemedyError(f"{e}（元の書庫は変えていません）") from None
+            raise RemedyError(f"{e}（元の圧縮ファイルは変えていません）") from None
 
 
 def _leaf_file_name(entry_name: str) -> str:
@@ -196,7 +196,7 @@ def _list_7z(path: str, env: ArchiveEnv, kind: str) -> tuple[dict, list[dict], s
     """7-Zip で一覧を取る。（書庫の性質, 項目の一覧, 一覧に要ったパスワード）。"""
     from .formats.archive import NO_PASSWORD, WRONG_PW_MARKERS, _parse_7z_list
 
-    exe = _need_sevenzip(env, "この形式の書庫を読む")
+    exe = _need_sevenzip(env, "この形式の圧縮ファイルを読む")
     common = ["-sccUTF-8", "-scsUTF-8"] + (["-mcp=932"] if kind == "zip" else [])
     for pw in [NO_PASSWORD] + env.passwords:
         code, out = _sevenzip_run(exe, ["l", "-slt", f"-p{pw}"] + common + [path])
@@ -213,12 +213,12 @@ def _list_7z(path: str, env: ArchiveEnv, kind: str) -> tuple[dict, list[dict], s
                 if e.get("Folder", "-") != "+" and not e.get("Attributes", "").startswith("D")
             ]
             if code != 0 and any(m in out for m in ("ERRORS:", "Unexpected end", "Headers Error", "Data Error")):
-                raise RemedyError("書庫が途中で切れているか壊れているため、作り直せません")
+                raise RemedyError("圧縮ファイルが途中で切れているか壊れているため、作り直せません")
             return props, entries, (None if pw == NO_PASSWORD else pw)
         if not any(m in out for m in WRONG_PW_MARKERS):
-            raise RemedyError(f"書庫を開けませんでした（{_short_output(out, path, os.path.dirname(path))}）")
+            raise RemedyError(f"圧縮ファイルを開けませんでした（{_short_output(out, path, os.path.dirname(path))}）")
     raise RemedyError(
-        "書庫の一覧が暗号化されていて、手元のパスワードでは開けません（検査の画面でパスワードを入れ直してください）"
+        "圧縮ファイルの一覧が暗号化されていて、手元のパスワードでは開けません（検査の画面でパスワードを入れ直してください）"
     )
 
 
@@ -241,7 +241,7 @@ def _extract_with_7z(path: str, native: str, dest_dir: str, env: ArchiveEnv, kin
             shutil.move(target, dest)
             return dest, (None if pw == NO_PASSWORD else pw)
     raise RemedyError(
-        "書庫の中のファイルを取り出せませんでした（パスワードが手元に無い・違う、または壊れている可能性）。"
+        "圧縮ファイルの中のファイルを取り出せませんでした（パスワードが手元に無い・違う、または壊れている可能性）。"
         "検査の画面でパスワードを入れ直してから、もう一度お試しください"
     )
 
@@ -275,7 +275,7 @@ class Handler:
         raise NotImplementedError
 
     def rebuild(self, dst: str, entry: Entry, new_file: str | None) -> list[str]:
-        raise RemedyError(f"{kind_label(self.kind)} の書庫は書き換えられません")
+        raise RemedyError(f"{kind_label(self.kind)} の圧縮ファイルは書き換えられません")
 
     def signed(self) -> bool:
         return False
@@ -461,7 +461,7 @@ class ZipHandler(Handler):
         if not pw.isascii():
             raise RemedyError(
                 "パスワードつきの zip は、7-Zip の制限で、パスワードに英数字・記号以外の文字があると暗号化し直せません"
-                "（元の書庫は変えていません）"
+                "（元の圧縮ファイルは変えていません）"
             )
         aes_info = _aes_info(target.extra) if aes else None
         actual = (aes_info[1] if aes_info else 8) if aes else target.compress_type
@@ -631,7 +631,7 @@ class SevenZipHandler(Handler):
         if any(not e.get("Path") for e in raw):
             raise RemedyError("名前の無い項目のある形式のため、中のファイルを選べません")
         if not raw:
-            raise RemedyError("書庫の中にファイルが見つかりません")
+            raise RemedyError("圧縮ファイルの中にファイルが見つかりません")
         self._entries = [
             Entry(
                 name=norm_name(e["Path"]),
@@ -662,14 +662,14 @@ class SevenZipHandler(Handler):
         """全部の項目を out_dir へ取り出す（zip に作り直すとき）。"""
         from .formats.archive import NO_PASSWORD
 
-        exe = _need_sevenzip(self.env, "この形式の書庫を読む")
+        exe = _need_sevenzip(self.env, "この形式の圧縮ファイルを読む")
         self.env.need_space(sum(e.size for e in self._entries))
         code, out = _sevenzip_run(
             exe,
             ["x", "-y", f"-o{out_dir}", f"-p{NO_PASSWORD}", "-sccUTF-8", "-scsUTF-8"] + [self.path],
         )
         if code != 0:
-            raise RemedyError(f"書庫を取り出せませんでした（{_short_output(out, self.path, out_dir)}）")
+            raise RemedyError(f"圧縮ファイルを取り出せませんでした（{_short_output(out, self.path, out_dir)}）")
 
     def _method_switches(self) -> list[str]:
         """元の書庫の圧縮方式・まとめ圧縮（solid）の設定を、更新のときの指定にする。"""
@@ -704,7 +704,7 @@ class SevenZipHandler(Handler):
             return super().rebuild(dst, entry, new_file)
         from .formats.archive import NO_PASSWORD
 
-        exe = _need_sevenzip(self.env, "7z 書庫を作り直す")
+        exe = _need_sevenzip(self.env, "7z 圧縮ファイルを作り直す")
         notes: list[str] = []
         work = self.env.new_dir()
         arch = os.path.join(work, "w.7z")
@@ -735,16 +735,16 @@ class SevenZipHandler(Handler):
                 cwd=stage,
             )
         if code not in (0, 1) or not os.path.isfile(arch):
-            raise RemedyError(f"7-Zip で書庫を更新できませんでした（{_short_output(text, work)}）")
+            raise RemedyError(f"7-Zip で圧縮ファイルを更新できませんでした（{_short_output(text, work)}）")
         # 更新できたか確かめる（項目の大きさが新しい中身と同じ・取り除いたときは名前が消えている）
         _, after, _ = _list_7z(arch, _SubEnv(self.env, [pw] if pw else []), "7z")
         found = [e for e in after if norm_name(e["Path"]) == entry.name]
         if new_file is None and found:
-            raise RemedyError("7-Zip が項目を取り除きませんでした（元の書庫は変えていません）")
+            raise RemedyError("7-Zip が項目を取り除きませんでした（元の圧縮ファイルは変えていません）")
         if new_file is not None and (not found or int(found[0].get("Size") or -1) != os.path.getsize(new_file)):
-            raise RemedyError("7-Zip が項目を更新しませんでした（元の書庫は変えていません）")
+            raise RemedyError("7-Zip が項目を更新しませんでした（元の圧縮ファイルは変えていません）")
         if self.props.get("Solid") == "+":
-            notes.append("まとめて圧縮（solid）の書庫のため、7-Zip が含まれる塊を圧縮し直しました")
+            notes.append("まとめて圧縮（solid）の圧縮ファイルのため、7-Zip が含まれる塊を圧縮し直しました")
         shutil.copyfile(arch, dst)
         return notes
 
@@ -869,7 +869,7 @@ class SingleHandler(Handler):
     def rebuild(self, dst: str, entry: Entry, new_file: str | None) -> list[str]:
         if new_file is None:
             raise RemedyError(
-                "1ファイルを包んだだけの形式（gz・bz2・xz）では、中のファイルだけを取り除けません。書庫ごとの削除を選んでください"
+                "1ファイルを包んだだけの形式（gz・bz2・xz）では、中のファイルだけを取り除けません。圧縮ファイルごとの削除を選んでください"
             )
         if self.kind == "gzip":
             self._write_gzip(dst, new_file)
@@ -974,9 +974,9 @@ class Resolved:
         can_convert = False
         if not can_write:
             if not inner_ok:
-                convert_reason = "入れ子の途中に、書き換えられない形式（rar・cab・iso など）の書庫があります"
+                convert_reason = "入れ子の途中に、書き換えられない形式（rar・cab・iso など）の圧縮ファイルがあります"
             elif encrypted or (isinstance(top, SevenZipHandler) and top.encrypted()):
-                convert_reason = "パスワードつきの書庫は、zip に作り直すと暗号が外れてしまうため作り直せません"
+                convert_reason = "パスワードつきの圧縮ファイルは、zip に作り直すと暗号が外れてしまうため作り直せません"
             else:
                 can_convert = True
         return {
@@ -1001,7 +1001,7 @@ def open_handler(path: str, env: ArchiveEnv, name_hint: str) -> Handler:
 
         label = sniff.KIND_LABELS.get(kind, kind)
         raise RemedyError(
-            f"「{label}」は書庫として扱わないため、中のファイルだけを書き換えることはできません"
+            f"「{label}」は圧縮ファイルとして扱わないため、中のファイルだけを書き換えることはできません"
             "（Office 文書など、zip の形をした文書は、その形式の対処で扱います）"
         )
     if kind == "zip":
@@ -1026,7 +1026,7 @@ def _match_entry(entries: list[Entry], rest: str) -> tuple[Entry, str]:
             best = e
     if best is None:
         raise RemedyError(
-            "書庫の中に、その項目が見つかりません（書庫が検査のあとに変わった、または名前を読み違えた可能性）。もう一度検査してください"
+            "圧縮ファイルの中に、その項目が見つかりません（圧縮ファイルが検査のあとに変わった、または名前を読み違えた可能性）。もう一度検査してください"
         )
     return best, rest[len(best.name) + 1 :]
 
@@ -1034,7 +1034,7 @@ def _match_entry(entries: list[Entry], rest: str) -> tuple[Entry, str]:
 def extract_target(top_path: str, item_path: str, env: ArchiveEnv) -> Resolved:
     """検査のパス（外!内!…）をたどって、対象の項目を作業フォルダへ取り出す。"""
     if not item_path.startswith(top_path + "!"):
-        raise RemedyError("書庫の中のパスが正しくありません")
+        raise RemedyError("圧縮ファイルの中のパスが正しくありません")
     rest_all = item_path[len(top_path) + 1 :]
     rest = rest_all
     cur = top_path
@@ -1063,7 +1063,7 @@ def zip_target_for(top_path: str) -> str:
 def convert_to_zip(handler: SevenZipHandler, dst: str, entry: Entry, new_file: str | None, env: ArchiveEnv) -> None:
     """書けない形式の書庫（rar・cab・iso など）を、zip に作り直す（対象の項目だけ差し替え・取り除き）。"""
     if handler.encrypted():
-        raise RemedyError("パスワードつきの書庫は、zip に作り直すと暗号が外れてしまうため作り直せません")
+        raise RemedyError("パスワードつきの圧縮ファイルは、zip に作り直すと暗号が外れてしまうため作り直せません")
     out_dir = env.new_dir()
     handler.extract_all(out_dir)
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
@@ -1072,7 +1072,7 @@ def convert_to_zip(handler: SevenZipHandler, dst: str, entry: Entry, new_file: s
                 continue
             src = new_file if e.index == entry.index else os.path.join(out_dir, e.native.replace("/", os.sep))
             if not os.path.isfile(src):
-                raise RemedyError(f"書庫から「{e.name}」を取り出せなかったため、zip に作り直せません")
+                raise RemedyError(f"圧縮ファイルから「{e.name}」を取り出せなかったため、zip に作り直せません")
             lt = time.localtime(os.path.getmtime(src) if e.index != entry.index else time.time())
             date_time = (max(lt.tm_year, 1980), lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec)
             zi = zipfile.ZipInfo(norm_name(e.name), date_time=date_time)
@@ -1102,8 +1102,8 @@ def rebuild_target(res: Resolved, new_leaf: str | None, env: ArchiveEnv, dst: st
         else:
             if not hop.handler.writable:
                 raise RemedyError(
-                    f"{kind_label(hop.handler.kind)} の書庫は書き換えられません。"
-                    "最も外側の書庫なら「zip に作り直す」を選べます"
+                    f"{kind_label(hop.handler.kind)} の圧縮ファイルは書き換えられません。"
+                    "最も外側の圧縮ファイルなら「zip に作り直す」を選べます"
                 )
             notes += hop.handler.rebuild(out, hop.entry, new)
         new = out

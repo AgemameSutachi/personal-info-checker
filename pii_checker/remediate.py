@@ -58,7 +58,7 @@ METHOD_LABELS = {
     "delete_sheet": "該当するシートを削除",
     "delete_table": "該当する表を削除（その表のデータはすべて消える）",
     # 書庫の中のファイルに対する方法（T2-a2）
-    "remove_entry": "書庫から取り除く（中のファイルを削除）",
+    "remove_entry": "圧縮ファイルから取り除く（中のファイルを削除）",
     "convert_zip": "zip に作り直す（形式が変わる）",
     # PDF・docx・pptx（T2-c）
     "redact": "黒塗り（文字ごと消す。元に戻せない）",
@@ -73,7 +73,7 @@ LAYOUT_LABELS = {
 }
 # 書庫の中のファイルにだけ使える方法
 ARCHIVE_ONLY_METHODS = ("remove_entry", "convert_zip")
-ARCHIVE_DELETE_LABEL = "書庫全体を削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）"
+ARCHIVE_DELETE_LABEL = "圧縮ファイルごと削除（ごみ箱へ送る。ごみ箱が無い場所では完全に削除）"
 CONF_RANKS = {"high": 3, "medium": 2, "low": 1}
 RANK_LABELS = {3: "高", 2: "中", 1: "低"}
 ANALYSIS_KEEP_SECONDS = 600  # 分析（位置の集まり）をメモリに持つ時間
@@ -537,7 +537,7 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
                 _discard(dest)  # 元を消せなかったので、作った zip は片付けて、元を残す
                 store.delete_remediation(rid)
             except Exception:  # noqa: BLE001
-                raise stuck("元の書庫を消せず、作った zip も片付けられませんでした") from None
+                raise stuck("元の圧縮ファイルを消せず、作った zip も片付けられませんでした") from None
             raise _as_remedy(e) from None
         finish()
         return {"disposal": disposal, "pre_name": None}
@@ -639,11 +639,11 @@ def recover_record(rec: dict) -> tuple[str, str]:
         if _exists(dest) and _exists(path):
             return (
                 "recovered",
-                "zip は作り終えていますが、元の書庫を消せていません（元の書庫と zip の両方が残っています）",
+                "zip は作り終えていますが、元の圧縮ファイルを消せていません（元の圧縮ファイルと zip の両方が残っています）",
             )
         if _exists(dest):
-            return "applied", "zip への作り直しと元の書庫の削除は済んでいました"
-        return "recovered", "zip を作る前に止まっていました（元の書庫のまま）"
+            return "applied", "zip への作り直しと元の圧縮ファイルの削除は済んでいました"
+        return "recovered", "zip を作る前に止まっていました（元の圧縮ファイルのまま）"
     # recycle
     if not _exists(path) and _exists(pre):
         _fs_rename(pre, path)
@@ -962,19 +962,19 @@ def prepare_inner(args: dict) -> dict:
         orig_sha = args.get("expected_sha256") or sha256_file(path)
         if sha256_file(path) != orig_sha:
             raise RemedyError(
-                "下見のあとに書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
+                "下見のあとに圧縮ファイルが変わりました。もう一度、下見からやり直してください（何も変えていません）"
             )
         env = _archive_env(options, book, path, workdir)
         res = aw.extract_target(path, item_path, env)
         arch = res.describe()
         if sha256_file(path) != orig_sha:
             raise RemedyError(
-                "取り出している間に書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
+                "取り出している間に圧縮ファイルが変わりました。もう一度、下見からやり直してください（何も変えていません）"
             )
         convert = bool(args.get("convert_zip")) and not arch["can_write"]
         if not arch["can_write"] and not convert:
             raise RemedyError(
-                "この書庫は、そのままでは書き換えられません。「zip に作り直す」を選んでください（形式が変わります）"
+                "この圧縮ファイルは、そのままでは書き換えられません。「zip に作り直す」を選んでください（形式が変わります）"
             )
         new_leaf = None
         stats: dict = {"entries": 1}
@@ -1017,7 +1017,7 @@ def prepare_inner(args: dict) -> dict:
             fsync_path(tmp_new)
             notes = [*notes, *inherit_file_metadata(path, tmp_new)]
             if sha256_file(path) != orig_sha:
-                raise RemedyError("作り直している間に元の書庫が変わりました。何も変えていません")
+                raise RemedyError("作り直している間に元の圧縮ファイルが変わりました。何も変えていません")
             remaining = _verify_new_file(tmp_new, options, args, sorted(maker.produced) if maker else [], book)
             new_sha = sha256_file(tmp_new)
         except BaseException:
@@ -1084,21 +1084,21 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     arch = info.get("archive")
     if method in ARCHIVE_ONLY_METHODS:
         if not arch:
-            return "書庫の中のファイルにだけ使える方法です"
+            return "圧縮ファイルの中のファイルにだけ使える方法です"
         if method == "convert_zip":
             if arch["can_write"]:
-                return "この形式は、書庫のまま書き換えられるため、作り直す必要はありません"
+                return "この形式は、圧縮ファイルのまま書き換えられるため、作り直す必要はありません"
             return "" if arch["can_convert"] else arch["convert_reason"]
         if not (arch["can_write"] or arch["can_convert"]):
-            return arch["convert_reason"] + "。書庫ごとの削除（ごみ箱）はできます"
+            return arch["convert_reason"] + "。圧縮ファイルごとの削除（ごみ箱）はできます"
         if arch["single"]:
             return (
                 "1ファイルを包んだだけの形式（gz・bz2・xz など）では、中のファイルだけを取り除けません。"
-                "書庫ごとの削除を選んでください"
+                "圧縮ファイルごとの削除を選んでください"
             )
         return ""
     if arch and not (arch["can_write"] or arch["can_convert"]):
-        return arch["convert_reason"] + "。書庫ごとの削除（ごみ箱）はできます"
+        return arch["convert_reason"] + "。圧縮ファイルごとの削除（ごみ箱）はできます"
     status = info.get("status")
     if status == Status.NEEDS_PASSWORD.value:
         return "パスワードが必要な（暗号化された）ファイルは、中身を書き換えられません。ファイルの削除はできます"
@@ -1370,7 +1370,7 @@ class RemedyService:
         }
         if item_path:
             if not item_path.startswith(top_path + "!"):
-                raise RemedyError("書庫の中のパスが正しくありません")
+                raise RemedyError("圧縮ファイルの中のパスが正しくありません")
             if not self.store.query(
                 "SELECT 1 FROM items WHERE job_id=? AND top_path=? AND path=?", (job_id, top_path, item_path)
             ):
@@ -1461,7 +1461,7 @@ class RemedyService:
         convert = bool(params.get("convert_zip")) and bool(arch) and not arch["can_write"] and method != "delete_file"
         if arch and not arch["can_write"] and method != "delete_file" and not convert:
             raise RemedyError(
-                "この書庫は、そのままでは書き換えられません。「zip に作り直す」も選んでください（形式が変わります）"
+                "この圧縮ファイルは、そのままでは書き換えられません。「zip に作り直す」も選んでください（形式が変わります）"
             )
         if convert and not a.info["methods"]["convert_zip"]["available"]:
             raise RemedyError(a.info["methods"]["convert_zip"]["reason"] or "zip に作り直せません")
@@ -1524,14 +1524,16 @@ class RemedyService:
         if method == "delete_file":
             out["changes"] = {"files": 1}
             out["disposal"] = "recycle_bin" if recycle else "permanent"
-            out["summary"], note = disposal_text("書庫" if arch else "ファイル", leaf, recycle)
+            out["summary"], note = disposal_text("圧縮ファイル" if arch else "ファイル", leaf, recycle)
             if note:
                 out["warnings"].append(note)
             out["can_run"] = True
             return out
         if method == "remove_entry":
             out["changes"] = {"entries": 1}
-            out["summary"] = f"書庫「{leaf}」の中のファイル「{arch['item']}」を取り除きます（書庫を作り直します）"
+            out["summary"] = (
+                f"圧縮ファイル「{leaf}」の中のファイル「{arch['item']}」を取り除きます（圧縮ファイルを作り直します）"
+            )
             self._archive_warnings(out, arch, top_path, p["convert_zip"], recycle)
             self._original_warning(out, leaf, recycle, bool(arch), p["convert_zip"])
             out["can_run"] = True
@@ -1599,7 +1601,7 @@ class RemedyService:
                 "それらはこの対処では変わらず、実行のあとの検査し直しで残りとして出ます"
             )
         if arch:
-            out["summary"] = f"書庫の中の「{arch['item']}」: {out['summary']}"
+            out["summary"] = f"圧縮ファイルの中の「{arch['item']}」: {out['summary']}"
             self._archive_warnings(out, arch, top_path, p["convert_zip"], recycle)
         self._original_warning(out, leaf, recycle, bool(arch), p["convert_zip"])
         out["can_run"] = True
@@ -1611,7 +1613,7 @@ class RemedyService:
         zip への作り直しは別の文面。"""
         if convert:
             return  # _archive_warnings が、元の書庫の行き先を含めて出す
-        noun = "書庫" if is_archive else "ファイル"
+        noun = "圧縮ファイル" if is_archive else "ファイル"
         if recycle:
             out["disposal"] = "recycle_bin"
             stem, ext = os.path.splitext(leaf)
@@ -1650,21 +1652,21 @@ class RemedyService:
             if kind == "zip":
                 same += "（圧縮したままのデータ・日時・圧縮方式・属性・コメント・並び順を保ちます）"
             elif kind == "7z":
-                same = "7-Zip の更新で作り直します。ほかの項目の中身は変わりません（まとめて圧縮した書庫は、含まれる塊を圧縮し直します）"
+                same = "7-Zip の更新で作り直します。ほかの項目の中身は変わりません（まとめて圧縮した圧縮ファイルは、含まれる塊を圧縮し直します）"
             elif kind == "tar":
                 same += "（日時・権限・所有者などのメタデータも保ちます）"
             elif arch["levels"][-1]["single"]:
                 same = "中身を書き換えて、同じ形式で包み直します"
-            out["notes"].insert(0, f"書庫「{leaf}」全体を作り直します。{same}")
+            out["notes"].insert(0, f"圧縮ファイル「{leaf}」全体を作り直します。{same}")
         if len(arch["levels"]) > 1:
             names = " → ".join([leaf] + [lv["name"] for lv in arch["levels"]])
-            out["notes"].append(f"入れ子になっています（{names}）。内側の書庫から順に作り直します")
+            out["notes"].append(f"入れ子になっています（{names}）。内側の圧縮ファイルから順に作り直します")
         out["notes"].append(
-            "同じ書庫の中の別の項目も対処するときは、1項目ずつ実行します（そのたびに書庫を作り直します）"
+            "同じ圧縮ファイルの中の別の項目も対処するときは、1項目ずつ実行します（そのたびに圧縮ファイルを作り直します）"
         )
         if arch["signed"]:
             out["warnings"].append(
-                "署名つきの書庫（jar の署名など）です。作り直すと、署名の検証に通らなくなります（署名し直しが要ります）"
+                "署名つきの圧縮ファイル（jar の署名など）です。作り直すと、署名の検証に通らなくなります（署名し直しが要ります）"
             )
         if arch["encrypted"] and not convert:
             out["notes"].append(

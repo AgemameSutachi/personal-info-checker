@@ -632,7 +632,7 @@ def build_tools_samples(corpus: Corpus, have: dict[str, bool]) -> None:
         "linux_archive/piichk-meibo_1.0_all.deb",
         "detect",
         "deb",
-        note="ar 書庫の中の data.tar.* に usr/share/piichk/meibo.csv",
+        note="ar 圧縮ファイルの中の data.tar.* に usr/share/piichk/meibo.csv",
         skipped=why("deb"),
     )
     corpus.add(

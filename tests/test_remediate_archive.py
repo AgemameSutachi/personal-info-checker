@@ -854,7 +854,7 @@ def test_single_compressed_file_is_rewrapped(tmp_path, ext, trash):
     item = f"{archive}!people.csv"
     a = analyze_inner(svc, job, archive, item)
     assert not a.info["methods"]["remove_entry"]["available"]  # 1ファイルを包んだだけ: 中のファイルだけは取り除けない
-    assert "書庫ごと" in a.info["methods"]["remove_entry"]["reason"]
+    assert "圧縮ファイルごと" in a.info["methods"]["remove_entry"]["reason"]
     r, _ = run_inner(svc, job, archive, item, method="delete_rows", confidences=ALL_RANKS)
     assert r["state"] == "done", r
     raw = archive.read_bytes()
@@ -916,11 +916,11 @@ def test_unwritable_formats_are_classified():
     n = stub_resolved(("zip", True), ("rar", False)).describe()
     assert not n["can_write"] and not n["can_convert"] and "入れ子の途中" in n["convert_reason"]
     got = {"archive": n, "status": "scanned", "layout": "csv,"}
-    assert "書庫ごとの削除" in remediate.unsupported_reason("dummy", "x.csv", got)
-    assert "書庫ごとの削除" in remediate.unsupported_reason("remove_entry", "x.csv", got)
+    assert "圧縮ファイルごとの削除" in remediate.unsupported_reason("dummy", "x.csv", got)
+    assert "圧縮ファイルごとの削除" in remediate.unsupported_reason("remove_entry", "x.csv", got)
     assert remediate.unsupported_reason("delete_file", "x.csv", got) == ""
     # 実ファイルには使えない方法
-    assert "書庫の中" in remediate.unsupported_reason("remove_entry", "x.csv", {"status": "scanned"})
+    assert "圧縮ファイルの中" in remediate.unsupported_reason("remove_entry", "x.csv", {"status": "scanned"})
 
 
 def make_wim(tmp_path: Path) -> Path:
@@ -951,7 +951,7 @@ def test_unwritable_archive_can_become_zip(tmp_path, monkeypatch, trash):
     m = a.info["methods"]
     arch = a.info["archive"]
     assert arch["top_kind"] == "wim" and not arch["can_write"] and arch["can_convert"]
-    assert m["delete_file"]["available"] and m["delete_file"]["label"].startswith("書庫全体")
+    assert m["delete_file"]["available"] and m["delete_file"]["label"].startswith("圧縮ファイルごと削除")
     assert m["convert_zip"]["available"] and m["remove_entry"]["available"] and m["delete_rows"]["available"]
     # 「zip に作り直す」を選ばずに実行しようとすると断る
     with pytest.raises(RemedyError, match="zip に作り直す"):
@@ -1011,11 +1011,13 @@ def test_archive_delete_file_uses_same_two_messages(tmp_path):
     a = svc.get_analysis(job, str(archive), item)
     a.info["recycle_bin"] = True
     assert svc.preview(job, str(archive), {"method": "delete_file", "item_path": item})["summary"] == (
-        "書庫「pack.wim」をごみ箱へ送ります（ごみ箱から戻せます）"
+        "圧縮ファイル「pack.wim」をごみ箱へ送ります（ごみ箱から戻せます）"
     )
     a.info["recycle_bin"] = False
     pv = svc.preview(job, str(archive), {"method": "delete_file", "item_path": item})
-    assert pv["summary"] == "書庫「pack.wim」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
+    assert (
+        pv["summary"] == "圧縮ファイル「pack.wim」を完全に削除します（この場所にはごみ箱がありません。元に戻せません）"
+    )
     assert any("完全に削除します" in w for w in pv["warnings"] + pv["notes"])
 
 
@@ -1206,9 +1208,9 @@ def test_office_documents_are_not_treated_as_archives(tmp_path):
     workdir, owner = aw.make_workdir(str(tmp_path))
     try:
         env = aw.ArchiveEnv(SEVENZIP, [], workdir)
-        with pytest.raises(RemedyError, match="書庫として扱わない"):
+        with pytest.raises(RemedyError, match="圧縮ファイルとして扱わない"):
             aw.open_handler(str(x), env, "book.xlsx")
-        with pytest.raises(RemedyError, match="書庫として扱わない"):
+        with pytest.raises(RemedyError, match="圧縮ファイルとして扱わない"):
             aw.extract_target(str(x), f"{x}!xl/workbook.xml", env)
     finally:
         aw.remove_workdir(workdir, owner)
@@ -1350,7 +1352,7 @@ def test_api_inner_item_end_to_end(tmp_path, trash):
             time.sleep(0.1)
         assert a["state"] == "done", a
         assert a["archive"]["top_kind"] == "zip" and a["archive"]["can_write"] and "remove_entry" in a["methods"]
-        assert a["methods"]["delete_file"]["label"].startswith("書庫全体")
+        assert a["methods"]["delete_file"]["label"].startswith("圧縮ファイルごと削除")
         body = {"top_path": str(archive), "item_path": item, "method": "delete_rows", "confidences": ALL_RANKS}
         code, pv = call(f"/api/jobs/{job}/remedy/preview", "POST", body)
         assert (

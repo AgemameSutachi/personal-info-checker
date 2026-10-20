@@ -846,7 +846,7 @@ async function loadTable() {
     head = ["日時", "ファイル", "方法", "変わった数", "元のファイル", "残った検出", "状態"];
     rows = r.rows.map((x) => [
       `<td class="nowrap">${esc(fmtTime(x.at))}</td>`,
-      pathCell(x.top_path).replace(/<\/td>$/, `${x.item_path ? `<div class="small muted">書庫の中: ${esc(x.item_path.slice(x.top_path.length + 1))}</div>` : ""}</td>`),
+      pathCell(x.top_path).replace(/<\/td>$/, `${x.item_path ? `<div class="small muted">圧縮ファイルの中: ${esc(x.item_path.slice(x.top_path.length + 1))}</div>` : ""}</td>`),
       `<td title="${esc(x.method_label)}">${esc(shortMethodName(x))}${x.converted_to ? `<div class="small muted">→ ${esc(leafName(x.converted_to))} に作り直し</div>` : ""}</td>`,
       `<td class="small">${esc(changedText(x.changed))}</td>`,
       `<td class="small">${esc(originalText(x))}</td>`,
@@ -948,7 +948,7 @@ async function openDetail(topPath) {
         ${it.method ? `<div class="small muted">読み方: ${esc(it.method)}</div>` : ""}
         ${it.notes.length ? `<div class="small muted">補足: ${it.notes.map(esc).join("／")}</div>` : ""}
         ${Object.keys(it.counts).length ? `<div class="small">検出: ${Object.entries(it.counts).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
-        ${idx > 0 && Object.keys(it.counts).length && fileRow && fileRow.n_findings ? `<div><button type="button" class="rm-item small" data-item="${esc(it.path)}" title="この書庫の中のファイルだけを対処します（書庫を作り直します。元の書庫はごみ箱へ送ります）">書庫の中のこのファイルを対処する…</button></div>` : ""}
+        ${idx > 0 && Object.keys(it.counts).length && fileRow && fileRow.n_findings ? `<div><button type="button" class="rm-item small" data-item="${esc(it.path)}" title="この圧縮ファイルの中のファイルだけを対処します（圧縮ファイルを作り直します。元の圧縮ファイルはごみ箱へ送ります）">zip などの中のこのファイルを対処する…</button></div>` : ""}
         ${it.distinct && Object.keys(it.distinct).length && !(idx === 0 && marks) ? `<div class="small">異なる値（確度 中以上）: ${Object.entries(it.distinct).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(types[k] || k)} ${fmtNum(n)}`).join("、")}</div>` : ""}
       </div>`).join("") +
     (f.rows.length
@@ -1170,11 +1170,11 @@ function guideText(d, preName) {
 // 対処の記録の「方法」の列に出す短い名前（長い説明は title に。ごみ箱へ送ったか完全に削除かは「元のファイル」の列）
 const RM_SHORT = {
   delete_file: "ファイルを削除", delete_rows: "行を削除", delete_columns: "列を削除", dummy: "ダミー化",
-  delete_sheet: "シートを削除", delete_table: "表を削除", remove_entry: "書庫から取り除く", convert_zip: "zip に作り直す",
+  delete_sheet: "シートを削除", delete_table: "表を削除", remove_entry: "圧縮ファイルから取り除く", convert_zip: "zip に作り直す",
   redact: "黒塗り", delete_pages: "ページを削除", delete_paragraphs: "段落を削除", delete_slides: "スライドを削除",
 };
 function shortMethodName(x) {
-  if (x.method === "delete_file" && x.item_path) return "書庫ごと削除";
+  if (x.method === "delete_file" && x.item_path) return "圧縮ファイルごと削除";
   return RM_SHORT[x.method] || x.method_label;
 }
 function originalText(x) {
@@ -1191,7 +1191,7 @@ function remedyStateCell(x) {
 function changedText(c) {
   if (!c) return "";
   const parts = [];
-  if (c.entries) parts.push(`書庫の中のファイル ${fmtNum(c.entries)} を取り除き`);
+  if (c.entries) parts.push(`圧縮ファイルの中のファイル ${fmtNum(c.entries)} を取り除き`);
   if (c.files) parts.push(`ファイル ${fmtNum(c.files)}`);
   if (c.rows) parts.push(`行 ${fmtNum(c.rows)}`);
   if (c.cols) parts.push(`列 ${fmtNum(c.cols)}`);
@@ -1249,7 +1249,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
   const wholeDelete = itemPath ? methods.filter(([k]) => k === "delete_file") : [];
   const mainMethods = itemPath ? methods.filter(([k]) => k !== "delete_file") : methods;
   const methodLabel = (k, m) => (k === "delete_file" && itemPath
-    ? `書庫全体を削除（中のファイル ${fmtNum((a.archive && a.archive.entry_count) || 0)} 件を含む。ごみ箱へ送る。ごみ箱が無い場所では完全に削除）`
+    ? `圧縮ファイルごと削除（中のファイル ${fmtNum((a.archive && a.archive.entry_count) || 0)} 件を含む。ごみ箱へ送る。ごみ箱が無い場所では完全に削除）`
     : m.label);
   const methodRow = ([k, m]) => `<label class="check rm-method${m.available ? "" : " disabled"}"><input type="radio" name="rm-method" value="${esc(k)}"${m.available ? "" : " disabled"}> ${esc(methodLabel(k, m))}${m.available ? "" : `<span class="small muted"> — 選べません: ${esc(m.reason)}</span>`}</label>`;
   const arch = a.archive || null;
@@ -1264,15 +1264,15 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
       <p class="small muted">選んで実行したときだけ書き換えます。元のファイルはごみ箱へ送ります（ごみ箱から戻せます）。ごみ箱の無い場所では元は残りません。</p>
       <details class="small muted rm-more"><summary>詳しく</summary>
         <p>自動では何も変わりません。個人情報のファイルを手元のディスクへ写さないため、元の写しは作りません。</p>
-        <p>元のファイル（書庫の中のファイルなら書庫）は、ごみ箱のある場所では、同じフォルダの中で「元の名前（対処前 日時）」に名前を変えてからごみ箱へ送ります。ごみ箱からその名前で戻せます。</p>
+        <p>元のファイル（zip・7z・rar など圧縮ファイルの中のファイルなら、その圧縮ファイル）は、ごみ箱のある場所では、同じフォルダの中で「元の名前（対処前 日時）」に名前を変えてからごみ箱へ送ります。ごみ箱からその名前で戻せます。</p>
         <p>ごみ箱が無い場所（ネットワーク・外付けなど）では、元のファイルは残らず、元に戻せません。</p>
       </details>
-      ${arch ? `<p class="small">書庫: ${esc(arch.top_label)}${arch.levels.length > 1 ? `（入れ子 ${arch.levels.length} 段）` : ""}。${arch.can_write ? "書庫全体を作り直します。ほかの項目は中身を変えずに写します。" : arch.can_convert ? "この形式は書き換えられません。「zip に作り直す」と、形式が変わります（元の書庫は削除します）。" : esc(arch.convert_reason)}${arch.signed ? " 署名つきです（作り直すと署名が壊れます）。" : ""}${arch.encrypted && arch.can_write ? ` パスワードつきです（検査のとき入れたパスワードで暗号化し直します）。` : ""}</p>` : ""}
+      ${arch ? `<p class="small">圧縮ファイル: ${esc(arch.top_label)}${arch.levels.length > 1 ? `（入れ子 ${arch.levels.length} 段）` : ""}。${arch.can_write ? "圧縮ファイル全体を作り直します。ほかの項目は中身を変えずに写します。" : arch.can_convert ? "この形式は書き換えられません。「zip に作り直す」と、形式が変わります（元の圧縮ファイルは削除します）。" : esc(arch.convert_reason)}${arch.signed ? " 署名つきです（作り直すと署名が壊れます）。" : ""}${arch.encrypted && arch.can_write ? ` パスワードつきです（検査のとき入れたパスワードで暗号化し直します）。` : ""}</p>` : ""}
       <fieldset class="rm-set"><legend>方法</legend>
         ${mainMethods.map(methodRow).join("")}
         ${wholeDelete.length ? `<div class="rm-whole">${wholeDelete.map(methodRow).join("")}</div>` : ""}
       </fieldset>
-      ${needConvert ? `<fieldset class="rm-set" id="rm-convert-set"><legend>形式</legend><label class="check"><input type="checkbox" id="rm-convert" checked disabled> ${esc(a.methods.convert_zip.label)} <span class="small muted">— この形式は書き換えられないため、書庫ごとの削除以外の方法は、zip に作り直して行います（元の書庫は削除します）</span></label></fieldset>` : ""}
+      ${needConvert ? `<fieldset class="rm-set" id="rm-convert-set"><legend>形式</legend><label class="check"><input type="checkbox" id="rm-convert" checked disabled> ${esc(a.methods.convert_zip.label)} <span class="small muted">— この形式は書き換えられないため、圧縮ファイルごとの削除以外の方法は、zip に作り直して行います（元の圧縮ファイルは削除します）</span></label></fieldset>` : ""}
       <div id="rm-filters" class="hidden">
         <fieldset class="rm-set"><legend>対象にする種類（実行の時点で見つけた全部の検出が対象です）</legend>
           ${typeRows.map(([k, c]) => `<label class="check"><input type="checkbox" name="rm-type" value="${esc(k)}" checked> ${esc(types[k] || k)} <span class="small muted">（${esc(confCount(c))}）</span></label>`).join("")}
@@ -1356,7 +1356,7 @@ function renderRemedyPreview(topPath, body, pv, btn) {
     $("#rm-confirm").innerHTML = `
       <div class="rm-confirm" role="alertdialog" aria-label="実行の確認">
         ${disposalBanner(pv.disposal, false)}
-        <p>${pv.item_name ? "書庫" : "ファイル"} <strong class="mono">${esc(pv.file_name)}</strong>${pv.item_name && pv.method !== "delete_file" ? ` の中の <strong class="mono">${esc(pv.item_name)}</strong>` : ""}${pv.item_name && pv.method === "delete_file" ? " 全体" : ""} に対して、次を実行します。</p>
+        <p>${pv.item_name ? "圧縮ファイル" : "ファイル"} <strong class="mono">${esc(pv.file_name)}</strong>${pv.item_name && pv.method !== "delete_file" ? ` の中の <strong class="mono">${esc(pv.item_name)}</strong>` : ""}${pv.item_name && pv.method === "delete_file" ? " 全体" : ""} に対して、次を実行します。</p>
         <p><strong>${esc(pv.method_label)}</strong>: ${esc(pv.summary)}</p>
         <p class="small muted">よろしければ「実行する」を押してください。</p>
         <div class="row"><button type="button" id="rm-go" class="danger">実行する</button> <button type="button" id="rm-back">やめる</button></div>
@@ -1401,9 +1401,9 @@ async function runRemedy(topPath, body, btn) {
   // 書庫ごとの削除は「書庫 ○○ 全体」、取り除きは「書庫 ○○ から ○○ を取り除き、書庫を作り直しました」と出す
   const target = r.item_name && r.method !== "remove_entry" && r.method !== "delete_file"
     ? `（${esc(r.file_name)} の中の ${esc(r.item_name)}）`
-    : r.item_name && r.method === "delete_file" ? `（書庫 ${esc(r.file_name)} 全体）` : `（${esc(r.file_name)}）`;
+    : r.item_name && r.method === "delete_file" ? `（圧縮ファイル ${esc(r.file_name)} 全体）` : `（${esc(r.file_name)}）`;
   const doneLine = r.method === "remove_entry"
-    ? `<p><strong>書庫 <span class="mono">${esc(r.file_name)}</span> から <span class="mono">${esc(r.item_name)}</span> を取り除き、書庫を作り直しました。</strong></p>`
+    ? `<p><strong>圧縮ファイル <span class="mono">${esc(r.file_name)}</span> から <span class="mono">${esc(r.item_name)}</span> を取り除き、圧縮ファイルを作り直しました。</strong></p>`
     : `<p><strong>${esc(r.method_label)}</strong>: ${esc(changedText(r.changed))}${target}</p>`;
   area.innerHTML = `
     <div class="item-card rm-card rm-done" role="status">

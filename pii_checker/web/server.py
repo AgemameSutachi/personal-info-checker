@@ -533,7 +533,7 @@ def create_app(
 
     def _remedy_item(payload: dict) -> None:
         if not isinstance(payload.get("item_path") or "", str):
-            raise HTTPException(400, "書庫の中のパスの指定が正しくありません")
+            raise HTTPException(400, "圧縮ファイルの中のパスの指定が正しくありません")
 
     def _remedy_call(fn, *args):
         """対処の処理を呼び、利用者向けの失敗（RemedyError）を 400 で返す（文面はそのまま画面に出す）。"""
@@ -548,7 +548,7 @@ def create_app(
         _job_or_404(job_id)
         item_path = payload.get("item_path") or ""
         if not isinstance(item_path, str):
-            raise HTTPException(400, "書庫の中のパスの指定が正しくありません")
+            raise HTTPException(400, "圧縮ファイルの中のパスの指定が正しくありません")
         return remedy_service.request_analysis(job_id, _remedy_top_path(payload), item_path)
 
     @app.post("/api/jobs/{job_id}/remedy/preview")

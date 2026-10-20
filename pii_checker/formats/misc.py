@@ -508,7 +508,7 @@ def handle_out_of_scope(ctx: ScanContext, blob: Blob, item: ItemResult, col: Col
                 item.kind = f"自己解凍形式・インストーラー（{archive_types[-1]}）"
                 return handle_with_7z_exe(ctx, blob, item, col, depth, kind="sfx")
         else:
-            raise Uncheckable("実行ファイルの中に書庫（自己解凍形式）が無いかを確かめるには 7-Zip が要る")
+            raise Uncheckable("実行ファイルの中に圧縮ファイル（自己解凍形式）が無いかを確かめるには 7-Zip が要る")
     raise OutOfScope(f"{item.kind}は文字情報を持たない形式として対象外（中の映像・音声・プログラムは検査していない）")
 
 

@@ -1265,7 +1265,9 @@ class Analysis:
             d[str(rank)] = d.get(str(rank), 0) + len(arr) // 4
         # 「対象にするシート・表」の絞り込みは、Excel と DB だけ（PDF・docx・pptx の「シート」はページ・部品・スライドの名前）
         sheets = [] if self.info.get("layout") in OFFICE_LAYOUTS else sorted({k[0] for k in self.positions if k[0]})
-        return {"state": "done", **self.info, "counts": counts, "sheets": sheets}
+        # 絞り込みの欄の呼び名（DB と Access の「シート」は表の名前）
+        sheet_word = "表" if self.info.get("layout") in DB_LAYOUTS else "シート"
+        return {"state": "done", **self.info, "counts": counts, "sheets": sheets, "sheet_word": sheet_word}
 
 
 class RunState:

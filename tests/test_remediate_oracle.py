@@ -1280,6 +1280,7 @@ def test_exp_analysis_lists_methods_and_preview_warns_to_check_with_imp(tmp_path
     )
     assert a.info["layout"] == "oracle_exp"
     assert "顧客" in a.view()["sheets"] and "商品" not in a.view()["sheets"]  # 対象にする表（検出のある表だけ）
+    assert a.view()["sheet_word"] == "表"
     pv = svc.preview(job, str(p), {"method": "delete_rows", "confidences": ALL_RANKS})
     text = "\n".join(pv["warnings"] + pv["notes"])
     assert "imp" in text and "確かめ" in text and "元の場所へ戻して" in text and pv["sample_rows"][0] == "顧客: 1 行目"

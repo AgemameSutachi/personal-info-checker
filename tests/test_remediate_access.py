@@ -778,6 +778,7 @@ def test_no_strategy_only_file_deletion(tmp_path, monkeypatch):
     svc, store, job = make_service(tmp_path, [p])
     monkeypatch.setattr(ra, "FORCED_STRATEGIES", [])  # 使える手段が1つも無い状況
     a = analyze(svc, job, p)
+    assert a.view()["sheet_word"] == "表"  # 絞り込みの欄は「対象にする表」
     methods = a.info["methods"]
     assert methods["delete_file"]["available"]
     for m in ("delete_rows", "delete_columns", "dummy", "delete_table"):

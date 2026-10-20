@@ -164,6 +164,7 @@ def test_pdf_redact_removes_text_everywhere_and_keeps_the_rest(tmp_path, trash):
     a = analyze(svc, job, p)
     assert a.info["methods"]["redact"]["available"] and a.info["methods"]["delete_pages"]["available"]
     assert "delete_rows" not in a.info["methods"] and "dummy" not in a.info["methods"] and a.view()["sheets"] == []
+    assert a.view()["sheet_word"] == "シート"
     pv = svc.preview(job, str(p), {"method": "redact", "confidences": ALL_RANKS})
     assert "文字そのもの" in pv["summary"] and any("元に戻せません" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="redact", confidences=ALL_RANKS)

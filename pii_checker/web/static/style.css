@@ -190,7 +190,7 @@ textarea.secret { -webkit-text-security: disc; }
 .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { position: sticky; top: 0; background: var(--panel); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+th { position: sticky; top: 0; z-index: 1; background: var(--panel); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 tbody tr:hover { background: var(--row-hover); }
 tbody tr.clickable { cursor: pointer; }
 td.path { word-break: break-all; min-width: 280px; }
@@ -224,7 +224,8 @@ td.num { text-align: right; white-space: nowrap; }
 
 dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(1000px, 92vw); max-height: 86vh; background: var(--panel); color: var(--text); }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
-.dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+/* 見出しは不透明な背景にして、重なりの順を最前面にする（スクロールした選択肢や表の見出し th が透けて重ならないように） */
+.dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20; background-color: var(--panel); background-image: linear-gradient(var(--panel), var(--panel)); }
 .dialog-head h3 { margin: 0; font-size: 15px; word-break: break-all; }
 #detail-body { padding: 10px 16px 16px; overflow-y: auto; }
 .item-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }

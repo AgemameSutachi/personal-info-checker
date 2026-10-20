@@ -49,19 +49,58 @@ CONSTRAINT_WORDS = (
 )
 
 
+def split_top_level(text: str) -> list[str]:
+    """括弧・引用符の外のコンマで分ける（「a int, b numeric(10,2)」→ 2 つ。分けた各項目は、前後の空白もそのまま持つ）。
+    CREATE TABLE の本体を、1 行に何列書いてあっても（sqlite3 の .dump は表を 1 行で出す）列ごとに分けるのに使う。"""
+    items: list[str] = []
+    cur: list[str] = []
+    depth, quote, i, n = 0, "", 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and quote in "'\"" and i + 1 < n:
+                cur.append(text[i + 1])
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+            cur.append(ch)
+        elif ch == "[":
+            quote = "]"
+            cur.append(ch)
+        elif ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            items.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    items.append("".join(cur))
+    return items
+
+
 def parse_create_tables(text: str) -> dict[str, list[str]]:
     """CREATE TABLE 文から表ごとの列名を取り出す（列名の無い INSERT の見出しに使う）。"""
     tables: dict[str, list[str]] = {}
     for m in RE_CREATE.finditer(text):
         name = _clean_ident(m.group(1))
         cols = []
-        for line in m.group(2).split("\n"):
-            line = line.strip().rstrip(",")
-            if not line or line.upper().startswith(CONSTRAINT_WORDS):
-                continue
-            mm = re.match(r'([`"\[]?)([^`"\]\s]+)\1?\]?\s+\w', line)
-            if mm:
-                cols.append(mm.group(2))
+        for raw_line in m.group(2).split("\n"):
+            # 1 行に複数の列がある形（sqlite3 の .dump は表を 1 行で出す）も、コンマで分けて列ごとに見る
+            for line in split_top_level(raw_line):
+                line = line.strip().rstrip(",")
+                if not line or line.upper().startswith(CONSTRAINT_WORDS):
+                    continue
+                mm = re.match(r'([`"\[]?)([^`"\]\s]+)\1?\]?\s+\w', line)
+                if mm:
+                    cols.append(mm.group(2))
         if cols:
             tables[name] = cols
             tables[name.split(".")[-1]] = cols

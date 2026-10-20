@@ -17,6 +17,15 @@ from .remedy_write import Selection
 CONF_RANK = {"high": 3, "medium": 2, "low": 1}
 MIN_VALUE_LEN = 3  # これより短い値は、本文の外の文字との偶然の一致が多いので、値の一致では探さない（検出の判定は使う）
 RE_TAGS = re.compile(r"<[^>]{0,4000}>")
+_TEMP_BASE: str | None = (
+    None  # 埋め込みファイルの検査の一時フォルダを作る場所（ジョブの作業フォルダ。None ならシステムの一時フォルダ）
+)
+
+
+def set_temp_dir(path: str | None) -> None:
+    """埋め込みファイルを書き出す一時フォルダの置き場を、ジョブの作業フォルダにする（検査と同じ置き場で、同じ後始末の対象にする）。"""
+    global _TEMP_BASE
+    _TEMP_BASE = path if path and os.path.isdir(path) else None
 
 
 class Residue:
@@ -77,7 +86,7 @@ class Residue:
 
         ext = os.path.splitext(os.path.basename(name.replace("\\", "/")))[1][:12]
         ext = ext if re.fullmatch(r"\.[0-9A-Za-z]{1,10}", ext) else ""
-        with tempfile.TemporaryDirectory(prefix="piichk-emb-") as folder:
+        with tempfile.TemporaryDirectory(prefix="piichk-emb-", dir=_TEMP_BASE) as folder:
             path = os.path.join(folder, "embedded" + ext)
             with open(path, "wb") as f:
                 f.write(data)

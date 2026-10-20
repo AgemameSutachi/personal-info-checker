@@ -499,6 +499,13 @@ def create_app(
         r = registry.get(job_id, create=False)
         if r and r.running:
             raise HTTPException(409, "実行中のジョブは削除できません。先に中止してください")
+        if store.unfinished_remediations_of_job(job_id):
+            # 途中で止まった対処の記録（立て直しの手がかり）を道連れに消すと、元の名前のファイルが無いままになりうる
+            raise HTTPException(
+                409,
+                "途中で止まった対処の記録があるため、このジョブは削除できません。"
+                "アプリを開き直すか、同じファイルをもう一度対処して立て直してから、削除してください",
+            )
         store.delete_job(job_id)
         reveal_service.forget_job(job_id)
         remedy_service.forget_job(job_id)
@@ -597,6 +604,7 @@ def create_app(
                     # 元の写しは作らない。ごみ箱へ送ったときは、ごみ箱から pre_name の名前で戻す
                     "disposal": (r["changed"] or {}).get("disposal") or "",
                     "pre_name": (r["changed"] or {}).get("pre_name") or "",
+                    "bin_failed": bool((r["changed"] or {}).get("bin_failed")),
                     # started / renamed / swapped は途中で止まったまま（次の起動・次の対処の前に立て直す）。
                     # applied=済み、recovered=立て直した（recovery に、何をしたかの説明）
                     "state": r["state"],

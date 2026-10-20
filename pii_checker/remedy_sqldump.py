@@ -30,6 +30,7 @@ from .formats.dbdump import (
     _unescape_copy,
     parse_create_tables,
     parse_values_spans,
+    split_top_level,
 )
 from .remedy_write import TEXT_REWRITE_LIMIT, DummyMaker, RemedyError, Selection, decode_for_rewrite, replace_spans
 
@@ -70,6 +71,7 @@ RE_STMT_KINDS = [
 ]
 RE_ALTER_CONSTRAINT = re.compile(r"\bADD\s+(?:CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK)\b", re.I)
 RE_COLUMN_LINE = re.compile(r'([`"\[]?)([^`"\]\s]+)\1?\]?\s+\w')
+RE_CREATE_NAME = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`\"\[\]\w.]+)", re.I)
 RE_INTRODUCER = re.compile(r"(?:[NnEeBbXx]|_[A-Za-z0-9]+)")  # 文字列の前に付く接頭辞（N'…'・_utf8mb4'…'）
 RE_QUOTED_CELL = re.compile(r"(\s*)([^']*)'((?:[^'\\]|\\.|'')*)'(\s*)", re.S)
 
@@ -473,7 +475,11 @@ class DumpRewriter:
         canon = self.canonical.get(key)
         if canon is None:
             raise RemedyError(f"表「{tgt.name}」の列の名前を読み取れないため、列の削除はできません")
-        names = {canon[i] for i in tgt.cols if i < len(canon)}
+        if any(i >= len(canon) for i in tgt.cols):
+            # 列の名前の並びが、検査で見つけた列の位置より短い（CREATE TABLE を読み切れていない）。名前で落とせない列が
+            # あると、CREATE を直さずに INSERT などの値だけ減らす（読み込めないダンプになる）ので、断る
+            raise RemedyError(f"表「{tgt.name}」の列の名前を全部は読み取れないため、列の削除はできません")
+        names = {canon[i] for i in tgt.cols}
         for n in names:
             self.dropped_columns.add((key, n))
         return names
@@ -693,6 +699,14 @@ class DumpRewriter:
         text = "\n".join(parts)
         m = RE_CREATE.search(text)
         tgt = self.targets.find(_clean_ident(m.group(1))) if m else None
+        if m is None and self.method == "delete_columns":
+            mn = RE_CREATE_NAME.search(text)
+            if mn is not None and self.targets.find(_clean_ident(mn.group(1))) is not None:
+                # CREATE TABLE の形を読み解けない。そのまま写して INSERT だけ列を減らすと、読み込めないダンプになる
+                raise RemedyError(
+                    f"表「{_clean_ident(mn.group(1))}」の CREATE TABLE を読み解けないため、列を削除できません"
+                    "（元のファイルは変えていません）"
+                )
         if tgt is None or self.method not in ("delete_table", "delete_columns"):
             for p, t in zip(parts, terms):
                 write(p + t)
@@ -701,13 +715,64 @@ class DumpRewriter:
         if self.method == "delete_table":
             return
         names = self.drop_names(tgt)
-        for p, t in zip(self._edit_create(parts, text, m, names), terms):
+        edited, dropped = self._edit_create(parts, text, m, names)
+        missing = names - dropped
+        if missing:
+            # CREATE から落とせない列があるのに INSERT などの列だけ減らすと、CREATE と中身がずれて読み込めなくなる
+            raise RemedyError(
+                f"表「{tgt.name}」の CREATE TABLE から、削除する列「{'、'.join(sorted(missing))}」を見つけられないため、"
+                "列を削除できません（元のファイルは変えていません）"
+            )
+        if isinstance(edited, str):
+            # 1 行に複数の列がある形（sqlite3 の .dump など）は、文を組み直した。元の行末記号で書く
+            lines = edited.split("\n")
+            inner = next((t for t in terms if t), "\n")
+            for i, line in enumerate(lines):
+                write(line + (terms[-1] if i == len(lines) - 1 else inner))
+            return
+        for p, t in zip(edited, terms):
             if p is not None:
                 write(p + t)
 
     @staticmethod
-    def _edit_create(parts: list[str], text: str, m, names: set[str]) -> list[str | None]:
-        """CREATE TABLE の列の定義の行から、削除する列の行（と、その列を使う制約・索引の行）を外す。外した行は None。"""
+    def _edit_create_inline(text: str, m, names: set[str]) -> tuple[str, set[str]]:
+        """1 行に複数の列がある CREATE TABLE（sqlite3 の .dump の形）の本体を、コンマで項目に分けて、削除する列（と、その列を
+        使う制約）の項目を取り除いた文を返す（文字列）。落とした列の名前の集まりも返す。"""
+        body_start, body_end = m.span(2)
+        pieces = split_top_level(text[body_start:body_end])
+        kept: list[str] = []
+        dropped: set[str] = set()
+        for piece in pieces:
+            st = piece.strip()
+            if not st:
+                kept.append(piece)
+                continue
+            if st.upper().startswith(CONSTRAINT_WORDS):
+                if any(re.search(r"(?<![\w$])" + re.escape(n) + r"(?![\w$])", st) for n in names):
+                    continue
+                kept.append(piece)
+                continue
+            mm = RE_COLUMN_LINE.match(st)
+            col = norm_col(mm.group(2)) if mm else None
+            if col is not None and col in names:
+                dropped.add(col)
+                continue
+            kept.append(piece)
+        if not [k for k in kept if k.strip()]:
+            raise RemedyError(
+                "表のすべての列は削除できません（列が1つも残りません）。表ごと消すなら「表を削除」を選んでください"
+            )
+        # 先頭の項目の前の空白と、最後の項目の後ろの空白（閉じ括弧の前の改行など）は、元のまま保つ
+        head = pieces[0][: len(pieces[0]) - len(pieces[0].lstrip())]
+        tail = pieces[-1][len(pieces[-1].rstrip()) :]
+        kept[0] = head + kept[0].lstrip()
+        kept[-1] = kept[-1].rstrip() + tail
+        return text[:body_start] + ",".join(kept) + text[body_end:], dropped
+
+    @staticmethod
+    def _edit_create(parts: list[str], text: str, m, names: set[str]) -> tuple[list[str | None] | str, set[str]]:
+        """CREATE TABLE の列の定義の行から、削除する列の行（と、その列を使う制約・索引の行）を外す。外した行は None。
+        1 行に複数の列・制約がある形のときは、文を組み直した文字列を返す。落とした列の名前の集まりも返す。"""
         body_start, body_end = m.span(2)
         starts = [0]
         for p in parts[:-1]:
@@ -722,6 +787,9 @@ class DumpRewriter:
             st = frag.strip().rstrip(",")
             if not st:
                 continue
+            if len([x for x in split_top_level(frag) if x.strip()]) > 1:
+                # 1 行に複数の列・制約がある（sqlite3 の .dump は表を 1 行で出す）。行ごとには扱えないので、項目ごとに組み直す
+                return DumpRewriter._edit_create_inline(text, m, names)
             alone = not text[ls:a].strip() and not text[b:le].strip()
             if st.upper().startswith(CONSTRAINT_WORDS):
                 elements.append((li, "constraint", st, alone))
@@ -730,6 +798,7 @@ class DumpRewriter:
             elements.append((li, "column", norm_col(mm.group(2)) if mm else None, alone))
         out: list[str | None] = list(parts)
         dropped_lines: list[int] = []
+        dropped_cols: set[str] = set()
         for li, kind, info, alone in elements:
             if kind == "column":
                 hit = info in names
@@ -738,14 +807,14 @@ class DumpRewriter:
             if not hit:
                 continue
             if not alone:
-                raise RemedyError(
-                    "CREATE TABLE の列の定義が、1行に1つの形ではない（CREATE と同じ行・閉じ括弧と同じ行）ため、列を削除できません"
-                    "（元のファイルは変えていません）"
-                )
+                # 1 行に複数の列がある形（CREATE と同じ行・閉じ括弧と同じ行を含む）は、行ごとでなく項目ごとに組み直す
+                return DumpRewriter._edit_create_inline(text, m, names)
             dropped_lines.append(li)
             out[li] = None
+            if kind == "column":
+                dropped_cols.add(info)
         if not dropped_lines:
-            return out
+            return out, dropped_cols
         remaining = [e[0] for e in elements if out[e[0]] is not None]
         if not remaining:
             raise RemedyError(
@@ -758,7 +827,7 @@ class DumpRewriter:
             stripped = line.rstrip()
             if stripped.endswith(","):
                 out[last] = stripped[:-1] + line[len(stripped) :]
-        return out
+        return out, dropped_cols
 
     # ------------------------------------------------------------ そのほかの文（索引・制約・権限など）
 

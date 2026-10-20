@@ -47,6 +47,7 @@ from .remedy_write import (
     select_positions,
     sha256_file,
 )
+from .remedy_meta import inherit_file_metadata
 from .reveal import BYTES_PER_SEC, MAX_TIMEOUT, MIN_TIMEOUT
 
 METHOD_LABELS = {
@@ -109,21 +110,132 @@ LAYOUT_ONLY_METHODS = {
 }
 XLSX_EXTS = (".xlsx", ".xlsm")
 NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
+BIN_FAILED_TEXT = (
+    "元のファイルをごみ箱へ送りましたが、ごみ箱に入らず完全に削除されました（ごみ箱が無効・仮想ドライブなど）。"
+    "新しい中身は元の名前に置いてあります。元には戻せません"
+)
 STATES_UNFINISHED = ("started", "renamed", "swapped")  # 途中で止まった記録の状態（立て直しの対象）
 
 
 # ---------------------------------------------------------------- ごみ箱
 
 
-def send_to_recycle_bin(path: str) -> None:
-    """ファイルをごみ箱へ送る（SHFileOperationW。確認の窓・エラーの窓は出さない）。失敗は RemedyError。"""
-    if os.name != "nt":
-        raise RemedyError("ごみ箱へ送る機能は Windows だけで使えます")
-    from ctypes import wintypes
+MAX_RECYCLE_PATH = 260  # SHFileOperationW が受け付けるパスの長さ（これ以上はごみ箱へ送れない）
 
-    abs_path = os.path.abspath(path)
-    if len(abs_path) >= 260:
-        raise RemedyError("パスが長すぎて、ごみ箱へ送れません（ファイルは消していません）")
+
+def busy_key(path: str) -> str:
+    """同時実行を防ぐ鍵（大文字小文字・区切り・相対の違いをそろえたパス。ジョブが違っても同じファイルは同じ鍵）。"""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def drive_root(path: str) -> str:
+    """そのパスのドライブの根（「C:\\」の形）。ドライブ文字の無いパスは空。"""
+    drive = os.path.splitdrive(os.path.abspath(path))[0]
+    return drive + "\\" if drive and not drive.startswith("\\\\") else ""
+
+
+RECYCLE_DIR = "$Recycle.Bin"
+
+
+def _read_recycle_info(path: str) -> str | None:
+    """ごみ箱の $I ファイル（送ったファイルの元のパスを記したもの）から、元のパスを読む。読めなければ None。
+
+    形式: 版（8バイト。1=Vista〜8.1・2=10 以降）・元の大きさ（8）・削除した日時（8）のあと、
+    版2は文字数（4バイト・末尾の NUL を含む）＋UTF-16 のパス、版1は 520 バイト固定の UTF-16 のパス。
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read(4096)
+    except OSError:
+        return None
+    if len(data) < 28:
+        return None
+    version = int.from_bytes(data[:8], "little")
+    if version == 2:
+        n = int.from_bytes(data[24:28], "little")
+        raw = data[28 : 28 + n * 2]
+    elif version == 1:
+        raw = data[24 : 24 + 520]
+    else:
+        return None
+    return raw.decode("utf-16-le", errors="replace").split(chr(0), 1)[0]
+
+
+def _find_in_recycle_bin(root: str, abs_path: str, since: float) -> bool | None:
+    """送ったファイルが、そのドライブのごみ箱に入ったか（since 以降にできた $I ファイルの元のパスで見る）。
+
+    件数を数え直す SHQueryRecycleBinW は大きなごみ箱で数分かかるため、利用者のごみ箱のフォルダ
+    （<ドライブ>\$Recycle.Bin\<SID>。他人のフォルダは開けないので飛ばす）の新しい $I だけを読む。
+    ごみ箱のフォルダを見られなければ None。試験は、本物のごみ箱に触れないようにこれを差し替える。
+    """
+    if not root:
+        return None
+    base = os.path.join(root, RECYCLE_DIR)
+    want = os.path.normcase(abs_path)
+    looked = False
+    try:
+        subdirs = [e.path for e in os.scandir(base) if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return None
+    for d in subdirs:
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue  # 他の利用者のごみ箱（開けない）
+        looked = True
+        for e in entries:
+            if not e.name.upper().startswith("$I"):
+                continue
+            try:
+                if e.stat().st_mtime < since:
+                    continue
+            except OSError:
+                continue
+            orig = _read_recycle_info(e.path)
+            if orig is not None and os.path.normcase(orig) == want:
+                return True
+    return False if looked else None
+
+
+def _recycle_bin_policy(root: str) -> dict:
+    """そのドライブのごみ箱の設定（レジストリ）。nuke＝「ごみ箱に入れず、削除したらすぐにファイルを削除する」、
+    max_mb＝ごみ箱の最大の大きさ（MB。無ければ None）。読めなければ制限なしとして返す（実際に入ったかは送ったあとに確かめる）。"""
+    out: dict = {"nuke": False, "max_mb": None}
+    if os.name != "nt" or not root:
+        return out
+    try:
+        import winreg
+
+        buf = ctypes.create_unicode_buffer(64)
+        if ctypes.windll.kernel32.GetVolumeNameForVolumeMountPointW(root, buf, 64):
+            guid = buf.value.rstrip("\\")[len("\\\\?\\Volume") :]  # 「{xxxxxxxx-…}」
+            key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume" + "\\" + guid
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                    for name, field in (("NukeOnDelete", "nuke"), ("MaxCapacity", "max_mb")):
+                        try:
+                            out[field] = int(winreg.QueryValueEx(k, name)[0])
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):  # 「ごみ箱にファイルを移動しない」の方針
+            try:
+                with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer") as k:
+                    if int(winreg.QueryValueEx(k, "NoRecycleFiles")[0]):
+                        out["nuke"] = True
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    out["nuke"] = bool(out["nuke"])
+    return out
+
+
+def _shell_delete(abs_path: str) -> tuple[int, bool]:
+    """SHFileOperationW（FO_DELETE＋FOF_ALLOWUNDO）でファイルを消す（本物ならごみ箱へ送る）。（戻りコード, 取りやめたか）。
+    試験は、本物のごみ箱へ送らないようにこれを差し替える。"""
+    from ctypes import wintypes
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
         _pack_ = 1 if ctypes.sizeof(ctypes.c_void_p) == 4 else 8
@@ -149,24 +261,66 @@ def send_to_recycle_bin(path: str) -> None:
     op.pTo = None
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING
     ret = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if ret != 0 or op.fAnyOperationsAborted:
+    return int(ret), bool(op.fAnyOperationsAborted)
+
+
+def send_to_recycle_bin(path: str) -> str:
+    """ファイルをごみ箱へ送る（SHFileOperationW。確認の窓・エラーの窓は出さない）。失敗は RemedyError。
+
+    SHFileOperationW は、ごみ箱を無効にしたドライブ・仮想ドライブ・マウントしたフォルダなどでは、0 を返しつつ
+    実は完全に削除することがある。そこで送ったあと、そのドライブのごみ箱にそのファイルの $I（元のパスの記録）が
+    できたかを確かめ、見つかれば "recycle_bin"、見つからなければ "permanent"（完全に削除した）を返す。
+    """
+    if os.name != "nt":
+        raise RemedyError("ごみ箱へ送る機能は Windows だけで使えます")
+    abs_path = os.path.abspath(path)
+    if len(abs_path) >= MAX_RECYCLE_PATH:
+        raise RemedyError("パスが長すぎて、ごみ箱へ送れません（ファイルは消していません）")
+    root = drive_root(abs_path)
+    since = time.time() - 2  # 送る直前（ファイルの日時の丸めの分だけ余裕を持たせる）
+    ret, aborted = _shell_delete(abs_path)
+    if ret != 0 or aborted:
         raise RemedyError(
             f"ごみ箱へ送れませんでした（コード {ret}。ファイルが使用中・権限が無い可能性）。ファイルは消していません"
         )
+    if _find_in_recycle_bin(root, abs_path, since):
+        return "recycle_bin"
+    return "permanent"  # ごみ箱に入ったと確かめられないものは、完全に削除したと扱う
 
 
 def has_recycle_bin(path: str) -> bool:
-    """そのファイルのある場所にごみ箱があるか（ネットワーク・外付けの場所は、ごみ箱を経由せず消える）。"""
+    """そのファイルのある場所で、ごみ箱が使えるか（使えないと、消すと完全に削除になる）。
+
+    使えないとみなすもの: ネットワーク・外付けなど固定ディスクでない場所／そのドライブにごみ箱のフォルダ
+    （$Recycle.Bin）が無い／「ごみ箱に入れず、削除したらすぐにファイルを削除する」（NukeOnDelete）／
+    ごみ箱の最大の大きさが 0。
+    """
     p = os.path.abspath(path)
     if p.startswith("\\\\"):
         return False
     if os.name != "nt":
         return True
     try:
-        root = os.path.splitdrive(p)[0] + "\\"
-        return ctypes.windll.kernel32.GetDriveTypeW(root) == 3  # DRIVE_FIXED
+        root = drive_root(p)
+        if not root or ctypes.windll.kernel32.GetDriveTypeW(root) != 3:  # DRIVE_FIXED
+            return False
+        policy = _recycle_bin_policy(root)
+        if policy["nuke"] or policy["max_mb"] == 0:
+            return False
+        # ごみ箱のフォルダが無いドライブ（仮想ドライブなど）は使えない。実際に入ったかは送ったあとにも確かめる
+        return os.path.isdir(os.path.join(root, RECYCLE_DIR))
     except Exception:  # noqa: BLE001
-        return True
+        return False
+
+
+def check_recycle_path_length(path: str, extra: int = 0) -> None:
+    """ごみ箱へ送る前に、パスが長すぎて最後の段で必ず失敗しないかを確かめる（長ければ、何も変えずに断る）。
+    extra は改名で足される文字数（「（対処前 日時）」の分）。"""
+    if len(os.path.abspath(path)) + extra >= MAX_RECYCLE_PATH:
+        raise RemedyError(
+            "パスが長すぎて（260 文字以上）、元のファイルをごみ箱へ送れません。ファイルを浅いフォルダへ移すか、"
+            "フォルダ名を短くしてから、もう一度お試しください（何も変えていません）"
+        )
 
 
 def disposal_text(noun: str, name: str, recycle: bool) -> tuple[str, str]:
@@ -181,10 +335,11 @@ def delete_original(path: str) -> str:
     """元のファイルを消す（元の写しは作らない）。ごみ箱のある場所ならごみ箱へ送り、無い場所（ネットワーク・外付けなど）は、
     ごみ箱を経由せずにそのまま消す。どちらにしたかを "recycle_bin" / "permanent" で返す。失敗しても元のファイルは消えていない。"""
     if has_recycle_bin(path):
-        send_to_recycle_bin(path)
+        got = send_to_recycle_bin(path)
         if os.path.exists(_long(path)):
             raise RemedyError("ごみ箱へ送ったはずのファイルが残っています。元のファイルは変えていません")
-        return "recycle_bin"
+        # 送ったのにごみ箱が増えなかったときは、完全に削除した扱い（None は差し替えの試験用で、入ったとみなす）
+        return "permanent" if got == "permanent" else "recycle_bin"
     try:
         os.remove(_long(path))
     except OSError as e:
@@ -207,6 +362,14 @@ def _discard(path: str) -> None:
         os.remove(_long(path))
     except OSError:
         pass
+
+
+def _discard_new(path: str | None) -> None:
+    """一時の新ファイルを、付属のファイル（SQLite の -journal・-wal・-shm）も含めて消す。落ちて残った個人情報の写しを残さない。"""
+    if not path:
+        return
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        _discard(path + suffix)
 
 
 def _exists(path: str | None) -> bool:
@@ -291,9 +454,15 @@ def make_commit_plan(path: str, convert: bool) -> dict:
         from .archive_write import zip_target_for
 
         dest = zip_target_for(path)
+        if has_recycle_bin(path):
+            check_recycle_path_length(path)  # 元の書庫をごみ箱へ送る最後の段で失敗しないように、始める前に断る
         return {"mode": "convert", "tmp_new": new_tmp_path(dest), "dest": dest, "pre_path": None}
     if has_recycle_bin(path):
-        return {"mode": "recycle", "tmp_new": new_tmp_path(path), "dest": path, "pre_path": pre_rename_path(path)}
+        pre = pre_rename_path(path)
+        check_recycle_path_length(
+            pre
+        )  # 改名後の名前でごみ箱へ送る。260 文字以上は最後の段で必ず失敗するので、始める前に断る
+        return {"mode": "recycle", "tmp_new": new_tmp_path(path), "dest": path, "pre_path": pre}
     return {"mode": "replace", "tmp_new": new_tmp_path(path), "dest": path, "pre_path": None}
 
 
@@ -303,21 +472,37 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
     各段のあとで記録（remediations）の状態を進める。途中で落ちても、元の中身か新しい中身のどちらかが、必ず元の名前
     （か「対処前」の名前）で残る（立て直しは recover_record）。普通の失敗（Exception）は、その場で元の状態へ戻す。
     プロセスの強制終了のように Exception でないものは、わざと捕まえない（落ちた状態を、立て直しが読めるようにそのまま残す）。
-    戻り値: {"disposal": "recycle_bin" | "replaced" | 元の書庫の扱い, "pre_name": 改名した元の名前（ごみ箱から戻すときの名前）}
+    記録（remediations）の更新が例外を出しても、ファイルは必ず元の状態へ戻してから失敗を返す（元の名前のファイルが無いまま残さない）。
+    戻り値: {"disposal": "recycle_bin" | "replaced" | 元の書庫の扱い, "pre_name": 改名した元の名前（ごみ箱から戻すときの名前）,
+    "bin_failed": 送ったのにごみ箱に入らず、元は残らなかったとき True}
     """
     mode, tmp_new, dest, pre = plan["mode"], plan["tmp_new"], plan["dest"], plan.get("pre_path")
 
     def state(s: str) -> None:
         store.update_remediation(rid, state=s)
 
+    def finish() -> None:  # 最後の「済み」。ファイルは確定済みで、記録が「途中」のままでも立て直しが正しく読み取る
+        try:
+            state("applied")
+        except Exception:  # noqa: BLE001
+            pass
+
     def cancel() -> None:  # 元に触る前の失敗: 一時の新ファイルを消して、記録も残さない
-        _discard(tmp_new)
-        store.delete_remediation(rid)
+        _discard_new(tmp_new)
+        try:
+            store.delete_remediation(rid)
+        except Exception:  # noqa: BLE001  記録が消せなくても「始めた」のまま残る。立て直しが「元のまま」と読み取る
+            pass
 
     def stuck(msg: str) -> RemedyError:  # 戻し切れなかった: 記録を残す（次の起動・次の対処の前に立て直す）
         return RemedyError(f"{msg}。途中の状態を記録に残しました（次に開くときに立て直します）")
 
-    if sha256_file(path) != orig_sha256:
+    try:
+        unchanged = sha256_file(path) == orig_sha256
+    except Exception as e:  # noqa: BLE001  開けない（他のプログラムが使用中・権限）
+        cancel()
+        raise RemedyError(f"元のファイルを読めませんでした（{type(e).__name__}）。何も変えていません") from None
+    if not unchanged:
         cancel()
         raise RemedyError("対処している間に元のファイルが変わりました。何も変えていません")
 
@@ -327,7 +512,7 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
         except Exception as e:
             cancel()
             raise _as_remedy(e) from None
-        state("applied")
+        finish()
         return {"disposal": "replaced", "pre_name": None}
 
     if mode == "convert":
@@ -336,7 +521,15 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
         except Exception as e:
             cancel()
             raise _as_remedy(e) from None
-        state("swapped")
+        try:
+            state("swapped")
+        except Exception as e:  # noqa: BLE001  記録を進められなかった: zip を一時の名前へ戻して取りやめる
+            try:
+                _fs_rename(dest, tmp_new)
+                cancel()
+            except Exception:  # noqa: BLE001
+                raise stuck("記録を更新できず、作った zip も一時の名前へ戻せませんでした") from None
+            raise _as_remedy(e) from None
         try:
             disposal = delete_original(path)
         except Exception as e:
@@ -346,7 +539,7 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
             except Exception:  # noqa: BLE001
                 raise stuck("元の書庫を消せず、作った zip も片付けられませんでした") from None
             raise _as_remedy(e) from None
-        state("applied")
+        finish()
         return {"disposal": disposal, "pre_name": None}
 
     # recycle: 元を同じフォルダで改名 → 新を元の名前へ → 改名した元をごみ箱へ
@@ -355,7 +548,15 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
     except Exception as e:
         cancel()
         raise _as_remedy(e) from None
-    state("renamed")
+    try:
+        state("renamed")
+    except Exception as e:  # noqa: BLE001  記録を進められなかった: 元の名前へ戻して取りやめる
+        try:
+            _fs_rename(pre, path)
+            cancel()
+        except Exception:  # noqa: BLE001
+            raise stuck("記録を更新できず、元の名前にも戻せませんでした") from None
+        raise _as_remedy(e) from None
     try:
         _fs_rename(tmp_new, path)
     except Exception as e:
@@ -365,9 +566,18 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
         except Exception:  # noqa: BLE001
             raise stuck("新しいファイルを置けず、元の名前にも戻せませんでした") from None
         raise _as_remedy(e) from None
-    state("swapped")
     try:
-        send_to_recycle_bin(pre)
+        state("swapped")
+    except Exception as e:  # noqa: BLE001  記録を進められなかった: 新を一時の名前へ・元を元の名前へ戻して取りやめる
+        try:
+            _fs_rename(path, tmp_new)
+            _fs_rename(pre, path)
+            cancel()
+        except Exception:  # noqa: BLE001
+            raise stuck("記録を更新できず、元の状態にも戻せませんでした") from None
+        raise _as_remedy(e) from None
+    try:
+        sent = send_to_recycle_bin(pre)
         if _exists(pre):
             raise RemedyError("ごみ箱へ送ったはずのファイルが残っています")
     except Exception as e:
@@ -378,7 +588,11 @@ def commit_rewrite(store, rid: int, path: str, plan: dict, orig_sha256: str) -> 
         except Exception:  # noqa: BLE001
             raise stuck("元のファイルをごみ箱へ送れず、元の状態にも戻せませんでした") from None
         raise RemedyError(f"元のファイルをごみ箱へ送れなかったため、元の状態に戻しました（{_as_remedy(e)}）") from None
-    state("applied")
+    finish()
+    if sent == "permanent":
+        # ごみ箱へ送ったのに、そのドライブのごみ箱が増えなかった（実際は完全に削除された）。新しいファイルは既に元の名前に
+        # 置いてあるので巻き戻さない。「元は残らなかった」と記録・表示する
+        return {"disposal": "replaced", "pre_name": None, "bin_failed": True}
     return {"disposal": "recycle_bin", "pre_name": os.path.basename(pre)}
 
 
@@ -403,19 +617,25 @@ def recover_record(rec: dict) -> tuple[str, str]:
         # os.replace は1回で起きる。元の名前には元か新のどちらかがある（無ければ、残っている新を元の名前へ置く）
         if _exists(tmp_new):
             if _exists(path):
-                _discard(tmp_new)
-            else:
+                _discard_new(tmp_new)
+            elif is_new(tmp_new):
                 _fs_rename(tmp_new, path)
                 return (
                     "recovered",
                     "元の名前のファイルが無かったため、書き換え済みの新しいファイルを元の名前に置きました",
+                )
+            else:
+                return (
+                    "recovered",
+                    "元の名前のファイルが無く、一時の新しいファイルも書き終えたと確かめられなかったため、置かずに残しました"
+                    f"（「{os.path.basename(tmp_new)}」。書きかけの可能性があります）",
                 )
         if _exists(path) and is_new(path):
             return "applied", "新しい中身への入れ替えは済んでいました"
         return "recovered", "入れ替えの前に止まっていました（元のファイルのまま。一時の新ファイルは消しました）"
     if mode == "convert":
         if _exists(tmp_new):
-            _discard(tmp_new)
+            _discard_new(tmp_new)
         if _exists(dest) and _exists(path):
             return (
                 "recovered",
@@ -428,9 +648,15 @@ def recover_record(rec: dict) -> tuple[str, str]:
     if not _exists(path) and _exists(pre):
         _fs_rename(pre, path)
         if _exists(tmp_new):
-            _discard(tmp_new)
+            _discard_new(tmp_new)
         return "recovered", f"元の名前のファイルが無かったため、「{os.path.basename(pre)}」を元の名前に戻しました"
     if not _exists(path) and _exists(tmp_new):
+        if not is_new(tmp_new):  # 書き終えたと確かめられない（書きかけの可能性）ものは、元の名前へ置かない
+            return (
+                "recovered",
+                "元の名前のファイルが無く、一時の新しいファイルも書き終えたと確かめられなかったため、置かずに残しました"
+                f"（「{os.path.basename(tmp_new)}」。書きかけの可能性があります）",
+            )
         _fs_rename(tmp_new, path)
         return (
             "recovered",
@@ -438,10 +664,15 @@ def recover_record(rec: dict) -> tuple[str, str]:
         )
     if _exists(path) and _exists(pre):
         if is_new(path):
-            _discard(tmp_new)
+            _discard_new(tmp_new)
             try:
-                send_to_recycle_bin(pre)
+                sent = send_to_recycle_bin(pre)
                 if not _exists(pre):
+                    if sent == "permanent":
+                        return (
+                            "applied",
+                            f"元のファイル（「{os.path.basename(pre)}」）をごみ箱へ送りましたが、ごみ箱に入らず完全に削除されました",
+                        )
                     return "applied", f"元のファイル（「{os.path.basename(pre)}」）をごみ箱へ送り直しました"
             except Exception:  # noqa: BLE001
                 pass
@@ -450,7 +681,7 @@ def recover_record(rec: dict) -> tuple[str, str]:
                 f"新しいファイルは置けていますが、「{os.path.basename(pre)}」をごみ箱へ送れていません（不要なら削除してください）",
             )
         if _exists(tmp_new):
-            _discard(tmp_new)
+            _discard_new(tmp_new)
         return (
             "recovered",
             f"元の名前のファイルと「{os.path.basename(pre)}」の両方が残っています（どちらも消していません）",
@@ -458,7 +689,7 @@ def recover_record(rec: dict) -> tuple[str, str]:
     if _exists(path):
         # 改名の前に止まっていた、またはごみ箱へ送り終えていた
         if _exists(tmp_new):
-            _discard(tmp_new)
+            _discard_new(tmp_new)
             return (
                 "recovered",
                 "元のファイルを変える前に止まっていました（元のファイルのまま。一時の新ファイルは消しました）",
@@ -588,7 +819,25 @@ def apply_task(args: dict) -> dict:
     method = args["method"]
     if not os.path.isfile(_long(path)):
         raise RemedyError("ファイルが見つかりません（移動・削除された可能性）")
+    try:
+        from . import remedy_common
+
+        remedy_common.set_temp_dir(
+            args["options"].temp_dir
+        )  # 埋め込みファイルの検査の一時フォルダは、ジョブの作業フォルダに作る
+    except (KeyError, AttributeError):
+        pass
     if method == "delete_file":
+        # 下見のあとにファイルが差し替わっていないかを確かめてから消す（差し替えたファイルを、下見の説明のまま消さない）
+        expected = args.get("expected_sha256")
+        if not expected:
+            raise RemedyError(
+                "下見の時点のファイルの識別子（ハッシュ）が無いため、削除できません。下見からやり直してください"
+            )
+        if sha256_file(path) != expected:
+            raise RemedyError(
+                "下見のあとにファイルが変わりました。もう一度、下見からやり直してください（何も消していません）"
+            )
         # 個人情報を含むファイルを手元のディスクへ写さないため、削除は元の写しは作らない（ごみ箱から戻す・戻せない場合は下見で知らせる）
         disposal = delete_original(path)
         return {"deleted": True, "changed": {"files": 1, "disposal": disposal}}
@@ -661,19 +910,28 @@ def prepare_plain(args: dict) -> dict:
     if not sel.detections:
         raise RemedyError("選んだ種類・確度の検出が、ファイルに見つかりませんでした（何も変えていません）")
     maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
-    orig_sha = sha256_file(path)
+    # 位置を集めた時点の元のファイルのハッシュ（検査用の写しのもの）を基準にする。ここで取り直すと、集めたあとに
+    # ファイルが変わっていても「変わっていない」ことになり、古い位置のまま書き換えてしまう
+    orig_sha = got["source"].get("sha256")
+    if not orig_sha:
+        raise RemedyError("元のファイルの識別子（ハッシュ）を得られなかったため、書き換えません（何も変えていません）")
+    if sha256_file(path) != orig_sha:
+        raise RemedyError(
+            "位置を集めている間に元のファイルが変わりました。もう一度、下見からやり直してください（何も変えていません）"
+        )
     try:
         stats = rewrite_file(
             path, tmp_new, got["layout"], method, sel, maker, path, passwords=book.candidates_for(path)
         )
         notes = stats.pop("notes", None) or []  # 結果に添える知らせ（PDF の制限が引き継がれないなど。値は含めない）
         fsync_path(tmp_new)
+        notes = [*notes, *inherit_file_metadata(path, tmp_new)]
         if sha256_file(path) != orig_sha:
             raise RemedyError("書き換えている間に元のファイルが変わりました。何も変えていません")
         remaining = _verify_new_file(tmp_new, args["options"], args, sorted(maker.produced) if maker else [], book)
         new_sha = sha256_file(tmp_new)
     except BaseException:
-        _discard(tmp_new)
+        _discard_new(tmp_new)
         raise
     return {
         "tmp_new": tmp_new,
@@ -699,12 +957,19 @@ def prepare_inner(args: dict) -> dict:
     book = args.get("book") or PasswordBook()
     workdir, owner = aw.make_workdir(options.temp_dir)
     try:
+        # 基準は下見の時点の書庫のハッシュ。取り出す前と後の両方で照合し、取り出した中身が下見のときの書庫のものだと確かめる
+        # （あとで取り直すと、取り出したあとに書庫が変わっていても「変わっていない」ことになる）
+        orig_sha = args.get("expected_sha256") or sha256_file(path)
+        if sha256_file(path) != orig_sha:
+            raise RemedyError(
+                "下見のあとに書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
+            )
         env = _archive_env(options, book, path, workdir)
         res = aw.extract_target(path, item_path, env)
         arch = res.describe()
-        if args.get("expected_sha256") and sha256_file(path) != args["expected_sha256"]:
+        if sha256_file(path) != orig_sha:
             raise RemedyError(
-                "下見のあとに書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
+                "取り出している間に書庫が変わりました。もう一度、下見からやり直してください（何も変えていません）"
             )
         convert = bool(args.get("convert_zip")) and not arch["can_write"]
         if not arch["can_write"] and not convert:
@@ -747,16 +1012,16 @@ def prepare_inner(args: dict) -> dict:
                 f"同じ場所に「{os.path.basename(dest)}」があるため、zip に作り直せません。"
                 "そのファイルの名前を変えるか移してから、もう一度お試しください（何も変えていません）"
             )
-        orig_sha = sha256_file(path)
         try:
             notes = [*leaf_notes, *aw.rebuild_target(res, new_leaf, env, tmp_new, convert)]
             fsync_path(tmp_new)
+            notes = [*notes, *inherit_file_metadata(path, tmp_new)]
             if sha256_file(path) != orig_sha:
                 raise RemedyError("作り直している間に元の書庫が変わりました。何も変えていません")
             remaining = _verify_new_file(tmp_new, options, args, sorted(maker.produced) if maker else [], book)
             new_sha = sha256_file(tmp_new)
         except BaseException:
-            _discard(tmp_new)
+            _discard_new(tmp_new)
             raise
         return {
             "tmp_new": tmp_new,
@@ -997,7 +1262,8 @@ class RemedyService:
         self._lock = threading.Lock()
         self._analyses: dict[tuple[str, str], Analysis] = {}
         self._runs: dict[str, RunState] = {}
-        self._busy: set[tuple[str, str]] = set()  # 実行中のファイル（同じファイルを同時に対処しない）
+        # 実行中のファイル（同じファイルを、別のジョブからも同時に対処しない）。鍵は正規化したパスだけ（ジョブは区別しない）
+        self._busy: set[str] = set()
         self._slots = threading.Semaphore(1)
 
     # ------------------------------------------------------------ 分析
@@ -1420,7 +1686,7 @@ class RemedyService:
         a = self.get_analysis(job_id, top_path, item_path)
         p = self.normalize(a, params)
         plan = self._plan(job_id, top_path, item_path)  # 実行の時点でも前提（ファイルの有無・読み取り専用）を確かめる
-        key = (job_id, top_path)
+        key = busy_key(top_path)
         with self._lock:
             if key in self._busy:
                 raise RemedyError("このファイルは、いま別の対処を実行中です")
@@ -1440,6 +1706,8 @@ class RemedyService:
                 "dummy_mode": p["dummy_mode"],
                 "expected_sha256": expected_sha256 or a.info.get("sha256"),
             }
+            if p["method"] == "delete_file" and has_recycle_bin(top_path):
+                check_recycle_path_length(top_path)  # 最後のごみ箱の段で必ず失敗するパスは、始める前に断る
             if p["method"] != "delete_file":
                 args["book"] = plan["book"]
             if item_path and p["method"] != "delete_file":
@@ -1503,9 +1771,20 @@ class RemedyService:
             if got.get("deleted"):
                 # ファイル・書庫ごとの削除（元の写しは作らない）。済んだあとに記録を残す
                 changed, remaining, extra = got["changed"], None, {}
-                rid = self.store.add_remediation(
-                    run.job_id, run.top_path, p["method"], filters, changed, remaining=None, state="applied"
-                )
+                try:
+                    rid = self.store.add_remediation(
+                        run.job_id, run.top_path, p["method"], filters, changed, remaining=None, state="applied"
+                    )
+                except (
+                    Exception
+                ) as e:  # noqa: BLE001  ファイルは消えた。記録だけ残せなかったことを、結果に添えて正しく知らせる
+                    rid = None
+                    extra = {
+                        "notes": [
+                            f"ファイルは削除しましたが、対処の記録を残せませんでした（{type(e).__name__}）。"
+                            "記録の一覧には出ません"
+                        ]
+                    }
             else:
                 rid, remaining = record_id, got["remaining"]
                 self.store.update_remediation(
@@ -1520,8 +1799,18 @@ class RemedyService:
                 changed = {**got["changed"], "disposal": outcome["disposal"]}
                 if outcome.get("pre_name"):
                     changed["pre_name"] = outcome["pre_name"]
-                self.store.update_remediation(rid, changed=changed)
-                extra = {"converted_to": got.get("converted_to"), "notes": got.get("notes") or []}
+                notes = list(got.get("notes") or [])
+                if outcome.get("bin_failed"):
+                    # ごみ箱へ送ったのに、そのドライブのごみ箱が増えなかった。元は残らなかった（新しい中身は元の名前に置いてある）
+                    changed["bin_failed"] = True
+                    notes.insert(0, BIN_FAILED_TEXT)
+                try:
+                    self.store.update_remediation(rid, changed=changed)
+                except (
+                    Exception
+                ):  # noqa: BLE001  ファイルは確定済み。記録の結果欄だけ更新できなかった（状態は立て直しが読める）
+                    notes.append("対処の記録の結果欄を更新できませんでした")
+                extra = {"converted_to": got.get("converted_to"), "notes": notes}
             with self._lock:
                 # ファイルが変わったので、古い分析は捨てる（同じ書庫の中の別の項目の分析も）
                 for k in [
@@ -1544,6 +1833,7 @@ class RemedyService:
                     # replaced=中身を入れ替えた（元は残らない）。元の写しは作らないので、このアプリの「元に戻す」は無い
                     "disposal": changed.get("disposal"),
                     "pre_name": changed.get("pre_name"),
+                    "bin_failed": bool(changed.get("bin_failed")),
                     **extra,
                 }
                 run.state = "done"
@@ -1558,7 +1848,7 @@ class RemedyService:
             )
         finally:
             with self._lock:
-                self._busy.discard((run.job_id, run.top_path))
+                self._busy.discard(busy_key(run.top_path))
 
     def _abandon(self, run: RunState, commit: dict | None, record_id: int | None, committing: bool) -> None:
         """元に触る前（確定の前）に失敗した実行の後片付け（一時の新ファイルと、始めた記録を消す）。
@@ -1569,7 +1859,7 @@ class RemedyService:
             return
         try:
             if commit:
-                _discard(commit["tmp_new"])
+                _discard_new(commit["tmp_new"])
             self.store.delete_remediation(record_id)
         except Exception:  # noqa: BLE001  片付けの失敗で、本来の失敗の理由を隠さない
             pass
@@ -1588,7 +1878,7 @@ class RemedyService:
         done: list[dict] = []
         for rec in self.store.unfinished_remediations(top_path):
             with self._lock:
-                if not ignore_busy and (rec["job_id"], rec["top_path"]) in self._busy:
+                if not ignore_busy and busy_key(rec["top_path"]) in self._busy:
                     continue  # いま実行中の対処
             plan = dict(rec.get("plan") or {})
             try:

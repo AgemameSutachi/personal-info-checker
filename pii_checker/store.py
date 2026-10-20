@@ -417,6 +417,9 @@ class Store:
         return fixed
 
     def delete_job(self, job_id: str) -> None:
+        """ジョブと、その検査の結果・対処の記録を消す。途中で止まった対処の記録があるときは消さない（ValueError）。"""
+        if self.unfinished_remediations_of_job(job_id):
+            raise ValueError("途中で止まった対処の記録があるジョブは削除できません（先に立て直してください）")
         with self.tx() as c:
             for t in ("findings", "items", "files", "folder_errors", "remediations"):
                 c.execute(f"DELETE FROM {t} WHERE job_id=?", (job_id,))
@@ -477,6 +480,14 @@ class Store:
         """きれいに取りやめた実行の記録を消す（元に触る前に失敗した・元に戻し終えた）。"""
         with self.tx() as c:
             c.execute("DELETE FROM remediations WHERE id=?", (rid,))
+
+    def unfinished_remediations_of_job(self, job_id: str) -> list[dict]:
+        """そのジョブの、途中で止まったままの対処の記録（ジョブを消す前の確認に使う）。"""
+        rows = self.query(
+            "SELECT * FROM remediations WHERE job_id=? AND state IN ('started','renamed','swapped') ORDER BY id",
+            (job_id,),
+        )
+        return [self._remediation_row(r) for r in rows]
 
     def unfinished_remediations(self, top_path: str | None = None) -> list[dict]:
         """途中で止まったままの対処の記録（始めた・元を改名した・新しいファイルを置いた）。立て直しの対象。"""

@@ -1047,6 +1047,8 @@ function paintValues(root, topPath, result) {
   });
 }
 
+// 画面に出す値は、検出のために全角・半角などをそろえた（NFKC で正規化した）後の文字。元の文字そのものではない
+const REVEAL_NORM_NOTE = " 値は、全角・半角などの違いをそろえた（正規化した）後の文字で表示します。元のファイルの文字とは違うことがあります。";
 function setRevealStatus(r, big) {
   const el = $("#rv-status");
   if (!el) return;
@@ -1055,9 +1057,10 @@ function setRevealStatus(r, big) {
       + (big ? " 大きなファイルのため、時間がかかります。" : "")
       + (r.elapsed >= 5 ? ` ${Math.floor(r.elapsed)} 秒経過` : "");
   } else if (r.state === "done") {
-    el.textContent = r.notice
+    el.textContent = (r.notice
       ? r.notice
-      : (state.maskValues ? "検出した値は伏せて表示しています。" : "検出した値を表示しています（元のファイルを読み直した結果。保存していません）。");
+      : (state.maskValues ? "検出した値は伏せて表示しています。" : "検出した値を表示しています（元のファイルを読み直した結果。保存していません）。"))
+      + (state.maskValues ? "" : REVEAL_NORM_NOTE);
   } else {
     el.textContent = `検出した値を表示できません: ${r.message}（伏せた値を表示しています）`;
   }
@@ -1141,24 +1144,27 @@ const rmSleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const RM_CONF = [["high", "高", 3], ["medium", "中", 2], ["low", "低", 1]];
 
 // 元のファイルの行き先の帯。完全に削除・元が残らないときは赤の太字、ごみ箱へ送るときは控えめな青。done=実行したあと（過去形）
-function disposalBanner(d, done) {
+function disposalBanner(d, done, binFailed) {
   if (!d) return "";
   if (d === "recycle_bin") {
     return `<div class="rm-banner rm-banner-trash" role="note">元のファイルはごみ箱へ${done ? "送りました" : "送ります"}（ごみ箱から戻せます）</div>`;
   }
-  return `<div class="rm-banner rm-banner-perm" role="note">元に戻せません（この場所にはごみ箱がありません）</div>`;
+  if (binFailed) {
+    return `<div class="rm-banner rm-banner-perm" role="note">ごみ箱へ送りましたが、ごみ箱に入らず完全に削除されました。元に戻せません（ごみ箱が無効・仮想ドライブなど）</div>`;
+  }
+  return `<div class="rm-banner rm-banner-perm" role="note">元に戻せません（この場所ではごみ箱が使えません）</div>`;
 }
 // 元のファイルの行き先（写しは作らない）。ごみ箱へ送った／完全に削除した／入れ替えた（元は残らない）
-function disposalText(d) {
+function disposalText(d, binFailed) {
   if (d === "recycle_bin") return "ごみ箱へ送った";
-  if (d === "permanent") return "完全に削除した（ごみ箱の無い場所）";
-  if (d === "replaced") return "残っていない（ごみ箱の無い場所で、中身を入れ替えた）";
+  if (d === "permanent") return "完全に削除した（ごみ箱が使えない場所、またはごみ箱に入らなかった）";
+  if (d === "replaced") return binFailed ? "残っていない（ごみ箱へ送ったが入らず、完全に削除された）" : "残っていない（ごみ箱の無い場所で、中身を入れ替えた）";
   return "";
 }
 // 「元に戻す」の代わりの案内（このアプリは元の写しを持たない。ごみ箱へ送ったものは、ごみ箱から戻す）
 function guideText(d, preName) {
   if (d === "recycle_bin") return preName ? `元に戻すには、エクスプローラーのごみ箱から「${preName}」を戻してください（この名前で戻ります）。` : "元に戻すには、エクスプローラーのごみ箱から戻してください。";
-  if (d === "permanent" || d === "replaced") return "元に戻せません（ごみ箱の無い場所のため）。";
+  if (d === "permanent" || d === "replaced") return "元に戻せません（ごみ箱に入っていないため）。";
   return "";
 }
 // 対処の記録の「方法」の列に出す短い名前（長い説明は title に。ごみ箱へ送ったか完全に削除かは「元のファイル」の列）
@@ -1172,7 +1178,7 @@ function shortMethodName(x) {
   return RM_SHORT[x.method] || x.method_label;
 }
 function originalText(x) {
-  const t = disposalText(x.disposal);
+  const t = disposalText(x.disposal, x.bin_failed);
   return t ? (x.disposal === "recycle_bin" && x.pre_name ? `${t}（ごみ箱から「${x.pre_name}」を戻す）` : t) : "";
 }
 // 記録の表の「状態」の欄（元に戻すボタンは無い。途中で止まったものと立て直したものを分けて出す）
@@ -1402,7 +1408,7 @@ async function runRemedy(topPath, body, btn) {
   area.innerHTML = `
     <div class="item-card rm-card rm-done" role="status">
       <h4 id="rm-done-title" tabindex="-1">対処しました</h4>
-      ${disposalBanner(r.disposal, true)}
+      ${disposalBanner(r.disposal, true, r.bin_failed)}
       ${doneLine}
       ${r.disposal === "recycle_bin" ? `<p class="small">${esc(guideText(r.disposal, r.pre_name))}</p>` : ""}
       ${r.converted_to ? `<p>zip に作り直しました: <span class="mono">${esc(r.converted_to)}</span></p>` : ""}

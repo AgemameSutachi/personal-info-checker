@@ -459,11 +459,127 @@ def _col_letters(idx0: int) -> str:
     return get_column_letter(idx0 + 1)
 
 
+def _shifted_span(lo: int, hi: int, removed: list[int]) -> tuple[int, int] | None:
+    """範囲 [lo, hi]（行または列の番号）から、消した番号（昇順）を詰めたあとの範囲。全部消えたら None。"""
+    gone = bisect_right(removed, hi) - bisect_left(removed, lo)
+    kept = hi - lo + 1 - gone
+    if kept <= 0:
+        return None
+    new_lo = lo - bisect_left(removed, lo)
+    return new_lo, new_lo + kept - 1
+
+
+def _fix_ref_rows(ref: str | None, rows: list[int]) -> str | None:
+    """範囲の文字列（"A1:E20"）を、行を消したあとの範囲にする。全部消えたら None。"""
+    from openpyxl.utils import get_column_letter, range_boundaries
+
+    if not ref:
+        return ref
+    min_c, min_r, max_c, max_r = range_boundaries(ref)
+    span = _shifted_span(min_r, max_r, rows)
+    if span is None:
+        return None
+    return f"{get_column_letter(min_c)}{span[0]}:{get_column_letter(max_c)}{span[1]}"
+
+
+def _fix_ref_cols(ref: str | None, cols: list[int]) -> str | None:
+    """範囲の文字列を、列（1 始まり）を消したあとの範囲にする。全部消えたら None。"""
+    from openpyxl.utils import get_column_letter, range_boundaries
+
+    if not ref:
+        return ref
+    min_c, min_r, max_c, max_r = range_boundaries(ref)
+    span = _shifted_span(min_c, max_c, cols)
+    if span is None:
+        return None
+    return f"{get_column_letter(span[0])}{min_r}:{get_column_letter(span[1])}{max_r}"
+
+
+def _fix_tables_rows(ws, rows: list[int]) -> None:
+    """行を消したあと、Excel の表（ListObject）の範囲・オートフィルタ・シートのオートフィルタを合わせる。
+    表の見出し行・集計行が消える、または表のデータ行が1行も残らないときは、壊れた表を作らないよう断る。"""
+    from openpyxl.utils import get_column_letter, range_boundaries
+
+    for table in list(ws.tables.values()):  # items() は（名前, 範囲の文字列）なので、表そのものを values() で取る
+        name = table.name
+        min_c, min_r, max_c, max_r = range_boundaries(table.ref)
+        header = 1 if table.headerRowCount is None else int(table.headerRowCount)
+        totals = int(table.totalsRowCount or 0)
+        in_table = [r for r in rows if min_r <= r <= max_r]
+        if not in_table:
+            span = _shifted_span(min_r, max_r, rows)
+            new_min, new_max = span
+        else:
+            head_rows = range(min_r, min_r + header)
+            tail_rows = range(max_r - totals + 1, max_r + 1) if totals else range(0)
+            if any(r in head_rows or r in tail_rows for r in in_table):
+                raise RemedyError(
+                    f"シート「{ws.title}」の Excel の表「{name}」の見出し行（または集計行）が、削除する行に含まれています。"
+                    "表が壊れるため、行を削除できません。表の見出し・集計行を含まない選びにしてください。元のファイルは変えていません"
+                )
+            data_left = (max_r - min_r + 1 - header - totals) - len(in_table)
+            if data_left <= 0:
+                raise RemedyError(
+                    f"シート「{ws.title}」の Excel の表「{name}」のデータ行がすべて削除対象です。"
+                    "データ行が1行も無い表は作れないため、行を削除できません（表ごと消すなら、シートを削除してください）。"
+                    "元のファイルは変えていません"
+                )
+            span = _shifted_span(min_r, max_r, rows)
+            new_min, new_max = span
+        table.ref = f"{get_column_letter(min_c)}{new_min}:{get_column_letter(max_c)}{new_max}"
+        if table.autoFilter is not None:
+            table.autoFilter.ref = f"{get_column_letter(min_c)}{new_min}:{get_column_letter(max_c)}{new_max - totals}"
+        if getattr(table, "sortState", None) is not None:
+            table.sortState = (
+                None  # 並べ替えの範囲は古い行番号のまま。残すと壊れるので外す（並べ替えの結果の順は保たれる）
+            )
+    if ws.auto_filter is not None and ws.auto_filter.ref:
+        new = _fix_ref_rows(ws.auto_filter.ref, rows)
+        ws.auto_filter.ref = new
+        if new is None and getattr(ws.auto_filter, "sortState", None) is not None:
+            ws.auto_filter.sortState = None
+
+
+def _fix_tables_cols(ws, cols: list[int]) -> None:
+    """列を消したあと、Excel の表の範囲・列の定義（tableColumns）・オートフィルタを合わせる。列が全部消える表は取り除く。"""
+    from openpyxl.utils import get_column_letter, range_boundaries
+
+    colset = set(cols)
+    for table in list(ws.tables.values()):  # items() は（名前, 範囲の文字列）なので、表そのものを values() で取る
+        name = table.name
+        min_c, min_r, max_c, max_r = range_boundaries(table.ref)
+        span = _shifted_span(min_c, max_c, cols)
+        if span is None:
+            del ws.tables[name]  # 表の列がすべて消える（データも消える）。表の定義だけ残さない
+            continue
+        new_min, new_max = span
+        kept_idx = [i for i in range(max_c - min_c + 1) if (min_c + i) not in colset]
+        if len(table.tableColumns) == max_c - min_c + 1:
+            table.tableColumns = [table.tableColumns[i] for i in kept_idx]
+        table.ref = f"{get_column_letter(new_min)}{min_r}:{get_column_letter(new_max)}{max_r}"
+        af = table.autoFilter
+        if af is not None:
+            totals = int(table.totalsRowCount or 0)
+            af.ref = f"{get_column_letter(new_min)}{min_r}:{get_column_letter(new_max)}{max_r - totals}"
+            new_filters = []
+            for fc in list(af.filterColumn):
+                if fc.colId in kept_idx:
+                    fc.colId = kept_idx.index(fc.colId)
+                    new_filters.append(fc)
+            af.filterColumn = new_filters
+        if getattr(table, "sortState", None) is not None:
+            table.sortState = None
+    if ws.auto_filter is not None and ws.auto_filter.ref:
+        ws.auto_filter.ref = _fix_ref_cols(ws.auto_filter.ref, cols)
+
+
 def _delete_rows(ws, rows: list[int]) -> None:
     """シートから行を消す（セル・結合・行の高さを詰める。数式の参照は直さない）。"""
     rows = sorted(set(rows))
     rowset = set(rows)
     from openpyxl.worksheet.cell_range import CellRange
+
+    _fix_tables_rows(ws, rows)
 
     merged = [(rg.min_row, rg.min_col, rg.max_row, rg.max_col) for rg in ws.merged_cells.ranges]
     for rg in list(ws.merged_cells.ranges):
@@ -505,6 +621,8 @@ def _delete_cols(ws, cols1: list[int]) -> None:
     colset = set(cols)
     from openpyxl.utils import column_index_from_string, get_column_letter
     from openpyxl.worksheet.cell_range import CellRange
+
+    _fix_tables_cols(ws, cols)
 
     merged = [(rg.min_row, rg.min_col, rg.max_row, rg.max_col) for rg in ws.merged_cells.ranges]
     for rg in list(ws.merged_cells.ranges):

@@ -138,21 +138,29 @@ def create_app(
     # 許可する側は名前そのもの（ポートは付かない。IPv6 は「::1」とも「[::1]」とも書ける）
     hosts = {h.strip().strip("[]").lower() for h in (allowed_hosts or set(LOCAL_HOSTS))} - {""}
 
+    async def refuse(request: Request, detail: str, status_code: int) -> JSONResponse:
+        # 送られてきた本文を読み切ってから断る。読み残したまま閉じると、Windows では接続が強制的に切られ（RST）、
+        # 相手は断りの返事を読めずに「接続が中断された」になることがある（CI で実測）
+        try:
+            await request.body()
+        except Exception:  # noqa: BLE001  読めなくても断ることは変えない
+            pass
+        return JSONResponse({"detail": detail}, status_code=status_code)
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         host = host_name(request.headers.get("host"))
         if not host or host not in hosts:
-            return JSONResponse({"detail": "このアドレスからの接続は受け付けていません"}, status_code=403)
+            return await refuse(request, "このアドレスからの接続は受け付けていません", 403)
         path = request.url.path
         if path.startswith("/api/"):
             given = request.headers.get("x-token") or request.query_params.get("token")
             if not given or not secrets.compare_digest(given, app.state.token):
-                return JSONResponse(
-                    {"detail": "合言葉（トークン）が違います。起動時に表示された URL から開いてください"},
-                    status_code=401,
+                return await refuse(
+                    request, "合言葉（トークン）が違います。起動時に表示された URL から開いてください", 401
                 )
             if request.method not in ("GET", "HEAD") and request.headers.get("x-requested-with") != "pii-checker":
-                return JSONResponse({"detail": "不正な送信元です"}, status_code=403)
+                return await refuse(request, "不正な送信元です", 403)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Frame-Options"] = "DENY"

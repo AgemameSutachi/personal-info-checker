@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 import secrets
@@ -44,6 +46,10 @@ CONF_LABELS = {c.value: c.label for c in Confidence}
 STATUS_JA = {s.value: label for s, label in STATUS_LABELS.items()}
 # この PC だけから使うときの名前（IPv6 の ::1 も同じこの PC）
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+# 断る前に読み捨てる本文の上限（認証の前なので、量と時間を区切る）
+REFUSE_DRAIN_BYTES = 4 * 1024 * 1024
+REFUSE_DRAIN_SECONDS = 3.0
+log = logging.getLogger(__name__)
 # 失敗の応答に付ける印: 接続のパスワードを入れ直してもらう失敗（パスワードを断られた・まだ受け取っていない）。
 # 画面はこの印があるときだけパスワードの欄を開く（回線断・ジョブが無い等の、パスワードと無関係な失敗では開かない）
 NEEDS_PASSWORD_HEADER = "X-Pii-Needs-Password"
@@ -140,11 +146,20 @@ def create_app(
 
     async def refuse(request: Request, detail: str, status_code: int) -> JSONResponse:
         # 送られてきた本文を読み切ってから断る。読み残したまま閉じると、Windows では接続が強制的に切られ（RST）、
-        # 相手は断りの返事を読めずに「接続が中断された」になることがある（CI で実測）
+        # 相手は断りの返事を読めずに「接続が中断された」になることがある（CI で実測）。
+        # 認証の前なので、溜めずに捨てながら読み、量（REFUSE_DRAIN_BYTES）と時間（REFUSE_DRAIN_SECONDS）に上限を付ける
+        # （上限を超える送り手には、読み残しの RST が起きてもかまわない）
+        async def drain() -> None:
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > REFUSE_DRAIN_BYTES:
+                    return
+
         try:
-            await request.body()
-        except Exception:  # noqa: BLE001  読めなくても断ることは変えない
-            pass
+            await asyncio.wait_for(drain(), REFUSE_DRAIN_SECONDS)
+        except Exception as e:  # noqa: BLE001  読めなくても断ることは変えない
+            log.debug("断る前に本文を読み切れませんでした: %s", type(e).__name__)
         return JSONResponse({"detail": detail}, status_code=status_code)
 
     @app.middleware("http")

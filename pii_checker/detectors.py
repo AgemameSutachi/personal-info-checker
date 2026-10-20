@@ -14,6 +14,7 @@ import re
 from bisect import bisect_left
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .models import Confidence
@@ -979,8 +980,8 @@ def _guard_ranges_for(ext) -> list[tuple[int, int]]:
             return [tuple(r) for r in _rust_guard.RANGES]
     except ImportError:
         pass
-    except Exception:  # noqa: BLE001 - 表が途中で切れた・項目が無いなど。その場で求め直せば正しい
-        pass
+    except Exception as exc:  # noqa: BLE001 - 表が途中で切れた・項目が無いなど。その場で求め直せば正しい
+        _record_engine_event(f"同梱の範囲の表（_rust_guard.py）が読めないため、その場で求め直した: {exc!r}")
     return _rust_guard_ranges(ext)
 
 
@@ -994,16 +995,48 @@ def _load_rust():
         return None
     try:
         import pii_rs_detect as ext
-    except ImportError:
+    except ModuleNotFoundError:
         _RUST_NOTE = "拡張が入っていない"
+        return None
+    except ImportError as exc:  # 入っているのに読めない（DLL の読み込みの失敗など）
+        _RUST_NOTE = f"拡張を読み込めない（{exc!r}）"
+        _record_engine_event(f"Rust 拡張を読み込めないため、Python の経路で検出する: {exc!r}")
         return None
     try:
         ext.set_mismatch_ranges(_guard_ranges_for(ext))
     except Exception as exc:  # noqa: BLE001 - 拡張が壊れていても、検出は Python 版で続ける
         _RUST_NOTE = f"拡張の読み込みに失敗した（{exc!r}）"
-        _log.warning("Rust 拡張を使えないため、Python の経路で検出します: %r", exc)
+        _record_engine_event(f"Rust 拡張を使えないため、Python の経路で検出する: {exc!r}")
         return None
     return ext
+
+
+def engine_log_path() -> Path:
+    """検出エンジンの出来事（Rust 拡張を使えなくなった理由など）を追記するファイル。検査の記録と同じフォルダ。"""
+    import os
+
+    return Path(os.environ.get("LOCALAPPDATA") or str(Path.home())) / "PiiChecker" / "engine.log"
+
+
+def _record_engine_event(message: str) -> None:
+    """検出エンジンの出来事を logging と engine.log に残す。
+
+    画面の版や作業用プロセス（spawn の子）には標準エラーが無く、warnings や logging の既定の出力は捨てられる。
+    検査の途中で Rust から Python に切り替わると結果は同じまま遅くなるだけなので、後から理由を追えるようファイルに書く。
+    書けなくても検査は止めない。
+    """
+    import datetime
+    import os
+
+    _log.warning("%s", message)
+    try:
+        path = engine_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} pid={os.getpid()} {message}\n")
+    except OSError:
+        pass
 
 
 # Rust 拡張を使っていないときの理由（使っていれば空）。--version などで利用者に見せる
@@ -1033,7 +1066,7 @@ def _disable_rust(error: BaseException) -> None:
     global _RUST, _RUST_NOTE
     _RUST = None
     _RUST_NOTE = f"検査の途中で拡張が失敗した（{error!r}）"
-    _log.warning("Rust 拡張が失敗したため、以後は Python の経路で検出します: %r", error)
+    _record_engine_event(f"Rust 拡張が失敗したため、以後は Python の経路で検出する: {error!r}")
     import warnings
 
     warnings.warn(f"Rust 拡張が失敗したため、以後は Python の経路で検出します: {error!r}", RuntimeWarning, stacklevel=3)

@@ -377,27 +377,40 @@ class _PanicLike(BaseException):
 
 
 @pytest.mark.parametrize("error", [RuntimeError("壊れた"), _PanicLike("panic")])
-def test_rust_failure_disables_rust_and_falls_back(monkeypatch, error):
+def test_rust_failure_disables_rust_and_falls_back(monkeypatch, tmp_path, error):
     class Broken:
         def detect_body(self, *args):
             raise error
 
     monkeypatch.setattr(detectors, "_RUST", Broken())
     monkeypatch.setattr(detectors, "_RUST_NOTE", "")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))  # engine.log は試験の一時フォルダへ
     with pytest.warns(RuntimeWarning):
         hits = detectors.detect("電話 090-1234-5678")
     assert rows(hits) == rows(detectors._detect_py("電話 090-1234-5678"))
     assert not detectors.rust_enabled()  # 以後は使わない
     # 遅くなった理由を利用者が --version で追えるよう、理由を残す（画面の版では警告が見えないため）
     assert "検査の途中で拡張が失敗した" in detectors.rust_status()
+    # 画面の版・作業用プロセスでも後から追えるよう、engine.log にも残る
+    assert "Rust 拡張が失敗した" in detectors.engine_log_path().read_text(encoding="utf-8")
 
 
-def test_broken_guard_table_is_recomputed(monkeypatch):
+def test_broken_guard_table_is_recomputed(monkeypatch, tmp_path):
     """同梱の範囲の表が壊れている（項目が無いなど）ときは、拡張を止めずにその場で求め直す。"""
     import types
 
-    monkeypatch.setitem(sys.modules, "pii_checker._rust_guard", types.ModuleType("pii_checker._rust_guard"))
-    assert detectors._guard_ranges_for(detectors._RUST) == detectors._rust_guard_ranges(detectors._RUST)
+    import pii_checker
+
+    broken = types.ModuleType("pii_checker._rust_guard")  # KEY も RANGES も無い
+    monkeypatch.setitem(sys.modules, "pii_checker._rust_guard", broken)
+    monkeypatch.setattr(pii_checker, "_rust_guard", broken, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    calls = []
+    real = detectors._rust_guard_ranges
+    monkeypatch.setattr(detectors, "_rust_guard_ranges", lambda ext: calls.append(1) or real(ext))
+    assert detectors._guard_ranges_for(detectors._RUST) == real(detectors._RUST)
+    assert calls, "壊れた表のときに、その場で求め直していない"
+    assert "範囲の表" in detectors.engine_log_path().read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(3)])

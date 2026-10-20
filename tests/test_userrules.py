@@ -232,7 +232,8 @@ def test_slow_pattern_found_by_timing_is_refused_quickly():
 def test_ordinary_patterns_are_accepted(pattern):
     started = time.perf_counter()
     assert check_pattern(pattern) is None
-    assert time.perf_counter() - started < 0.5  # 普通の規則は受け付けで待たせない
+    # 普通の規則は受け付けで待たせない（手元では数ミリ秒。CI の共有の機械は遅く、0.5 秒では 0.52 秒で落ちた）
+    assert time.perf_counter() - started < 2.0
 
 
 def test_rules_use_multiline():

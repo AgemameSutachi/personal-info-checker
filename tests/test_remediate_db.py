@@ -1,4 +1,4 @@
-"""データベースへの対処（T2-b: SQLite・SQL のダンプ。Access はファイルの削除だけ。Oracle のダンプは tests/test_remediate_oracle.py）の試験。
+"""データベースへの対処（T2-b: SQLite・SQL のダンプ。Access は tests/test_remediate_access.py。Oracle のダンプは tests/test_remediate_oracle.py）の試験。
 
 守ること: T2-a と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
 - SQLite: 各方法のあと検査し直して消え、関係ない行・表・索引・ビュー・トリガーが元のまま・integrity_check が ok・消した値がファイルのバイト列に残らない
@@ -443,16 +443,15 @@ def test_access_and_pg_custom_only_allow_file_delete():
 
 
 def test_access_file_gives_reason_through_analysis(tmp_path, monkeypatch):
-    """実ファイルの分析で、Access は理由つきでファイルの削除だけが選べる（形式の名前から決まる）。"""
+    """実ファイルの分析で、読めない Access（見出しだけの偽物）は、理由つきでファイルの削除だけが選べる（T2-e: 読めた Access の対処は tests/test_remediate_access.py）。"""
     p = tmp_path / "src" / "a.accdb"
     p.parent.mkdir()
     p.write_bytes(b"\x00\x01\x00\x00Standard ACE DB" + b"\x00" * 600)
     svc, store, job = make_service(tmp_path, [p])
     a = analyze(svc, job, p)
     assert a.info["methods"]["delete_file"]["available"]
-    for m in ("delete_rows", "delete_columns", "dummy"):
-        assert not a.info["methods"][m]["available"]
-    assert "delete_table" not in a.info["methods"]
+    for m in ("delete_rows", "delete_columns", "dummy", "delete_table"):
+        assert not a.info["methods"][m]["available"] and "ファイルの削除はできます" in a.info["methods"][m]["reason"]
 
 
 # ---------------------------------------------------------------- SQL のダンプの検体

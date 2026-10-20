@@ -160,7 +160,10 @@ def _dump_odbc(ctx: ScanContext, conn, col: Collector, item: ItemResult, depth: 
         except Exception as e:
             _failed_table(ctx, display, name, f"表を読めなかった: {e}", depth)
             continue
+        col.pos_sheet = name  # 対処のための位置: シートは表の名前、行は SELECT * の通し番号
         columns = [d[0] for d in c2.description]
+        if col.collect_positions:
+            col.pos_info.setdefault("tables", {})[name] = {"columns": list(columns)}  # 下見に出す列名（値は含まない）
         blob_cols = set()
 
         def rows(c2=c2, name=name, columns=columns):
@@ -270,18 +273,28 @@ def _read_access_helper32(
                 opened = msg
             elif t == "table":
                 columns_by_table[msg["name"]] = msg["columns"]
+                if col.collect_positions:
+                    col.pos_info.setdefault("tables", {})[msg["name"]] = {"columns": list(msg["columns"])}
             elif t == "row":
                 table = msg["table"]
                 cols = columns_by_table.get(table, [])
                 values = msg["values"]
                 r = msg["row"]
+                col.pos_sheet = table
                 for ci, v in enumerate(values):
                     if v in (None, ""):
                         continue
                     header = cols[ci] if ci < len(cols) else None
-                    col.add_text(
-                        str(v), f"表「{table}」{r}行目 列「{header}」", header=header, method="表のレコード（32bit）"
-                    )
+                    col.cell_pos = (r, ci)  # 対処のための位置（行は補助が数えた通し番号）
+                    try:
+                        col.add_text(
+                            str(v),
+                            f"表「{table}」{r}行目 列「{header}」",
+                            header=header,
+                            method="表のレコード（32bit）",
+                        )
+                    finally:
+                        col.cell_pos = None
             elif t == "blob":
                 try:
                     data = base64.b64decode(msg["data_b64"])
@@ -344,7 +357,10 @@ def _read_access_parser(ctx: ScanContext, path: str, col: Collector, item: ItemR
             _failed_table(ctx, item.path, name, f"表を読めなかった（access_parser）: {e}", 0)
             continue
         n_tables += 1
+        col.pos_sheet = name
         columns = list(table.keys())
+        if col.collect_positions:
+            col.pos_info.setdefault("tables", {})[name] = {"columns": list(columns)}
         length = max((len(v) for v in table.values()), default=0)
 
         def rows(table=table, columns=columns, length=length):
@@ -376,6 +392,8 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     attempts: list[str] = []
     used = None
     need_pw = False
+    if col.collect_positions:
+        col.pos_layout = "access"  # 対処（remedy_access）の位置: シートは表の名前、行は通し番号、列は列の番号
     for label, fn in (
         ("64bit ODBC", lambda: _read_access_odbc(ctx, path, col, item, depth, blob.display)),
         ("32bit 補助", lambda: _read_access_helper32(ctx, path, col, item, depth, blob.display)),
@@ -389,6 +407,11 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             attempts.append(f"{label}: パスワードが違う")
         except Exception as e:
             attempts.append(f"{label}: {type(e).__name__}: {str(e)[:200]}")
+        if col.collect_positions:
+            # 途中まで読んで失敗した方法の位置は捨てる（次の方法が、同じ表をもう一度最初から数えるため）
+            col.positions.clear()
+            col.pos_info.clear()
+            col.pos_total = 0
     if ctx.options.raw_sweep:
         _raw_sweep(path, col, raw=used is not None)
     if used:

@@ -1,6 +1,6 @@
 """検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル、
 T2-b: SQLite・SQL のダンプ。T2-c: PDF の黒塗り・docx・pptx。T2-d: Oracle のダンプ（exp は行・列・表・ダミー化、expdp は行・ダミー化）。
-Access はファイルの削除だけ）。
+T2-e: Access（ACE・Jet・Jackcess のうち使える手段で、写しの中を直接書き換える。remedy_access.py））。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
@@ -88,6 +88,7 @@ LAYOUT_METHODS = {
     "xlsx": ("delete_rows", "delete_columns", "dummy", "delete_sheet"),
     "sqlite": ("delete_rows", "delete_columns", "dummy", "delete_table"),
     "sqldump": ("delete_rows", "delete_columns", "dummy", "delete_table"),
+    "access": ("delete_rows", "delete_columns", "dummy", "delete_table"),
     "oracle_exp": ("delete_rows", "delete_columns", "dummy", "delete_table"),
     "oracle_expdp": ("delete_rows", "dummy"),  # 列・表の削除は、圧縮された DDL を書き換えられないため選べない
     "pdf": ("redact", "delete_pages"),
@@ -98,7 +99,7 @@ ORACLE_LAYOUTS = (
     "oracle_exp",
     "oracle_expdp",
 )  # Oracle のダンプ（T2-d）。位置のシートは表の名前、行は表の中の行の通し番号
-DB_LAYOUTS = ("sqlite", "sqldump", *ORACLE_LAYOUTS)  # 位置の「シート」が表の名前になる形式
+DB_LAYOUTS = ("sqlite", "sqldump", "access", *ORACLE_LAYOUTS)  # 位置の「シート」が表の名前になる形式
 OFFICE_LAYOUTS = ("pdf", "docx", "pptx")  # 位置の「シート」がページ・部品・スライドになる形式（T2-c）
 # ある形式にだけ出す方法
 LAYOUT_ONLY_METHODS = {
@@ -110,6 +111,7 @@ LAYOUT_ONLY_METHODS = {
 }
 XLSX_EXTS = (".xlsx", ".xlsm")
 NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
+CMP_PREFIX = "~piichk-cmp-"  # Access の最適化（remedy_access）が、新しいファイルの隣に作る写しの名前の頭
 BIN_FAILED_TEXT = (
     "元のファイルをごみ箱へ送りましたが、ごみ箱に入らず完全に削除されました（ごみ箱が無効・仮想ドライブなど）。"
     "新しい中身は元の名前に置いてあります。元には戻せません"
@@ -370,6 +372,8 @@ def _discard_new(path: str | None) -> None:
         return
     for suffix in ("", "-journal", "-wal", "-shm"):
         _discard(path + suffix)
+    folder, name = os.path.split(path)
+    _discard(os.path.join(folder, CMP_PREFIX + name))  # Access の最適化の途中の写し（強制終了で残ることがある）
 
 
 def _exists(path: str | None) -> bool:
@@ -777,6 +781,10 @@ def collect_task(args: dict) -> dict:
             db_schema = {}
     elif top.pos_layout in ORACLE_LAYOUTS and top.pos_info.get("tables"):
         db_schema = {"tables": top.pos_info["tables"]}  # 表ごとの列名（下見に「表.列名」を出す。値は含まない）
+    elif top.pos_layout == "access" and top.pos_info.get("tables"):
+        from .remedy_access import engine_summary
+
+        db_schema = {"tables": top.pos_info["tables"], "access": engine_summary(args["path"])}  # 列名と、使う手段
     return {
         "source": result.source,
         "status": top.status.value,
@@ -875,6 +883,10 @@ def rewrite_file(
         from .remedy_oracle import rewrite_oracle_dump_file
 
         return rewrite_oracle_dump_file(src, dst, layout, method, sel, maker)
+    if layout == "access":
+        from .remedy_access import rewrite_access_file
+
+        return rewrite_access_file(src, dst, method, sel, maker)
     return rewrite_text_file(src, dst, layout, method, sel, maker)
 
 
@@ -1118,7 +1130,7 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     if family not in LAYOUT_METHODS:
         return (
             "この形式の中身の書き換えには、まだ対応していません"
-            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ・Oracle のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
+            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・Access・SQL のダンプ・Oracle のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
         )
     if family == "oracle_expdp" and method in ("delete_columns", "delete_table"):
         from .remedy_oracle import EXPDP_UNSUPPORTED_REASON
@@ -1134,6 +1146,14 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
         from .remedy_sqlite import sidecar_problem, version_problem
 
         return sidecar_problem(path) or version_problem(method)
+    if family == "access":
+        from .remedy_access import availability_reason
+
+        if info.get("password_opened"):  # 検査のとき入れたパスワードで開けた Access は、書き換えのために開き直せない
+            return (
+                "データベースパスワードの掛かった Access は、いまは中身を書き換えられません。ファイルの削除はできます"
+            )
+        return availability_reason(path, method, info.get("kind") or "")
     return ""
 
 
@@ -1150,11 +1170,6 @@ def layout_from_kind(kind: str) -> str:
 
 def file_only_reason(kind: str) -> str:
     """中身の書き換えを作っていない形式（ファイルの削除だけできる）の理由。当てはまらなければ空。"""
-    if kind.startswith("Access"):
-        return (
-            "Access（.accdb・.mdb）は、書き換えの手段（ODBC ドライバ・Access 本体）が環境によって違うため、"
-            "いまはファイルの削除だけに対応しています"
-        )
     if "97-2003" in kind and ("doc" in kind or "ppt" in kind):
         what = "Word（doc）" if "Word" in kind else "PowerPoint（ppt）"
         return (
@@ -1559,7 +1574,7 @@ class RemedyService:
             changes["rows"] = n_rows
             out["summary"] = f"{n_rows:,} 行を削除します（検出 {sel.detections:,} 件を含む行）"
             out["sample_rows"] = sample
-            if any(1 in v for v in rows.values()):
+            if layout not in DB_LAYOUTS and any(1 in v for v in rows.values()):
                 out["warnings"].append("1 行目（見出し行の可能性）も削除されます")
         elif method == "delete_columns":
             changes["cols"] = n_cols
@@ -1586,6 +1601,15 @@ class RemedyService:
             changes["tables"] = len(targets)
             changes["table_names"] = targets
             out["summary"] = f"{len(targets)} 個の表を削除します: " + "、".join(targets)
+        if layout == "access" and (((schema or {}).get("access") or {}).get("strategies") or [""])[0] == "jackcess":
+            # Jackcess は列・表そのものを消せない（枠が残り、中身だけが空になる）。見出しから実際の動きを書く
+            if method == "delete_columns":
+                out["summary"] = (
+                    f"{n_cols:,} 列の値をすべて空にします（列そのものは残ります。検出 {sel.detections:,} 件を含む列）"
+                )
+            elif method == "delete_table":
+                targets = sel.sheets()
+                out["summary"] = f"{len(targets)} 個の表の行をすべて消します（表の枠は残ります）: " + "、".join(targets)
         out["changes"] = changes
         if layout == "xlsx" and method != "dummy":
             out["warnings"].extend(XLSX_WARNINGS)
@@ -1906,7 +1930,7 @@ def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> 
         from .ooxml_text import split_pptx_sheet
 
         return f"{split_pptx_sheet(sheet)[0]} 段落 {key}"
-    if layout in ORACLE_LAYOUTS:
+    if layout in ORACLE_LAYOUTS or layout == "access":
         return f"{sheet}: {key} 行目"  # 表の中の行の通し番号（検査の「N行目」と同じ）
     if layout == "sqldump":
         from .formats.dbdump import ROW_KEY_SHIFT
@@ -2154,6 +2178,10 @@ def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> tuple
         )
     elif layout in ORACLE_LAYOUTS:
         out, notes = oracle_warnings(layout, method, sel, schema)
+    elif layout == "access":
+        from .remedy_access import access_warnings
+
+        out, notes = access_warnings(method, sel, schema)
     else:
         notes.append(
             "SQL のダンプを1行ずつ読みながら新しいファイルへ書きます。触らない行は元のバイト列のまま写し、文字コード・改行も元のままです"

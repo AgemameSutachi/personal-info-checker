@@ -368,6 +368,7 @@ class Collector:
             "pptx",
             "oracle_exp",
             "oracle_expdp",
+            "access",  # シートは表の名前、行は SELECT * の通し番号（1 始まり）、列は列の番号（0 始まり）
         ):
             # oracle_exp・oracle_expdp: シートは表の名前、行は表の中の行の通し番号（1 始まり）、列は列の番号（0 始まり）
             # docx・pptx: シートは部品名（表のセルは「部品名#tblN」）、行は段落の通し番号（表のセルは表の行）、列は図形・表の列

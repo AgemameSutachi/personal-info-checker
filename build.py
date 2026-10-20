@@ -202,6 +202,12 @@ FIRST_README = """個人情報チェッカー {version}
 
 ■ 画面で使う
   PiiChecker.exe をダブルクリックします。調べたいフォルダを PiiChecker.exe に重ねて離しても開けます。
+  警告（Windows によって PC が保護されました）が出たら「詳細情報」→「実行」を押します。
+
+■ 見つけた個人情報への対処（画面だけ）
+  ファイルの詳細の「対処する…」から、行の削除・ダミー化・黒塗り・ファイルの削除などができます。
+  元の写しは作りません。元はごみ箱へ送りますが、ごみ箱の無い場所（NAS・外付けなど）では元は残りません。
+  「下見」を読んでから実行してください。
 
 ■ コマンドで使う（定期検査・Web 版）
   cmd\\PiiChecker-cmd.exe を、コマンドプロンプトや PowerShell から使います。例:
@@ -210,7 +216,9 @@ FIRST_README = """個人情報チェッカー {version}
   引数の一覧は cmd\\PiiChecker-cmd.exe --help で出ます。
 
 ■ そのほか
-  _internal と cmd は動かすのに要る部品です。中身を消したり、PiiChecker フォルダの外へ動かしたりしないでください。
+  _internal と cmd は動かすのに要る部品です（Python・Java・7-Zip も中に入っているので、別に入れる必要はありません）。
+  中身を消したり、PiiChecker フォルダの外へ動かしたりしないでください。
+  ライセンス: LICENSE.txt（このツール）・THIRD-PARTY-LICENSES.txt（同梱した部品）
   使い方の詳細: https://github.com/AgemameSutachi/personal-info-checker#readme
 """
 

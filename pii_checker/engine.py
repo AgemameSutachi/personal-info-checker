@@ -46,6 +46,8 @@ CHECKPOINT_SECONDS = 10
 CHECKPOINT_EVERY = 500  # 何回の add_text ごとに時計を見るか（毎回見ると遅い）
 # 住所・固定電話を「人の手がかり待ち」で値ごとに覚えておく上限（1件ごとに本文を抱える。超えた分は種類ごとの件数だけ数える）
 DEFER_LIMIT = 200_000
+# 見た値を覚えておく上限（Collector.seen と、ファイル全体の異なる値の集計。超えた値は件数だけ数え、異なる値には数えない）
+SEEN_LIMIT = 3_000_000
 # 対処のために集める検出の位置の上限（超えたら「多すぎる」として、位置を使う対処はしない。1件 32 バイトで 64MB）
 POSITIONS_LIMIT = 2_000_000
 
@@ -185,13 +187,26 @@ def distinct_key(pii_type: str, value: str) -> str:
     return key
 
 
+def _count_by_rank(best: dict[str, dict[int, int]]) -> dict[str, int]:
+    """種類 → {値の hash → 確度の順位} から「種類:確度」→異なる値の数を作る。"""
+    counts: dict[str, int] = {}
+    for pii_type, per_type in best.items():
+        for rank in per_type.values():
+            k = f"{pii_type}:{RANK_CONF[rank].value}"
+            counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
 @dataclass
 class Collector:
     """1項目分の検出を集める。件数は「種類×確度」で全数、明細は種類×確度ごとに上限まで。"""
 
     item: ItemResult
     max_samples: int
-    seen: dict[int, tuple] = field(default_factory=dict)  # (種類, 値) の hash → (明細の位置か -1, 見た確度)
+    # (種類, 値) の hash → (明細の位置か -1, 見た確度, 異なる値を数える種類, 正規化した値の hash)。
+    # 後ろの2つは異なる値の数を数えるためだけに持つ（メモリの中だけ。保存しない）。上限の外で後から足した値は
+    # (位置, 確度) の2つだけで、異なる値には数えない。別の辞書に分けると上限の 300万件で約 275MB 余計に食う
+    seen: dict[int, tuple] = field(default_factory=dict)
     # 住所は、同じ項目に人の手がかり（氏名・生年月日・マイナンバー等）があるときだけ確度 中にする（施設の一覧・
     # 番地の一覧を「個人情報の可能性あり」にしない）。手がかりを待つ住所は 低 で数えておき、finish() で決める
     person_cue: bool = False
@@ -205,9 +220,7 @@ class Collector:
     # 許可リストと利用者の規則（userrules.Matcher。どちらも無ければ None）
     matcher: object | None = None
     allowed_seen: set = field(default_factory=set)  # 許可リストで外した (種類, 値) の hash（読み直しで二重に数えない）
-    # 異なる値の数を数えるための対応（seen の鍵 → (種類, 正規化した値の hash)）。メモリの中だけで使い、保存しない
-    distinct_keys: dict[int, tuple] = field(default_factory=dict)
-    # ファイル全体の異なる値を集める先（(種類, 正規化した値の hash) → 見た最も高い確度の順位）。ScanContext が渡す
+    # ファイル全体の異なる値を集める先（種類 → {正規化した値の hash → 見た最も高い確度の順位}）。ScanContext が渡す
     distinct_sink: dict | None = None
     # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
     on_tick: Callable[[], None] | None = None
@@ -348,9 +361,8 @@ class Collector:
                 continue
             self._count(hit.pii_type, confidence, hit)
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, hits)
-            if len(self.seen) < 3_000_000:
-                self.seen[key] = (idx, confidence)
-                self.distinct_keys[key] = (_distinct_type(hit), hash(distinct_key(hit.pii_type, hit.value)))
+            if len(self.seen) < SEEN_LIMIT:
+                self.seen[key] = (idx, confidence, _distinct_type(hit), hash(distinct_key(hit.pii_type, hit.value)))
 
     def finish(self) -> None:
         """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
@@ -424,21 +436,36 @@ class Collector:
 
         確度は、同じ値（正規化して同じもの）を見たうちで最も高いもの。住所の引き上げ（_finish_cues）の後に数える。
         """
-        best: dict[tuple, int] = {}
-        for key, dk in self.distinct_keys.items():
-            conf = self.seen.get(key, (-1, Confidence.LOW))[1]
-            if best.get(dk, 0) < conf.rank:
-                best[dk] = conf.rank
-        counts: dict[str, int] = {}
-        for (pii_type, _), rank in best.items():
-            k = f"{pii_type}:{RANK_CONF[rank].value}"
-            counts[k] = counts.get(k, 0) + 1
-        self.item.distinct_counts = counts
+        # 種類 → {値の hash → 順位} の2段にする（(種類, hash) の組を値ごとに作ると、300万件で約 170MB 余計に食う）
+        best: dict[str, dict[int, int]] = {}
+        for entry in self.seen.values():
+            if len(entry) < 4:
+                continue  # 上限の外で後から足した値（異なる値には数えない）
+            per_type = best.get(entry[2])
+            if per_type is None:
+                per_type = best[entry[2]] = {}
+            rank = entry[1].rank
+            if per_type.get(entry[3], 0) < rank:
+                per_type[entry[3]] = rank
+        self.item.distinct_counts = _count_by_rank(best)
         if self.distinct_sink is not None:
             sink = self.distinct_sink
-            for dk, rank in best.items():
-                if sink.get(dk, 0) < rank and (dk in sink or len(sink) < 3_000_000):
-                    sink[dk] = rank
+            size = sum(len(v) for v in sink.values())
+            for pii_type, per_type in best.items():
+                if pii_type not in sink and size + len(per_type) <= SEEN_LIMIT:
+                    # その種類を初めて集める（大きなファイル1つのときはこれ）: 写さずにそのまま渡す（best はここで捨てる）
+                    sink[pii_type] = per_type
+                    size += len(per_type)
+                    continue
+                dest = sink.setdefault(pii_type, {})
+                for dhash, rank in per_type.items():
+                    old = dest.get(dhash)
+                    if old is None:
+                        if rank > 0 and size < SEEN_LIMIT:
+                            dest[dhash] = rank
+                            size += 1
+                    elif old < rank:
+                        dest[dhash] = rank
 
     def _finish_cues(self) -> None:
         """人の手がかりがあれば、待たせていた住所・固定電話を確度 中に引き上げる（無ければ明細に理由を添える）。"""
@@ -479,7 +506,8 @@ class Collector:
             cc[mid_key] = cc.get(mid_key, 0) + moved
         if not moved:
             return
-        pos, conf = self.seen.get(key, (-1, Confidence.LOW))
+        entry = self.seen.get(key, (-1, Confidence.LOW))
+        pos, conf = entry[0], entry[1]
         if conf != Confidence.LOW:
             return
         hit.rule = hit.rule + self._cue_note()
@@ -488,7 +516,7 @@ class Collector:
             # 「低 0 件なのに 低 の明細がある」と読まれないよう、明細に件数の扱いを添える
             f = self.item.findings[pos]
             f.rule = hit.rule + "（中 の明細が上限のため 低 の欄に載せた。件数は 中 に数えた）"
-            self.seen[key] = (-1, Confidence.MEDIUM)
+            self._set_seen(key, -1, Confidence.MEDIUM)
             return
         if own_sample and 0 <= pos < len(self.item.findings):
             f = self.item.findings[pos]
@@ -500,7 +528,12 @@ class Collector:
             # 施設の 低 などで先に載った明細は書き換えず、引き上げた分を別に載せる
             norm, location, location_fn, method, raw = args
             pos = self._add_sample(hit, Confidence.MEDIUM, norm, location, location_fn, method, raw, [])
-        self.seen[key] = (pos, Confidence.MEDIUM)
+        self._set_seen(key, pos, Confidence.MEDIUM)
+
+    def _set_seen(self, key: int, pos: int, confidence: Confidence) -> None:
+        """見た値の明細の位置と確度を書き換える（異なる値を数えるための後ろの2つは残す）。"""
+        prev = self.seen.get(key)
+        self.seen[key] = (pos, confidence) + (prev[2:] if prev is not None else ())
 
     def _count_allowed(self, hit, reread: bool) -> None:
         """許可リストで外した検出を数える。読み直し（生データ走査等）で既に外した値は数えない（検出の数え方と同じ）。"""
@@ -574,16 +607,16 @@ class Collector:
 
     def _maybe_upgrade(self, prev, hit, confidence, norm, location, location_fn, method, raw, key) -> None:
         """既に見た値を、より高い確度で見直したら明細と件数を引き上げる。"""
-        pos, prev_conf = prev
+        pos, prev_conf = prev[0], prev[1]
         if confidence.rank <= prev_conf.rank:
             return
         self._move_count(hit.pii_type, prev_conf, confidence)
         if pos < 0 or pos >= len(self.item.findings):
             # 明細の上限で載っていなかった値でも、高い確度で見直したなら新しく明細に載せる
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, [])
-            self.seen[key] = (idx, confidence)
+            self._set_seen(key, idx, confidence)
             return
-        self.seen[key] = (pos, confidence)
+        self._set_seen(key, pos, confidence)
         old = self.item.findings[pos]
         old.confidence = confidence
         self._room_len = -1  # 明細の確度を書き換えたので、枠の数を数え直させる
@@ -823,15 +856,11 @@ class ScanContext:
 
         self.matcher = matcher_for(options)  # 許可リストと利用者の規則（無ければ None）
         # ファイル全体の異なる値（(種類, 正規化した値の hash) → 確度の順位）。数え終えたら数だけを結果に残す
-        self.distinct: dict[tuple, int] = {}
+        self.distinct: dict[str, dict[int, int]] = {}
 
     def distinct_counts(self) -> dict[str, int]:
         """ファイル全体（内側の項目を含む）での「種類:確度」→異なる値の数。"""
-        counts: dict[str, int] = {}
-        for (pii_type, _), rank in self.distinct.items():
-            k = f"{pii_type}:{RANK_CONF[rank].value}"
-            counts[k] = counts.get(k, 0) + 1
-        return counts
+        return _count_by_rank(self.distinct)
 
     @property
     def tmpdir(self) -> str:

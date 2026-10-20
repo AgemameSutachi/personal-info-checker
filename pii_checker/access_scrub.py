@@ -139,6 +139,30 @@ def _header_regex(pages: int) -> re.Pattern:
     return re.compile(b"(?s)(?=(" + nonzero3 + b")(" + flags + b")(.)(" + page + b"))")
 
 
+def _chain_covers(mm, rows: dict[tuple[int, int], tuple[int, int]], key: tuple[int, int], length: int) -> bool:
+    """繰り越しの鎖（印 0）をたどった本文の合計（各切れの行の大きさ − 次の位置の 4 バイト）が、見出しの長さに届くか。
+
+    本物の見出しなら、鎖の切れの合計は見出しの長さちょうどになる。届かないものは、見出しの形をした偶然の並びか、
+    指し先が使い回された古い見出し（Jackcess の雛形のシステム表 MSysObjects の行に、ファイルのどこにも無い長い値を指す
+    ままの見出しがあり、ファイルが大きくなると、その行き先に別の行の本文が入って「指されている」と誤る。実物で確かめた）。
+    鎖が途中で切れている・輪になっている場合も届かない扱いにする（そのような値は読めない壊れた値で、守る意味がない）。
+    """
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    cur: tuple[int, int] | None = key
+    while cur is not None and cur in rows and cur not in seen:
+        seen.add(cur)
+        start, end = rows[cur]
+        if end - start < 4:
+            return False
+        total += end - start - 4
+        if total >= length:
+            return True
+        at = cur[0] * PAGE_SIZE + start
+        cur = (int.from_bytes(mm[at + 1 : at + 4], "little"), mm[at])
+    return total >= length
+
+
 def scrub_orphan_long_values(path: str) -> int:
     """どの行からも指されなくなった長い値（メモ・OLE）の本文を 0 にする。塗りつぶした本文の数を返す。
 
@@ -192,7 +216,13 @@ def scrub_orphan_long_values(path: str) -> int:
                         continue
                     flag = m.group(2)[0]
                     length = int.from_bytes(m.group(1), "little")
-                    if flag == LV_OTHER_PAGE or length >= span[1] - span[0] - 4:
+                    if flag == LV_OTHER_PAGE:
+                        ok = (
+                            length <= span[1] - span[0]
+                        )  # 1ページに収まる値: 本文の行は値そのもの（値より短い行は参照ではない）
+                    else:
+                        ok = length >= span[1] - span[0] - 4 and _chain_covers(mm, rows, key, length)
+                    if ok:
                         alive.add(key)
             todo = list(alive)
             while todo:  # 生きている本文から、鎖の「次」をたどる（輪になっていても alive で止まる）

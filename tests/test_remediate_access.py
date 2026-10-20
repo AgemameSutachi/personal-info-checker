@@ -433,6 +433,8 @@ def test_orphan_long_values_are_all_zeroed_but_live_values_and_chains_are_kept(t
     - 指されていない本文は、選んだ値を含まなくても消す（消した行のほかの列のメモ・ページの境目で割れた値が残らないように）
     - ほかの長い値の中身に、見出しと同じ形の並びが偶然あっても、それを参照と数えない（実物の .accdb で、消すべき本文が残った）
     - 表の行から印 0x40 で指されている本文と、印 0 で指されている鎖（2つ目以降は表の行から直接は指されない）は残す
+    - 見出しの形をしていても、鎖の合計が見出しの長さに届かない・1ページの値より本文の行が短い並びは、参照と数えない
+      （表の行に、行き先が使い回された古い見出し・偶然の並びがあって、消すべき本文が残った。実物で確かめた）
     """
     import struct
 
@@ -455,7 +457,19 @@ def test_orphan_long_values_are_all_zeroed_but_live_values_and_chains_are_kept(t
     )  # 偶然、本文 (2,1) を指す見出しの形を含む（それ自体も孤児）
     orphan = b"ORPHAN-MEMO-OF-A-DELETED-ROW " * 4  # 選んだ値を含まない、消した行のメモ
     table_page, _ = _synthetic_page(
-        [(b"\x05\x00" + header(5000, 0, 2, 0) + header(len(live), 0x40, 2, 3) + b"r" * 20, 0)]
+        [
+            (
+                b"\x05\x00"
+                + header(200 + 75, 0, 2, 0)  # 鎖の長さは切れの合計（200 + 75）ちょうど
+                + header(len(live), 0x40, 2, 3)
+                # 見出しの形をした、行き先の合わない並び（Jackcess の雛形のシステム表にある、ファイルのどこにも無い値を指す
+                # ままの見出しや、データの偶然の並び）。孤児の本文を「指されている」と誤らせない
+                + header(1252, 0, 2, 1)  # 鎖の合計が長さに届かない
+                + header(99999, 0x40, 2, 2)  # 1ページの値なのに、本文の行より長い
+                + b"r" * 20,
+                0,
+            )
+        ]
     )
     table_page[4:8] = (0x99).to_bytes(4, "little")  # 表の定義のページ番号（LVAL ではない）
     pages = [
@@ -984,10 +998,10 @@ def test_jackcess_only_pc_can_delete_and_dummy_rows(tmp_path, monkeypatch, trash
     from pii_checker.formats import database
 
     for method in ("delete_rows", "dummy"):
-        # 行数は 60 に抑える（Jackcess が書いたメモの本文の塗りつぶしは、行数が多いとデータの偶然の並びで1つ消し損ねる場合が
-        # あり、確かめの門が止める。access_scrub.scrub_orphan_long_values の既知の限界。ここは読み方の試験）
-        rows = people(60)
-        p = _jackcess_sample(tmp_path, method, 60)
+        # 行数は 120 行（Jackcess の雛形のシステム表にある、ファイルのどこにも無い長い値を指したままの見出しが、
+        # ファイルが 106 ページ以上になると消した行のメモを指して、塗り残した。90 行以上で出ていた）
+        rows = people(N)
+        p = _jackcess_sample(tmp_path, method, N)
         original = p.read_bytes()
         monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
         monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
@@ -999,3 +1013,94 @@ def test_jackcess_only_pc_can_delete_and_dummy_rows(tmp_path, monkeypatch, trash
             assert r["changed"]["rows"] == len([1 for _i, row in rows if has_pii(row)])
         assert r["remaining"]["total"] == 0
         assert _leak([str(p)], needles_of(rows)) == [] and original in [f.read_bytes() for f in trash.files()]
+
+
+def test_scrub_that_changes_live_values_is_refused(tmp_path, monkeypatch, trash):
+    """消した跡の塗りつぶしが、残す行の値（生きている長い値の本文）まで消したら、確定せずに取りやめる（陽性対照）。
+
+    塗りつぶしは指されていないバイトだけを消すはずなので、読める中身は塗る前と後で同じ。判定を誤ると、残す行のメモが
+    黙って 0 になり、消した値の確かめ（残っていないか）では見つからない。
+    """
+    from pii_checker import access_scrub
+    from pii_checker.formats import database
+
+    p = _jackcess_sample(tmp_path, "src", N)
+    original = p.read_bytes()
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    real = access_scrub.scrub_orphan_long_values
+
+    def scrub_too_much(path):
+        n = real(path)
+        data = bytearray(Path(path).read_bytes())
+        size = access_scrub.PAGE_SIZE
+        for pg in range(1, len(data) // size):
+            pos = pg * size
+            if access_scrub._is_data_page(data, pos) and data[pos + 4 : pos + 8] == b"LVAL":
+                for _idx, start, end, deleted in access_scrub._page_records(bytes(data[pos : pos + size])):
+                    if not deleted:
+                        data[pos + start : pos + end] = bytes(end - start)  # 生きている本文まで消す（判定の誤りの再現）
+        Path(path).write_bytes(bytes(data))
+        return n
+
+    monkeypatch.setattr(access_scrub, "scrub_orphan_long_values", scrub_too_much)
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "error" and "残す行の中身まで変わって" in r["message"], r
+    assert p.read_bytes() == original and not trash.files() and not new_tmp_files(p.parent)
+
+
+def test_content_digest_is_the_same_after_real_scrub(tmp_path):
+    """本物の塗りつぶしは、読める中身を変えない（上の門が、正しい塗りつぶしを止めないこと）。"""
+    from pii_checker import access_scrub
+
+    p = _jackcess_sample(tmp_path, "src", N)
+    before = ra.content_digest(str(p), "ace")
+    assert before is not None
+    access_scrub.scrub_file(str(p))
+    access_scrub.scrub_orphan_long_values(str(p))
+    assert ra.content_digest(str(p), "ace") == before
+
+
+def _read_with_jackcess(path: Path, tmp: Path) -> dict[str, list[tuple]]:
+    """Jackcess で各表の行を読む（写しを作って開く。写しは試験の一時フォルダごと片付く）。"""
+    copy = tmp / "jk_snapshot" / "copy.accdb"
+    copy.parent.mkdir(exist_ok=True)
+    shutil.copyfile(path, copy)
+    sess = ra.JackcessSession(str(copy), ra.find_jackcess())
+    try:
+        return {
+            t: sorted((tuple(r) for r in sess.read_rows(t, set(range(1, 5001))).values()), key=repr)
+            for t in sess.tables()
+        }
+    finally:
+        sess.close()
+
+
+@pytest.mark.parametrize("n", [90, 300])
+def test_ace_built_file_rewritten_by_jackcess_keeps_live_rows_and_leaves_no_deleted_values(
+    tmp_path, monkeypatch, trash, n
+):
+    """ACE で作った（Access で作った普通の）.accdb を、Jackcess だけで行の削除をしても、消すはずの値が塗り残らず、
+    消していない行は元のまま読める。行数が多いと、表のページの中の見出しの形をした偶然の並びが、消した行のメモを
+    「指されている」と誤らせて、確かめの門に取りやめられていた（300 行で出た）。"""
+    from pii_checker.formats import database
+
+    if not available("ace") or not available("jackcess"):
+        pytest.skip("ACE と Jackcess の両方が要る")
+    rows = people(n)
+    p = tmp_path / "src" / "people.accdb"
+    build_db(p, rows)
+    before = snapshot(p, tmp_path)
+    original = p.read_bytes()
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+    svc, store, job = make_service(tmp_path, [p])
+    r = run_ok(svc, job, p, method="delete_rows")
+    assert r["changed"]["engine"] == ra.STRATEGY_LABELS["jackcess"] and r["remaining"]["total"] == 0
+    assert r["changed"]["rows"] == len([1 for _i, row in rows if has_pii(row)])
+    assert _leak([str(p)], needles_of(rows)) == [] and original in [f.read_bytes() for f in trash.files()]
+    kept_ids = {i for i, row in rows if not has_pii(row)}
+    keep = sorted((tuple(row) for row in before["people"] if row[0] in kept_ids), key=repr)
+    for after in (snapshot(p, tmp_path), _read_with_jackcess(p, tmp_path)):  # ACE と Jackcess の両方で、全行が読める
+        assert after["people"] == keep and after["items"] == before["items"]

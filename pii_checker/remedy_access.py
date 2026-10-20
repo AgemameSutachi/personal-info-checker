@@ -1199,6 +1199,64 @@ def rewrite_access_file(
     return stats
 
 
+def content_digest(path: str, fmt: str) -> str | None:
+    """表の中身（すべての表・列・行の値）の指紋。Jackcess（Java）で読み取り専用に開いて読む。
+
+    消した跡の塗りつぶしは、どの行からも指されていないバイトだけを消すので、塗る前と後で指紋は同じになるはず。
+    違えば、残す行の値まで消している（判定の誤り）ので、呼び出し側が取りやめる。
+    Jackcess が無い・読めない形式（Access 97）・読めなかったときは None（確かめられない）。
+    """
+    import hashlib
+
+    env = find_jackcess() if fmt in ("jet4", "ace") else None
+    if not env:
+        return None
+    cmd = [env["java"], "-Xmx768m", "-XX:+UseSerialGC", "-cp", os.pathsep.join(env["classpath"]), "AccessRewrite"]
+    try:
+        pipe = _Pipe(cmd)
+    except OSError:
+        return None
+    h = hashlib.sha256()
+
+    def call(*fields: str) -> list[str]:
+        pipe.send("\t".join(fields))
+        out = []
+        while True:
+            line = pipe.readline()
+            head = line.split("\t", 1)[0]
+            if head == "err":
+                raise Unavailable(line)
+            if head in ("ok", "end"):
+                return out
+            out.append(line)
+
+    try:
+        call("openro", _b64(path))
+        for t in sorted(call("tables")):
+            name = t.split("\t")[1]
+            h.update(t.encode("utf-8") + b"\n")
+            for line in call("columns", name):
+                h.update(line.encode("utf-8") + b"\n")
+            pipe.send("\t".join(("readall", name, "0")))
+            while True:  # 行は溜めずに指紋へ足す
+                line = pipe.readline()
+                head = line.split("\t", 1)[0]
+                if head == "err":
+                    raise Unavailable(line)
+                if head == "end":
+                    break
+                h.update(line.encode("utf-8") + b"\n")
+        return h.hexdigest()
+    except Unavailable:
+        return None
+    finally:
+        try:
+            pipe.send("close")
+        except Unavailable:
+            pass
+        pipe.close()
+
+
 def _optimize(dst: str, strategy: str, fmt: str, notes: list[str], secrets: set[str]) -> bool:
     """書き換えた写しを最適化する（ACE・Jet）か、消した跡を塗りつぶす（Jackcess。最適化できなかったときの代わりにも）。
 
@@ -1221,11 +1279,17 @@ def _optimize(dst: str, strategy: str, fmt: str, notes: list[str], secrets: set[
             )
         finally:
             _discard(tmp)
+    before = content_digest(dst, fmt)
     try:
         scrub_file(dst)
         scrub_orphan_long_values(dst)
     except ScrubUnsupported as e:
         raise RemedyError(f"消した行の跡を片付けられません（{e}）。元のファイルは変えていません") from None
+    if before is not None and content_digest(dst, fmt) != before:
+        # 塗りつぶしは読める値を変えないはず。変わったなら残す行の値まで消している（ファイルを壊す）ので確定しない
+        raise RemedyError(
+            "消した行の跡を片付けると、残す行の中身まで変わってしまうため、取りやめました。元のファイルは変えていません"
+        )
     return False
 
 

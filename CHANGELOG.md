@@ -2,7 +2,7 @@
 
 版ごとの主な変更です。配布版（zip）は [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) にあります。
 
-## 1.2.0（2026-10-21）
+## 1.2.0（2026-10-20）
 
 ### 新しい機能: 見つけた個人情報への対処
 

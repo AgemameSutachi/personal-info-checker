@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -27,5 +27,18 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
       - name: 書式（black）
         run: python -m black --check pii_checker tests tools build.py entry_app.py entry_cli.py
-      - name: 試験
+      - name: Rust のキャッシュ
+        # cargo の依存（regex・pyo3 など）のビルド結果を使い回す
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/pii_rs_detect
+      - name: Rust 拡張（pii_rs_detect）を作って入れる
+        # windows-latest には rustup/cargo が入っている。作れなければここで落とす（拡張ありの試験を素通りさせない）
+        run: python tools/build_rust_ext.py --strict
+      - name: 試験（Rust 拡張あり）
+        run: python -m pytest tests -q -rs
+      - name: 試験（Rust 拡張なし・全部）
+        # 拡張が無い環境（cargo の無い開発機・Rust を作れなかった配布）と同じ動きを、全部の試験で確かめる
+        env:
+          PII_CHECKER_NO_RUST: "1"
         run: python -m pytest tests -q -rs

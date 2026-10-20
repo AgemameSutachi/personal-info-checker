@@ -1,0 +1,18 @@
+[package]
+name = "pii_rs_detect"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pii_rs_detect"
+crate-type = ["cdylib"]
+
+[dependencies]
+regex = "1"
+pyo3 = { version = "0.30", features = ["extension-module"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

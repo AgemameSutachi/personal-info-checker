@@ -517,6 +517,20 @@ def _alert(message: str) -> None:
 COMMANDS = ("scan", "report", "jobs", "serve")
 
 
+class _VersionAction(argparse.Action):
+    """--version: 1 行目に版、2 行目に検出のエンジン。検出器は使うときまで読み込まない（他の指定の起動を遅くしない）。"""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+        super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from . import detectors
+
+        engine = detectors.rust_status()
+        print(f"個人情報チェッカー {__version__}\n検出エンジン: {engine}")
+        parser.exit()
+
+
 def app_main(argv: list[str]) -> int:
     """アプリ版（PiiChecker.exe）の入口。引数があっても窓を開き、コマンドの処理へは入らない。
 
@@ -553,7 +567,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--version", action="version", version=f"個人情報チェッカー {__version__}")
+    ap.add_argument(
+        "--version",
+        action=_VersionAction,
+        help="版と、検出に使っているエンジン（Rust 拡張か Python か）を表示して終わる",
+    )
     ap.add_argument(
         "--db",
         help="検査結果を保存するファイル（既定: %%LOCALAPPDATA%%/PiiChecker/jobs.sqlite3）",

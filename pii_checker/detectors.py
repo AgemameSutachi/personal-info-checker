@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import functools
+import logging
 import re
 from bisect import bisect_left
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .models import Confidence
@@ -640,11 +642,8 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
     return Hit(category, conf, v, 0, len(v), f"列見出しが「{PII_TYPES[category]}」の列の値")
 
 
-def detect(text: str, header: str | None = None) -> list[Hit]:
-    """文字列から個人情報らしきものを探す。header は表の列見出し（無ければ None）。
-
-    text は呼び出し側で normalize 済みであること（位置がずれないように）。
-    """
+def _detect_py(text: str, header: str | None = None) -> list[Hit]:
+    """detect の Python 版（正規表現は標準の re）。Rust 拡張が無いとき・使えない本文のとき、こちらで検出する。"""
     hits: list[Hit] = []
     category = header_category(header)
     if category:
@@ -917,6 +916,202 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
     hits = _dedupe(hits)
     _classify_addresses(hits, context_text, offset)
     return hits
+
+
+# ---- Rust 拡張（pii_rs_detect）。本文の検出の中心を Rust に置き換える。無ければ上の Python 版で動く ----
+# 環境変数 PII_CHECKER_NO_RUST が空でなければ、拡張があっても使わない（拡張なしの動作の確認・不具合の切り分け用）
+_CONFIDENCE_NUM = {Confidence.LOW: 1, Confidence.MEDIUM: 2, Confidence.HIGH: 3}
+_CONFIDENCE_BY_NUM = {1: Confidence.LOW, 2: Confidence.MEDIUM, 3: Confidence.HIGH}
+
+
+def _xor_ranges(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """2 つの範囲の列（それぞれ重ならない [開始, 終了]）の、片方にだけある範囲（対称差）。"""
+    parity: dict[int, int] = {}
+    for lo, hi in a + b:
+        parity[lo] = parity.get(lo, 0) ^ 1
+        parity[hi + 1] = parity.get(hi + 1, 0) ^ 1
+    out: list[tuple[int, int]] = []
+    start = -1
+    for point in sorted(p for p, v in parity.items() if v):
+        if start < 0:
+            start = point
+        else:
+            out.append((start, point - 1))
+            start = -1
+    return out
+
+
+def _rust_guard_ranges(ext) -> list[tuple[int, int]]:
+    """Python の re と Rust の regex で「語の文字（\\w・\\b の元）」「空白（\\s）」の判定が食い違う文字の範囲。
+
+    どちらも Unicode の表から決まるので、表の版が違う（Python の版と拡張の版のずれ）と食い違う。片方向だけでなく
+    両方向（Python だけが語の文字とみなす ² ³ など・Rust だけがみなす結合文字など）を求める。この文字を含む本文は
+    Rust を使わず Python の経路で検出する。
+    """
+    everything = "".join(map(chr, range(0x110000)))
+    out: list[tuple[int, int]] = []
+    for kind, py_pattern in (("word", r"\w+"), ("space", r"\s+")):
+        py_ranges = [(m.start(), m.end() - 1) for m in re.finditer(py_pattern, everything)]
+        out += _xor_ranges(py_ranges, [tuple(r) for r in ext.class_ranges(kind)])
+    # 2 種の範囲を 1 つの列にまとめる（重なり・隣り合いはつなぐ）
+    merged: list[tuple[int, int]] = []
+    for lo, hi in sorted(out):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _guard_key(ext) -> list[str]:
+    """食い違う範囲の計算結果を使い回してよいかの鍵。Python の Unicode データの版と、拡張の Unicode の表（regex-syntax）の版。"""
+    import unicodedata
+
+    return [unicodedata.unidata_version, ext.unicode_key()]
+
+
+def _guard_ranges_for(ext) -> list[tuple[int, int]]:
+    """食い違う範囲。ビルド時に求めて同梱した表(_rust_guard.py)の鍵が今の環境と一致すればそれを使い、
+    無い・一致しないときは、その場で求める（約 0.15 秒）。"""
+    try:
+        from . import _rust_guard
+
+        if list(_rust_guard.KEY) == _guard_key(ext):
+            return [tuple(r) for r in _rust_guard.RANGES]
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - 表が途中で切れた・項目が無いなど。その場で求め直せば正しい
+        _record_engine_event(f"同梱の範囲の表（_rust_guard.py）が読めないため、その場で求め直した: {exc!r}")
+    return _rust_guard_ranges(ext)
+
+
+def _load_rust():
+    """Rust 拡張を読み込んで、使える状態にして返す。使えなければ None（Python 版で動く）。"""
+    import os
+
+    global _RUST_NOTE
+    if os.environ.get("PII_CHECKER_NO_RUST"):
+        _RUST_NOTE = "環境変数 PII_CHECKER_NO_RUST により使っていない"
+        return None
+    try:
+        import pii_rs_detect as ext
+    except ModuleNotFoundError:
+        _RUST_NOTE = "拡張が入っていない"
+        return None
+    except ImportError as exc:  # 入っているのに読めない（DLL の読み込みの失敗など）
+        _RUST_NOTE = f"拡張を読み込めない（{exc!r}）"
+        _record_engine_event(f"Rust 拡張を読み込めないため、Python の経路で検出する: {exc!r}")
+        return None
+    try:
+        ext.set_mismatch_ranges(_guard_ranges_for(ext))
+    except Exception as exc:  # noqa: BLE001 - 拡張が壊れていても、検出は Python 版で続ける
+        _RUST_NOTE = f"拡張の読み込みに失敗した（{exc!r}）"
+        _record_engine_event(f"Rust 拡張を使えないため、Python の経路で検出する: {exc!r}")
+        return None
+    return ext
+
+
+def engine_log_path() -> Path:
+    """検出エンジンの出来事（Rust 拡張を使えなくなった理由など）を追記するファイル。検査の記録と同じフォルダ。"""
+    import os
+
+    return Path(os.environ.get("LOCALAPPDATA") or str(Path.home())) / "PiiChecker" / "engine.log"
+
+
+def _record_engine_event(message: str) -> None:
+    """検出エンジンの出来事を logging と engine.log に残す。
+
+    画面の版や作業用プロセス（spawn の子）には標準エラーが無く、warnings や logging の既定の出力は捨てられる。
+    検査の途中で Rust から Python に切り替わると結果は同じまま遅くなるだけなので、後から理由を追えるようファイルに書く。
+    書けなくても検査は止めない。
+    """
+    import datetime
+    import os
+
+    _log.warning("%s", message)
+    try:
+        path = engine_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} pid={os.getpid()} {message}\n")
+    except OSError:
+        pass
+
+
+# Rust 拡張を使っていないときの理由（使っていれば空）。--version などで利用者に見せる
+_RUST_NOTE = ""
+_log = logging.getLogger(__name__)
+_RUST = _load_rust()
+
+
+def rust_enabled() -> bool:
+    """本文の検出に Rust 拡張を使っているか。"""
+    return _RUST is not None
+
+
+def rust_status() -> str:
+    """検出エンジンの説明（利用者向け）。Rust を使っていないときは理由を添える。"""
+    if _RUST is not None:
+        return "Rust 拡張"
+    return f"Python（Rust 拡張なし: {_RUST_NOTE}）" if _RUST_NOTE else "Python（Rust 拡張なし）"
+
+
+def _disable_rust(error: BaseException) -> None:
+    """拡張が想定外の失敗をした（panic など）ので、以後は使わず Python 版で検出する。
+
+    結果は Python 版で同じものが出るので検査は続く。遅くなった理由を後から追えるよう、ログ（logging）にも残す。
+    画面の版や作業用プロセスでは標準エラーが無いことがあるので、warnings だけには頼らない。
+    """
+    global _RUST, _RUST_NOTE
+    _RUST = None
+    _RUST_NOTE = f"検査の途中で拡張が失敗した（{error!r}）"
+    _record_engine_event(f"Rust 拡張が失敗したため、以後は Python の経路で検出する: {error!r}")
+    import warnings
+
+    warnings.warn(f"Rust 拡張が失敗したため、以後は Python の経路で検出します: {error!r}", RuntimeWarning, stacklevel=3)
+
+
+def _detect_rust(text: str, header: str | None = None) -> list[Hit] | None:
+    """detect の Rust 版。Python 版と同じ結果を返す。この本文を Rust で扱えないとき（語の文字の判定が
+    Python と食い違う文字を含む・サロゲートを含む・拡張が失敗した）は None を返し、呼び出し側が Python 版で検出する。"""
+    category = header_category(header)
+    hdr = None
+    hv = None
+    if category:
+        hv = _header_value_hit(category, text)
+        if hv:
+            hdr = (hv.pii_type, _CONFIDENCE_NUM[hv.confidence], hv.value, hv.rule)
+    if not text or len(text) < 3:
+        return [hv] if hv else []
+    prefix = (normalize(header) + " ") if header else ""
+    try:
+        rows = _RUST.detect_body(text, prefix, category, hdr)
+    except UnicodeEncodeError:
+        return (
+            None  # 単独のサロゲート（壊れた文字）を含む本文は Rust の文字列にできない。この本文だけ Python 版で検出する
+        )
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - pyo3 の PanicException は BaseException 由来
+        _disable_rust(exc)
+        return None
+    if rows is None:
+        return None
+    return [Hit(t, _CONFIDENCE_BY_NUM[c], v, s, e, rule, needs) for (t, c, v, s, e, rule, needs) in rows]
+
+
+def detect(text: str, header: str | None = None) -> list[Hit]:
+    """文字列から個人情報らしきものを探す。header は表の列見出し（無ければ None）。
+
+    text は呼び出し側で normalize 済みであること（位置がずれないように）。
+    Rust 拡張があればそれで検出する（結果は Python 版と同じ）。無いとき・Rust で扱えない本文のときは Python 版。
+    """
+    if _RUST is not None:
+        hits = _detect_rust(text, header)
+        if hits is not None:
+            return hits
+    return _detect_py(text, header)
 
 
 # 本人確認書類の写しの判別（書類の名前, 書類の名前の語, 一緒に載る語, 一緒に載る語がいくつ要るか）。

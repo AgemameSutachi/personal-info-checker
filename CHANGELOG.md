@@ -2,6 +2,10 @@
 
 版ごとの主な変更です。配布版（zip）は [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) にあります。
 
+## 未公開
+
+- 本文の検出の中心を Rust の拡張(pii_rs_detect)でも動かせるようにした。Python 版と同じ結果になるよう作り、手元の入力約 1300 万件の突き合わせで違いは 0(拡張が無い環境・Rust で扱えない本文は今までどおり Python で検出する)。`PiiChecker-cmd --version` の2行目に検出エンジンを出す
+
 ## 1.2.0（2026-10-20）
 
 ### 新しい機能: 見つけた個人情報への対処

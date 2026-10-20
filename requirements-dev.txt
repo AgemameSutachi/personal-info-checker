@@ -4,3 +4,4 @@ pyftpdlib  # tests/test_remote.py で手元に FTP サーバーを立てる
 pyopenssl  # pyftpdlib で FTPS（TLS）を試す
 black==26.*  # 書式の確認（CI と同じ版にそろえる）
 pywin32; sys_platform == "win32"  # tests/test_remediate_access.py で、Access の表以外のオブジェクトが残ることを DAO で確かめる（無ければその確認だけ飛ばす）
+maturin>=1.5,<2  # Rust 拡張（rust/pii_rs_detect）を wheel にする。cargo が無い環境では使わない（拡張なしで動く）

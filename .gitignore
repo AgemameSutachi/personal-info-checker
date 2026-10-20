@@ -24,3 +24,8 @@ NOW-archive-*.md
 private/
 # 記事の材料など、公開しない報告
 reports/
+# Rust 拡張のビルド生成物
+rust/*/target/
+pii_checker/_rust_guard.py
+# 消せなかったごみの置き場（中身は人が消す）
+_trash/

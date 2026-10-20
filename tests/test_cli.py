@@ -36,7 +36,9 @@ def test_version_is_printed(capsys):
     with pytest.raises(SystemExit) as e:
         cli.build_parser().parse_args(["--version"])
     assert e.value.code == 0
-    assert capsys.readouterr().out.strip() == f"個人情報チェッカー {__version__}"
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0] == f"個人情報チェッカー {__version__}"
+    assert lines[1].startswith("検出エンジン: ")  # Rust 拡張を使っているか（不具合の切り分けに使う）
 
 
 def test_version_does_not_crash_when_output_cannot_encode_japanese(monkeypatch):
@@ -51,7 +53,8 @@ def test_version_does_not_crash_when_output_cannot_encode_japanese(monkeypatch):
         cli.main(["--version"])
     assert e.value.code == 0
     out.flush()
-    assert out.buffer.getvalue().decode("cp1252").strip().endswith(__import__("pii_checker").__version__)
+    first_line = out.buffer.getvalue().decode("cp1252").strip().splitlines()[0]
+    assert first_line.endswith(__import__("pii_checker").__version__)
 
 
 def test_db_in_new_folder_is_created(tmp_path):

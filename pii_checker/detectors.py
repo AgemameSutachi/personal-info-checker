@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import re
+from bisect import bisect_left
 import unicodedata
 from dataclasses import dataclass
 from typing import Callable
@@ -223,6 +224,49 @@ HONORIFIC_STOP = re.compile(
 )
 RE_NAME_HONORIFIC_ANY = re.compile(r"(?<![一-龥々])([一-龥々]{3,5})(?:様|殿)(?![方])")
 RE_NAME_SPACED = re.compile(rf"(?<![一-龥])(?:{SURNAMES})[ 　][一-龥々]{{1,3}}(?![一-龥々])")
+
+# 上の RE_NAME_HONORIFIC・RE_NAME_SPACED は先頭が後読みなので、正規表現エンジンが「最初の1文字の候補」で
+# 先へ飛ばす最適化を使えず、全部の位置で 190 通りの姓を順に試す（検出時間の3〜5割を占めていた）。
+# 後読みを外した本体（姓の選択肢が先頭）で探し、直前が漢字かどうかは Python 側で確かめる。当たる範囲は元の式と同じ。
+# （元の式は仕様の基準として残してあり、tests/test_detect_speedup.py が両者の一致を確かめる）
+_RE_NAME_HONORIFIC_BODY = re.compile(rf"(?:{SURNAMES})[ 　]?[一-龥々]{{0,3}}(?:様|殿|さん|君|くん|ちゃん)")
+_RE_NAME_SPACED_BODY = re.compile(rf"(?:{SURNAMES})[ 　][一-龥々]{{1,3}}(?![一-龥々])")
+_HONORIFIC_WORD = re.compile(r"様|殿|さん|君|くん|ちゃん")
+
+
+def _finditer_not_after_kanji(body: re.Pattern[str], text: str):
+    """body が当たる位置のうち、直前の1文字が漢字（一〜龥）でないものを、重ならないよう左から順に返す。
+
+    `(?<![一-龥])` + body を finditer した結果と同じになる（後読みで外れた位置は1文字進めて探し直す）。
+    """
+    search = body.search
+    pos = 0
+    while True:
+        m = search(text, pos)
+        if m is None:
+            return
+        s = m.start()
+        if s > 0 and "一" <= text[s - 1] <= "龥":
+            pos = s + 1
+            continue
+        yield m
+        pos = m.end()
+
+
+def iter_name_honorific(text: str):
+    """RE_NAME_HONORIFIC.finditer(text) と同じ結果を、速く返す。敬称の語が無ければ当たりようが無いので走らせない。"""
+    if not _HONORIFIC_WORD.search(text):
+        return iter(())
+    return _finditer_not_after_kanji(_RE_NAME_HONORIFIC_BODY, text)
+
+
+def iter_name_spaced(text: str):
+    """RE_NAME_SPACED.finditer(text) と同じ結果を、速く返す。空白（半角・全角）が無ければ当たりようが無いので走らせない。"""
+    if " " not in text and "　" not in text:
+        return iter(())
+    return _finditer_not_after_kanji(_RE_NAME_SPACED_BODY, text)
+
+
 RE_SENSITIVE = re.compile(
     r"(?:病名|病歴|既往歴|診断名|傷病名|障害等級|障害者手帳|犯罪歴|前科|信仰|宗教|信条|本籍)\s*[:：]\s*([^\s、。,]{1,30})"
 )
@@ -857,13 +901,15 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
         hits.append(
             Hit("name", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "氏名の見出し語＋よくある姓の名前")
         )
-    for m in RE_NAME_HONORIFIC.finditer(text):
+    for m in iter_name_honorific(text):
         conf = Confidence.MEDIUM if len(m.group(0)) >= 4 else Confidence.LOW
         hits.append(Hit("name", conf, m.group(0), m.start(), m.end(), "よくある姓＋敬称"))
-    for m in RE_NAME_HONORIFIC_ANY.finditer(text):
-        if not HONORIFIC_STOP.search(m.group(1)):
-            hits.append(Hit("name", Confidence.LOW, m.group(0), m.start(), m.end(), "漢字の名前＋様・殿"))
-    for m in RE_NAME_SPACED.finditer(text):
+    # 「様」「殿」が無ければ当たりようが無い（全位置を調べる前に飛ばす）
+    if "様" in text or "殿" in text:
+        for m in RE_NAME_HONORIFIC_ANY.finditer(text):
+            if not HONORIFIC_STOP.search(m.group(1)):
+                hits.append(Hit("name", Confidence.LOW, m.group(0), m.start(), m.end(), "漢字の名前＋様・殿"))
+    for m in iter_name_spaced(text):
         hits.append(Hit("name", Confidence.LOW, m.group(0), m.start(), m.end(), "よくある姓＋空白＋名"))
     for m in RE_SENSITIVE.finditer(text):
         hits.append(Hit("sensitive", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "要配慮の見出し語＋記載"))
@@ -928,13 +974,36 @@ def detect_id_documents(text: str, from_ocr: bool) -> list[Hit]:
     return hits
 
 
+# Confidence.rank は呼ぶたびに辞書を作るので、検出の並べ替えでは表を引く
+_CONF_RANK = {c: c.rank for c in Confidence}
+
+
 def _dedupe(hits: list[Hit]) -> list[Hit]:
     """同じ種類で範囲が重なるものは、確からしさの高い1件にまとめる。"""
-    hits.sort(key=lambda h: (-h.confidence.rank, h.start))
-    kept: list[Hit] = []
+    hits.sort(key=lambda h: (-_CONF_RANK[h.confidence], h.start))
+    if any(h.end <= h.start for h in hits):
+        # 長さ 0 以下の範囲があると「開始順に並べて隣だけ見る」が成り立たない。実際には起きないが、念のため総当たりで
+        kept: list[Hit] = []
+        for h in hits:
+            if any(k.pii_type == h.pii_type and h.start < k.end and k.start < h.end for k in kept):
+                continue
+            kept.append(h)
+        kept.sort(key=lambda h: h.start)
+        return kept
+    # 残す検出は種類ごとに互いに重ならない。開始位置の順に並べた配列で二分探索すれば、重なりうるのは
+    # 「開始が h.end より前で一番後ろのもの」だけ（終了も開始の順に増えるため）。総当たり（O(n²)）と結果は同じ
+    kept = []
+    starts: dict[str, list[int]] = {}
+    ends: dict[str, list[int]] = {}
     for h in hits:
-        if any(k.pii_type == h.pii_type and h.start < k.end and k.start < h.end for k in kept):
+        ss = starts.setdefault(h.pii_type, [])
+        es = ends.setdefault(h.pii_type, [])
+        i = bisect_left(ss, h.end)  # 開始が h.end より前のものの数
+        if i and es[i - 1] > h.start:
             continue
+        j = bisect_left(ss, h.start)
+        ss.insert(j, h.start)
+        es.insert(j, h.end)
         kept.append(h)
     kept.sort(key=lambda h: h.start)
     return kept

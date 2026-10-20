@@ -58,7 +58,7 @@ EPILOG = r"""使用例:
 
 
 def _progress_line(store: Store, runner: JobRunner, final: bool = False) -> str:
-    s = store.summary(runner.job_id)
+    s = store.progress(runner.job_id)  # 1行表示に要る分だけ（summary は件数に比例して重い）
     st = s["item_status"]
     phase = ("中断" if runner.error else "完了") if final else runner.phase
     return (

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sqlite3
@@ -181,6 +182,9 @@ class Store:
     def __init__(self, path: str | None = None):
         self.path = path or default_db_path()
         self._lock = threading.RLock()
+        # 検査中の画面更新用の summary の使い回し（ジョブID → (時刻, 集計にかかった秒, 結果)）。上限つき
+        self._summary_lock = threading.Lock()
+        self._summary_cache: dict[str, tuple[float, float, dict]] = {}
         self.recovered = ""  # 壊れていた DB を別名で残して作り直したときの知らせ
         if path:
             # --db で新しいフォルダを指したときも使えるように、置き場のフォルダを作っておく（作れなければ下で知らせる）
@@ -777,6 +781,47 @@ class Store:
         return rows[0][0] if rows else None
 
     # ------------------------------------------------------------ 集計
+
+    def progress(self, job_id: str) -> dict:
+        """進捗の表示（コマンドの1行表示）に要る分だけの軽い集計。summary の同名の項目と同じ値を返す。
+
+        summary は全項目の JSON を読み直すので件数に比例して重く、検査中に毎秒呼ぶと保存の邪魔になる。
+        こちらは SQL の集計だけで済み、JSON を読まない。
+        """
+        q = self.query
+        files_total = q("SELECT COUNT(*) FROM files WHERE job_id=?", (job_id,))[0][0]
+        files_done = q("SELECT COUNT(*) FROM files WHERE job_id=? AND state='done'", (job_id,))[0][0]
+        status_counts = {
+            r[0]: r[1] for r in q("SELECT status, COUNT(*) FROM items WHERE job_id=? GROUP BY status", (job_id,))
+        }
+        files_with_findings = q("SELECT COUNT(*) FROM files WHERE job_id=? AND n_findings > 0", (job_id,))[0][0]
+        return {
+            "files_total": files_total,
+            "files_done": files_done,
+            "item_status": status_counts,
+            "files_with_findings": files_with_findings,
+        }
+
+    def summary_cached(self, job_id: str, min_age: float = 1.5) -> dict:
+        """検査中の画面の更新用の summary。直前の結果が新しければそれを返す（検査中だけ使う）。
+
+        使い回す長さは max(min_age, 直前の集計にかかった時間の4倍)（上限 30 秒）。件数が増えて集計が重くなっても、
+        集計に使う時間は全体の2割以内に収まる。検査が終わった後の表示には使わず、summary を呼ぶこと。
+        """
+        now = time.monotonic()
+        with self._summary_lock:
+            hit = self._summary_cache.get(job_id)
+            if hit and now - hit[0] < min(30.0, max(min_age, 4 * hit[1])):
+                return copy.deepcopy(hit[2])
+        started = time.monotonic()
+        value = self.summary(job_id)
+        cost = time.monotonic() - started
+        with self._summary_lock:
+            self._summary_cache.pop(job_id, None)
+            self._summary_cache[job_id] = (time.monotonic(), cost, value)
+            while len(self._summary_cache) > 16:  # ジョブがいくつあっても覚えるのは直近の16件まで
+                self._summary_cache.pop(next(iter(self._summary_cache)))
+        return copy.deepcopy(value)
 
     def summary(self, job_id: str) -> dict:
         """進捗と総合判定の材料。"""

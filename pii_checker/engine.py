@@ -1092,13 +1092,24 @@ FILE_NAMED_STREAMS = 0x40000
 
 def _volume_has_streams(path: str) -> bool:
     """そのファイルのあるボリュームが代替データストリームを持てるか。分からなければ True（一覧を取りに行く）。"""
+    # ボリュームの根を調べる kernel32.GetVolumePathNameW は 1回 約6ms かかる。同じフォルダのファイルは同じボリュームなので、
+    # フォルダ単位で覚える（上限つきの lru_cache なので、フォルダが何万あってもメモリは増え続けない）
+    try:
+        return _root_has_streams(_volume_root_of_dir(os.path.dirname(path) or path))
+    except OSError:
+        return True  # 根を調べられなかった（失敗は覚えない。一覧を取りに行く）
+
+
+@lru_cache(maxsize=512)
+def _volume_root_of_dir(folder: str) -> str:
+    """フォルダのあるボリュームの根（例 "C:\\"）。調べられなければ OSError（失敗は lru_cache に残らない）。"""
     import ctypes
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     root = ctypes.create_unicode_buffer(32768)
-    if not k32.GetVolumePathNameW(long_path(path), root, len(root)):
-        return True
-    return _root_has_streams(root.value)
+    if not k32.GetVolumePathNameW(long_path(folder), root, len(root)):
+        raise OSError("GetVolumePathNameW failed")
+    return root.value
 
 
 @lru_cache(maxsize=256)

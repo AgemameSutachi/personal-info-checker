@@ -244,10 +244,11 @@ def create_app(
         return job
 
     def _job_view(job: dict) -> dict:
-        summary = store.summary(job["id"])
         runner = registry.get(job["id"], create=False)
-        v = decide(summary, job["state"])
         running = bool(runner and runner.running)
+        # 検査中は画面が何度も呼ぶので、直前の集計を少しのあいだ使い回す（集計は件数に比例して重い）。終わった後は毎回数える
+        summary = store.summary_cached(job["id"]) if running else store.summary(job["id"])
+        v = decide(summary, job["state"])
         if running:
             phase = runner.phase
         else:
@@ -332,7 +333,7 @@ def create_app(
     def jobs():
         out = []
         for j in store.jobs():
-            s = store.summary(j["id"])
+            s = store.summary_cached(j["id"]) if j["state"] == "running" else store.summary(j["id"])
             v = decide(s, j["state"])
             out.append(
                 {

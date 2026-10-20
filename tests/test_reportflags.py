@@ -59,6 +59,20 @@ def test_distinct_uses_highest_confidence():
     assert item.distinct_counts == {"my_number:high": 1}, item.distinct_counts
 
 
+def test_distinct_mixed_types_and_releases_seen():
+    # 種類と確度が混ざっても種類ごと・最も高い確度で数え、数え終えたら見た値の記録（seen）を手放す（最後のメモリの跳ねを抑える）
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_text(f"伝票 {my_number(5)}", "a")  # 低
+    col.add_text(f"個人番号 {my_number(5)}", "b")  # 同じ値が 高
+    col.add_text(f"伝票 {my_number(6)}", "c")  # 低のまま
+    col.add_text("携帯 090-1234-5678", "d")
+    col.add_text("携帯 080-1111-2222", "e")
+    col.finish()
+    assert item.distinct_counts == {"my_number:high": 1, "my_number:low": 1, "phone:medium": 2}, item.distinct_counts
+    assert col.seen == {}
+
+
 def test_distinct_keeps_value_after_deferred_upgrade():
     # 手がかり待ちの住所を後から 中 へ引き上げても（明細の位置と確度を書き換えても）、異なる値の数え方は残る
     item = ItemResult(path="t", kind="", status=Status.PENDING)

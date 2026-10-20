@@ -23,7 +23,7 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * 個人情報チェッカーの対処（T2-e）で、ACE（.accdb）を Jackcess（Apache License 2.0）で書き換える小さな補助。
+ * 個人情報チェッカーの Access の対処・検査で、ACE（.accdb）を Jackcess（Apache License 2.0）で書き換える小さな補助。
  *
  * 標準入力から1行1命令（タブ区切り・文字列は Base64 の UTF-8）を読み、標準出力へ結果を1行ずつ返す。
  * 呼び出し側（pii_checker/remedy_access.py）が、表・行の番号（SELECT * と同じ「表の中の通し番号」）を指定する。
@@ -33,8 +33,9 @@ import java.util.TreeSet;
  *   open  path             … 開く（書き込み可）
  *   （検査用。元のファイルには何も書かない）
  *   openro path            … 読み取り専用で開く
- *   readall table max      … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
- *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す
+ *   readall table max [digest] … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
+ *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す。digest を付けると、バイナリは中身の SHA-256（"h"+16進）、
+ *                            読めなかった値は "e"+例外の名前で出す（塗りつぶしの前後で中身を比べる指紋用）
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
@@ -113,6 +114,21 @@ public class AccessRewrite {
         return "x";
     }
 
+    /** 中身の指紋を取るための値の書き出し。cell と同じで、バイナリ（OLE・添付など）だけは中身の SHA-256 を出す。 */
+    private static String digestCell(Object v) throws Exception {
+        String c = cell(v);
+        if (!c.equals("x")) {
+            return c;
+        }
+        byte[] raw = v instanceof byte[] ? (byte[]) v : String.valueOf(v).getBytes(StandardCharsets.UTF_8);
+        byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(raw);
+        StringBuilder sb = new StringBuilder("h");
+        for (byte b : h) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
     private static Object parseCell(Column col, String token) {
         if (token.equals("-")) {
             return null;
@@ -168,6 +184,7 @@ public class AccessRewrite {
                 } else if (cmd.equals("readall")) {
                     Table t = db.getTable(unb64(f[1]));
                     long max = f.length > 2 && !f[2].isEmpty() ? Long.parseLong(f[2]) : 0;
+                    boolean digest = f.length > 3 && f[3].equals("digest");
                     Cursor cur = t.getDefaultCursor();
                     cur.reset();
                     long ord = 0;
@@ -179,9 +196,11 @@ public class AccessRewrite {
                             try {
                                 v = cur.getCurrentRowValue(c);
                             } catch (Exception e) {
-                                v = new Object();
+                                // 指紋では、読めなかったことを毎回同じ文字で表す（値ごとに変わる文字にすると、塗る前と後で食い違う）
+                                sb.append('\t').append(digest ? "e" + e.getClass().getName() : cell(new Object()));
+                                continue;
                             }
-                            sb.append('\t').append(cell(v));
+                            sb.append('\t').append(digest ? digestCell(v) : cell(v));
                         }
                         out.println(sb);
                     }

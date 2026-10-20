@@ -795,7 +795,10 @@ def collect_task(args: dict) -> dict:
     if top.pos_layout == "oracle_expdp" and top.positions:
         from .remedy_oracle import expdp_structure_problem
 
-        structure_problem = expdp_structure_problem(args["path"], {k[0] for k in top.positions})
+        try:
+            structure_problem = expdp_structure_problem(args["path"], {k[0] for k in top.positions})
+        except Exception:  # noqa: BLE001  ここで確かめられなくても、実行の段の確かめが同じ理由で断る
+            structure_problem = ""
     elif top.pos_layout == "access" and top.pos_info.get("tables"):
         from .remedy_access import engine_summary
 

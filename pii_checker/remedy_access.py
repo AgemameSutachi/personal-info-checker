@@ -59,6 +59,7 @@ PASSWORD_REASON = (
 )
 LOCK_SUFFIXES = (".laccdb", ".ldb")
 FORCED_STRATEGIES: list[str] | None = None  # 試験用: 手段をこれだけに絞る（ace・jet・jackcess）
+DIGEST_STALL_SECONDS = 300  # 中身の指紋を読むあいだ、Java から1行も来ないままこれだけ経ったら止まったとみなす
 STRATEGY_ENV = (
     "PIICHK_ACCESS_STRATEGY"  # 診断・別プロセスの試験用: 環境変数で手段を絞る（ace・jet・jackcess のコンマ区切り）
 )
@@ -1203,10 +1204,13 @@ def content_digest(path: str, fmt: str) -> str | None:
     """表の中身（すべての表・列・行の値）の指紋。Jackcess（Java）で読み取り専用に開いて読む。
 
     消した跡の塗りつぶしは、どの行からも指されていないバイトだけを消すので、塗る前と後で指紋は同じになるはず。
-    違えば、残す行の値まで消している（判定の誤り）ので、呼び出し側が取りやめる。
-    Jackcess が無い・読めない形式（Access 97）・読めなかったときは None（確かめられない）。
+    違えば、残す行の値まで消している（判定の誤り）ので、呼び出し側が取りやめる。バイナリ（OLE・添付）の列も中身の
+    SHA-256 で指紋に入れる。
+    Jackcess が無い・Jackcess で読めない形式（Access 97）なら None（確かめられない）。読めるはずなのに読めなかった・
+    止まった（DIGEST_STALL_SECONDS のあいだ1行も来ない）ときは Unavailable。
     """
     import hashlib
+    import threading
 
     env = find_jackcess() if fmt in ("jet4", "ace") else None
     if not env:
@@ -1214,15 +1218,30 @@ def content_digest(path: str, fmt: str) -> str | None:
     cmd = [env["java"], "-Xmx768m", "-XX:+UseSerialGC", "-cp", os.pathsep.join(env["classpath"]), "AccessRewrite"]
     try:
         pipe = _Pipe(cmd)
-    except OSError:
-        return None
+    except OSError as e:
+        raise Unavailable(f"Java を起動できません: {e}") from None
     h = hashlib.sha256()
+    last = [time.monotonic()]
+    finished = threading.Event()
+
+    def watchdog() -> None:
+        while not finished.wait(5):
+            if time.monotonic() - last[0] > DIGEST_STALL_SECONDS:
+                pipe.proc.kill()  # 読み出し側は「途中で終わりました」（Unavailable）になる
+                return
+
+    threading.Thread(target=watchdog, daemon=True, name="pii-access-digest").start()
+
+    def readline() -> str:
+        line = pipe.readline()
+        last[0] = time.monotonic()
+        return line
 
     def call(*fields: str) -> list[str]:
         pipe.send("\t".join(fields))
         out = []
         while True:
-            line = pipe.readline()
+            line = readline()
             head = line.split("\t", 1)[0]
             if head == "err":
                 raise Unavailable(line)
@@ -1237,9 +1256,9 @@ def content_digest(path: str, fmt: str) -> str | None:
             h.update(t.encode("utf-8") + b"\n")
             for line in call("columns", name):
                 h.update(line.encode("utf-8") + b"\n")
-            pipe.send("\t".join(("readall", name, "0")))
+            pipe.send("\t".join(("readall", name, "0", "digest")))
             while True:  # 行は溜めずに指紋へ足す
-                line = pipe.readline()
+                line = readline()
                 head = line.split("\t", 1)[0]
                 if head == "err":
                     raise Unavailable(line)
@@ -1248,8 +1267,10 @@ def content_digest(path: str, fmt: str) -> str | None:
                 h.update(line.encode("utf-8") + b"\n")
         return h.hexdigest()
     except Unavailable:
-        return None
+        pipe.proc.kill()  # 読み残しで詰まった Java を待たない
+        raise
     finally:
+        finished.set()
         try:
             pipe.send("close")
         except Unavailable:
@@ -1279,13 +1300,24 @@ def _optimize(dst: str, strategy: str, fmt: str, notes: list[str], secrets: set[
             )
         finally:
             _discard(tmp)
-    before = content_digest(dst, fmt)
+    try:
+        before = content_digest(dst, fmt)
+    except Unavailable as e:
+        raise RemedyError(
+            f"残す行の中身を確かめられないため、消した行の跡を片付けずに取りやめました。元のファイルは変えていません（詳細: {e}）"
+        ) from None
     try:
         scrub_file(dst)
         scrub_orphan_long_values(dst)
     except ScrubUnsupported as e:
         raise RemedyError(f"消した行の跡を片付けられません（{e}）。元のファイルは変えていません") from None
-    if before is not None and content_digest(dst, fmt) != before:
+    try:
+        after = content_digest(dst, fmt) if before is not None else None
+    except Unavailable as e:
+        raise RemedyError(
+            f"片付けたあとの中身を確かめられないため、取りやめました。元のファイルは変えていません（詳細: {e}）"
+        ) from None
+    if before is not None and after != before:
         # 塗りつぶしは読める値を変えないはず。変わったなら残す行の値まで消している（ファイルを壊す）ので確定しない
         raise RemedyError(
             "消した行の跡を片付けると、残す行の中身まで変わってしまうため、取りやめました。元のファイルは変えていません"

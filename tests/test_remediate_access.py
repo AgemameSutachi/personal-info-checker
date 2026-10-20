@@ -1062,6 +1062,48 @@ def test_content_digest_is_the_same_after_real_scrub(tmp_path):
     assert ra.content_digest(str(p), "ace") == before
 
 
+def test_content_digest_covers_binary_columns(tmp_path):
+    """指紋に OLE（バイナリ）の列の中身も入る（塗りつぶしが生きている OLE の本文を消したら、門が気づける）。"""
+    if not available("ace") or not available("jackcess"):
+        pytest.skip("ACE と Jackcess の両方が要る")
+    import pyodbc
+
+    p = tmp_path / "ole.accdb"
+    create_empty_ace(p)
+    conn = pyodbc.connect(f"DRIVER={{{ra.ace_odbc_driver()}}};DBQ={p}", autocommit=True)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE files (id LONG, [写真] LONGBINARY)")
+        cur.execute("INSERT INTO files (id, [写真]) VALUES (1, ?)", pyodbc.Binary(bytes(range(256)) * 40))
+        before = ra.content_digest(str(p), "ace")
+        cur.execute(
+            "UPDATE files SET [写真] = ? WHERE id = 1", pyodbc.Binary(bytes(256) * 40)
+        )  # 同じ長さで中身だけ違う
+    finally:
+        conn.close()
+    after = ra.content_digest(str(p), "ace")
+    assert before is not None and after is not None and before != after
+
+
+def test_content_digest_that_cannot_read_refuses_the_scrub(tmp_path, monkeypatch, trash):
+    """Jackcess で書き換えるのに中身を確かめられないときは、門を素通りせずに取りやめる。"""
+    from pii_checker.formats import database
+
+    p = _jackcess_sample(tmp_path, "src", 20)
+    original = p.read_bytes()
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+
+    def broken(path, fmt):
+        raise ra.Unavailable("試験: 読めない")
+
+    monkeypatch.setattr(ra, "content_digest", broken)
+    svc, store, job = make_service(tmp_path, [p])
+    r = run(svc, job, p, method="delete_rows", confidences=ALL_RANKS)
+    assert r["state"] == "error" and "確かめられない" in r["message"], r
+    assert p.read_bytes() == original and not trash.files() and not new_tmp_files(p.parent)
+
+
 def _read_with_jackcess(path: Path, tmp: Path) -> dict[str, list[tuple]]:
     """Jackcess で各表の行を読む（写しを作って開く。写しは試験の一時フォルダごと片付く）。"""
     copy = tmp / "jk_snapshot" / "copy.accdb"

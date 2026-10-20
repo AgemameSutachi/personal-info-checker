@@ -437,6 +437,9 @@ def _read_access_jackcess(
                 pass
         if n_tables == 0:
             raise RuntimeError("表を1つも読めなかった")
+    except BaseException:
+        pipe.proc.kill()  # 読み残しで出力が詰まった Java の終わりを待たない（待つと close で 30 秒止まる）
+        raise
     finally:
         finished.set()
         try:

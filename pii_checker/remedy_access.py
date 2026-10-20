@@ -1266,7 +1266,7 @@ def content_digest(path: str, fmt: str) -> str | None:
                     break
                 h.update(line.encode("utf-8") + b"\n")
         return h.hexdigest()
-    except Unavailable:
+    except BaseException:
         pipe.proc.kill()  # 読み残しで詰まった Java を待たない
         raise
     finally:

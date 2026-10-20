@@ -26,3 +26,4 @@ private/
 reports/
 # Rust 拡張のビルド生成物
 rust/*/target/
+pii_checker/_rust_guard.py

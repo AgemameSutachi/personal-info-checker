@@ -85,16 +85,20 @@ pub struct Rg {
     t: Option<usize>,
 }
 
-fn build(src: &str, ci: bool) -> Regex {
+fn build(src: &str, ci: bool) -> Result<Regex, String> {
     RegexBuilder::new(src)
         .case_insensitive(ci)
         .size_limit(512 << 20)
         .dfa_size_limit(256 << 20)
         .build()
-        .unwrap_or_else(|e| panic!("正規表現が作れません: {e}\n{src}"))
+        .map_err(|e| format!("正規表現が作れません: {e}\n{src}"))
 }
 
 pub struct Rules {
+    /// 「+81 の後（区切り・括弧・0 のあと）に [5789]0 が続く形」の探知用。RE_LANDLINE_INTL の途中の先読み
+    /// (?![5789]0) は、Python が前の部分を取り直して通る場合があり、Rust では同じ結果にできないため、
+    /// この形を含む本文は Rust で扱わず Python に回す
+    landline_intl_guard: Regex,
     license: Rg,
     my_number: Rg,
     card: Rg,
@@ -146,77 +150,78 @@ pub struct Rules {
 }
 
 impl Rules {
-    pub fn load() -> Rules {
+    pub fn load() -> Result<Rules, String> {
         let text = include_str!("patterns.json");
-        let v: serde_json::Value = serde_json::from_str(text).expect("patterns.json が壊れています");
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| format!("patterns.json が壊れています: {e}"))?;
         let rgm = &v["rg"];
-        let get = |name: &str| -> (String, bool) {
+        let get = |name: &str| -> Result<(String, bool), String> {
             let a = &rgm[name];
-            (
-                a[0].as_str().unwrap_or_else(|| panic!("patterns.json に {name} がありません")).to_string(),
-                a[1].as_str().unwrap().contains('i'),
-            )
+            let src = a[0].as_str().ok_or_else(|| format!("patterns.json に {name} がありません"))?;
+            let flags = a[1].as_str().ok_or_else(|| format!("patterns.json の {name} の旗がありません"))?;
+            Ok((src.to_string(), flags.contains('i')))
         };
-        let rg = |name: &str| -> Rg {
-            let (s, ci) = get(name);
-            let re = build(&s, ci);
+        let rg = |name: &str| -> Result<Rg, String> {
+            let (s, ci) = get(name)?;
+            let re = build(&s, ci)?;
             let t = re.capture_names().position(|n| n == Some("t"));
-            Rg { re, t }
+            Ok(Rg { re, t })
         };
-        let plain = |name: &str| -> Regex {
-            let (s, ci) = get(name);
+        let plain = |name: &str| -> Result<Regex, String> {
+            let (s, ci) = get(name)?;
             build(&s, ci)
         };
-        Rules {
-            license: rg("RE_LICENSE"),
-            my_number: rg("RE_MY_NUMBER"),
-            card: rg("RE_CARD"),
-            mobile: rg("RE_MOBILE"),
-            mobile_intl: rg("RE_MOBILE_INTL"),
-            landline_intl: rg("RE_LANDLINE_INTL"),
-            landline: rg("RE_LANDLINE"),
-            landline_space: rg("RE_LANDLINE_SPACE"),
-            phone_bare: rg("RE_PHONE_BARE"),
-            postal_mark: rg("RE_POSTAL_MARK"),
-            postal_before_pref: rg("RE_POSTAL_BEFORE_PREF"),
-            date: rg("RE_DATE"),
-            date_era_full: plain("RE_DATE_ERA_FULL"),
-            bank: rg("RE_BANK"),
-            bank_full: rg("RE_BANK_FULL"),
-            pension: rg("RE_PENSION"),
-            passport: rg("RE_PASSPORT"),
-            residence_card: rg("RE_RESIDENCE_CARD"),
-            resident_code: rg("RE_RESIDENT_CODE"),
-            employment: rg("RE_EMPLOYMENT"),
-            insurance: rg("RE_INSURANCE"),
-            member_id: rg("RE_MEMBER_ID"),
-            address: rg("RE_ADDRESS"),
-            address_no_pref: rg("RE_ADDRESS_NO_PREF"),
-            email: rg("RE_EMAIL"),
-            name_label: rg("RE_NAME_LABEL"),
-            name_label_tight: rg("RE_NAME_LABEL_TIGHT"),
-            name_honorific: rg("RE_NAME_HONORIFIC"),
-            name_honorific_any: rg("RE_NAME_HONORIFIC_ANY"),
-            name_spaced: rg("RE_NAME_SPACED"),
-            sensitive: rg("RE_SENSITIVE"),
-            my_number_kw: plain("MY_NUMBER_KW"),
-            card_kw: plain("CARD_KW"),
-            phone_kw: plain("PHONE_KW"),
-            birth_kw: plain("BIRTH_KW"),
-            license_kw: plain("LICENSE_KW"),
-            order_kw: plain("ORDER_KW"),
-            model_kw: plain("MODEL_KW"),
-            company_kw: plain("COMPANY_KW"),
-            personal_phone_kw: plain("PERSONAL_PHONE_KW"),
-            card_number_kw: plain("CARD_NUMBER_KW"),
-            money_after: plain("MONEY_AFTER"),
-            money_before: plain("MONEY_BEFORE"),
-            role_email: plain("ROLE_EMAIL"),
-            honorific_stop: plain("HONORIFIC_STOP"),
-            personal_address_kw: plain("PERSONAL_ADDRESS_KW"),
-            facility_kw: plain("FACILITY_KW"),
-            mobile_prefix: plain("RE_MOBILE_PREFIX"),
-        }
+        Ok(Rules {
+            landline_intl_guard: plain("LANDLINE_INTL_GUARD")?,
+            license: rg("RE_LICENSE")?,
+            my_number: rg("RE_MY_NUMBER")?,
+            card: rg("RE_CARD")?,
+            mobile: rg("RE_MOBILE")?,
+            mobile_intl: rg("RE_MOBILE_INTL")?,
+            landline_intl: rg("RE_LANDLINE_INTL")?,
+            landline: rg("RE_LANDLINE")?,
+            landline_space: rg("RE_LANDLINE_SPACE")?,
+            phone_bare: rg("RE_PHONE_BARE")?,
+            postal_mark: rg("RE_POSTAL_MARK")?,
+            postal_before_pref: rg("RE_POSTAL_BEFORE_PREF")?,
+            date: rg("RE_DATE")?,
+            date_era_full: plain("RE_DATE_ERA_FULL")?,
+            bank: rg("RE_BANK")?,
+            bank_full: rg("RE_BANK_FULL")?,
+            pension: rg("RE_PENSION")?,
+            passport: rg("RE_PASSPORT")?,
+            residence_card: rg("RE_RESIDENCE_CARD")?,
+            resident_code: rg("RE_RESIDENT_CODE")?,
+            employment: rg("RE_EMPLOYMENT")?,
+            insurance: rg("RE_INSURANCE")?,
+            member_id: rg("RE_MEMBER_ID")?,
+            address: rg("RE_ADDRESS")?,
+            address_no_pref: rg("RE_ADDRESS_NO_PREF")?,
+            email: rg("RE_EMAIL")?,
+            name_label: rg("RE_NAME_LABEL")?,
+            name_label_tight: rg("RE_NAME_LABEL_TIGHT")?,
+            name_honorific: rg("RE_NAME_HONORIFIC")?,
+            name_honorific_any: rg("RE_NAME_HONORIFIC_ANY")?,
+            name_spaced: rg("RE_NAME_SPACED")?,
+            sensitive: rg("RE_SENSITIVE")?,
+            my_number_kw: plain("MY_NUMBER_KW")?,
+            card_kw: plain("CARD_KW")?,
+            phone_kw: plain("PHONE_KW")?,
+            birth_kw: plain("BIRTH_KW")?,
+            license_kw: plain("LICENSE_KW")?,
+            order_kw: plain("ORDER_KW")?,
+            model_kw: plain("MODEL_KW")?,
+            company_kw: plain("COMPANY_KW")?,
+            personal_phone_kw: plain("PERSONAL_PHONE_KW")?,
+            card_number_kw: plain("CARD_NUMBER_KW")?,
+            money_after: plain("MONEY_AFTER")?,
+            money_before: plain("MONEY_BEFORE")?,
+            role_email: plain("ROLE_EMAIL")?,
+            honorific_stop: plain("HONORIFIC_STOP")?,
+            personal_address_kw: plain("PERSONAL_ADDRESS_KW")?,
+            facility_kw: plain("FACILITY_KW")?,
+            mobile_prefix: plain("RE_MOBILE_PREFIX")?,
+        })
     }
 }
 
@@ -280,12 +285,6 @@ fn lb_my_number(t: &str, s: usize, _: &Captures) -> bool {
 /// (?:^|(?<=[\s　:：、,|]))
 fn lb_tight(t: &str, s: usize, _: &Captures) -> bool {
     s == 0 || prev_char(t, s).map_or(true, |c| py_is_space(c) || matches!(c, '　' | ':' | '：' | '、' | ',' | '|'))
-}
-/// (?![5789]0)（p の直後）
-fn post_landline_intl(t: &str, _s: usize, c: &Captures) -> bool {
-    let p_end = c.name("p").unwrap().end();
-    let b = t.as_bytes();
-    !(p_end + 1 < b.len() && matches!(b[p_end], b'5' | b'7' | b'8' | b'9') && b[p_end + 1] == b'0')
 }
 /// (?=[0-9A-Za-z\-]*[0-9])（値に数字を含む）
 fn post_member(_t: &str, _s: usize, c: &Captures) -> bool {
@@ -640,7 +639,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
         scan(&r.mobile_intl, text, &lb_none, &lb_none, &mut |c, end| {
             hits.push(hit(PHONE, MED, c.get(0).unwrap().start(), end, "携帯電話番号（+81）"));
         });
-        scan(&r.landline_intl, text, &lb_alnum, &post_landline_intl, &mut |c, end| {
+        scan(&r.landline_intl, text, &lb_alnum, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let dg = digits_only(&text[ms..end]);
             let dg = &dg[2..];
@@ -959,13 +958,14 @@ fn classify(d: &D, hits: &mut [Hit], hdr_value: &[String]) {
 
 // ---------------------------------------------------------------- PyO3
 
-static RULES: OnceLock<Rules> = OnceLock::new();
+static RULES: OnceLock<Result<Rules, String>> = OnceLock::new();
 
-fn rules() -> &'static Rules {
-    RULES.get_or_init(Rules::load)
+/// 規則の表。作れなかったとき（表の壊れ・正規表現の誤り）は、panic せず Python の例外にできるよう文字列で返す
+fn rules() -> Result<&'static Rules, String> {
+    RULES.get_or_init(Rules::load).as_ref().map_err(|e| e.clone())
 }
 
-/// Python と Rust で「語の文字（\w）・空白（\s）」の判定が食い違う文字の範囲（Python 側が起動時に計算して渡す）。
+/// Python と Rust で「語の文字（\w）・空白（\s）」の判定が食い違う文字の範囲（Python 側が起動時に求めて渡す）。
 /// 渡されるまでは None のまま = 検出を断る（Python の経路に任せる）。
 static MISMATCH: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
 
@@ -982,52 +982,70 @@ fn has_mismatch_char(s: &str) -> bool {
     })
 }
 
-fn type_index(name: &str) -> u8 {
-    TYPES.iter().position(|t| *t == name).unwrap_or_else(|| panic!("未知の種類: {name}")) as u8
+fn type_index(name: &str) -> Result<u8, String> {
+    TYPES.iter().position(|t| *t == name).map(|i| i as u8).ok_or_else(|| format!("未知の種類: {name}"))
 }
 
 type HitTuple = (&'static str, u8, String, usize, usize, String, bool);
 
-/// 検出の本体。戻り値は [(種類, 確度(1低/2中/3高), 値, 開始, 終了, 規則名, needs_person), ...]（位置は文字単位）
+/// 検出の本体。戻り値は [(種類, 確度(1低/2中/3高), 値, 開始, 終了, 規則名, needs_person), ...]（位置は文字単位）。
+/// Python と同じ結果にできない本文（語の文字の判定が食い違う文字・RE_LANDLINE_INTL の先読みが効く形）は Ok(None)。
 pub fn detect_py(
     text: &str,
     prefix: &str,
     category: Option<&str>,
     hdr: Option<(String, u8, String, String)>,
-) -> Option<Vec<HitTuple>> {
+) -> Result<Option<Vec<HitTuple>>, String> {
     // 見出し・本文のどちらかに、Python と Rust で語の文字の判定が食い違う文字があれば、Python の経路に任せる
     if has_mismatch_char(prefix) || has_mismatch_char(text) {
-        return None;
+        return Ok(None);
     }
-    let r = rules();
-    let hin = hdr.map(|(ty, conf, value, rule)| HdrIn { ty: type_index(&ty), conf, value, rule });
-    let (hits, hdr_value) = detect_body(r, text, prefix, category, hin.as_ref());
-    let ascii = text.is_ascii();
-    // バイト位置 → 文字位置
-    let cp = |b: usize| -> usize {
-        if ascii {
-            b
-        } else {
-            text[..b].chars().count()
-        }
+    let r = rules()?;
+    // RE_LANDLINE_INTL の途中の先読み (?![5789]0) は、Python が「+81」の後ろの部分を取り直して通る場合があり、
+    // Rust の regex では同じ結果にできない。取り直しが効きうる形（+81・区切り・括弧・0 のあとに [5789]0）を含む本文は Python に回す
+    if text.contains("+81") && r.landline_intl_guard.is_match(text) {
+        return Ok(None);
+    }
+    let hin = match hdr {
+        Some((ty, conf, value, rule)) => Some(HdrIn { ty: type_index(&ty)?, conf, value, rule }),
+        None => None,
     };
-    Some(
+    let (hits, hdr_value) = detect_body(r, text, prefix, category, hin.as_ref());
+    // バイト位置 → 文字位置。位置を昇順に 1 回だけ走査して求める（検出ごとに先頭から数えると、長い本文で二乗に遅くなる）
+    let mut char_pos: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    if text.is_ascii() {
+        for h in &hits {
+            char_pos.insert(h.start, h.start);
+            char_pos.insert(h.end, h.end);
+        }
+    } else {
+        let mut offsets: Vec<usize> = hits.iter().flat_map(|h| [h.start, h.end]).collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let (mut last, mut count) = (0usize, 0usize);
+        for o in offsets {
+            count += text[last..o].chars().count();
+            last = o;
+            char_pos.insert(o, count);
+        }
+    }
+    Ok(Some(
         hits.into_iter()
             .map(|h| {
                 let value = if h.hdr { hdr_value[0].clone() } else { text[h.start..h.end].to_string() };
-                (TYPES[h.ty as usize], h.conf, value, cp(h.start), cp(h.end), h.rule.into_owned(), h.needs)
+                (TYPES[h.ty as usize], h.conf, value, char_pos[&h.start], char_pos[&h.end], h.rule.into_owned(), h.needs)
             })
             .collect(),
-    )
+    ))
 }
 
 /// 文字クラスの範囲を [(開始, 終了)] で返す（Python 側の判定との食い違いを調べるため）。
 /// kind: "word" = 正規表現の \w、"space" = [\s\x1c-\x1f]（export_rust_patterns.py が \s をこう書き換える）
-fn class_ranges_impl(kind: &str) -> Vec<(u32, u32)> {
+fn class_ranges_impl(kind: &str) -> Result<Vec<(u32, u32)>, String> {
     let re = match kind {
-        "word" => Regex::new(r"\w").unwrap(),
-        "space" => Regex::new(r"[\s\x1c-\x1f]").unwrap(),
-        _ => panic!("未知の kind: {kind}"),
+        "word" => build(r"\w", false)?,
+        "space" => build(r"[\s\x1c-\x1f]", false)?,
+        _ => return Err(format!("未知の kind: {kind}")),
     };
     let mut out: Vec<(u32, u32)> = Vec::new();
     // 全文字を並べた文字列の上で 1 文字ずつ当てる（1 文字ごとに is_match を呼ぶより速い）
@@ -1039,21 +1057,36 @@ fn class_ranges_impl(kind: &str) -> Vec<(u32, u32)> {
             _ => out.push((cp, cp)),
         }
     }
-    out
+    Ok(out)
 }
 
 /// 与えた正規表現（ci = 大文字小文字を区別しない）に当たる文字列を全部返す（大文字小文字の畳み込みの点検用）
-fn findall_impl(pattern: &str, ci: bool, text: &str) -> Vec<String> {
-    build(pattern, ci).find_iter(text).map(|m| m.as_str().to_string()).collect()
+fn findall_impl(pattern: &str, ci: bool, text: &str) -> Result<Vec<String>, String> {
+    Ok(build(pattern, ci)?.find_iter(text).map(|m| m.as_str().to_string()).collect())
 }
 
+/// regex-syntax（Unicode の表を持つ crate）の版。Cargo.lock から読む。\w・\s の範囲はこの版で決まる
+fn unicode_key_impl() -> String {
+    let lock = include_str!("../Cargo.lock");
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == "name = \"regex-syntax\"" {
+            if let Some(v) = lines.next() {
+                return format!("regex-syntax {}", v.trim().trim_start_matches("version = ").trim_matches('"'));
+            }
+        }
+    }
+    "regex-syntax unknown".to_string()
+}
+
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 #[pymodule]
 mod pii_rs_detect {
     use super::*;
 
-    /// detect の本文の検出（見出しの検出は引数で受け取る）
+    /// detect の本文の検出（見出しの検出は引数で受け取る）。Python と同じ結果にできない本文は None
     #[pyfunction]
     #[pyo3(signature = (text, prefix, category, hdr))]
     fn detect_body(
@@ -1061,8 +1094,8 @@ mod pii_rs_detect {
         prefix: &str,
         category: Option<&str>,
         hdr: Option<(String, u8, String, String)>,
-    ) -> Option<Vec<HitTuple>> {
-        super::detect_py(text, prefix, category, hdr)
+    ) -> PyResult<Option<Vec<HitTuple>>> {
+        super::detect_py(text, prefix, category, hdr).map_err(PyRuntimeError::new_err)
     }
 
     /// 食い違う文字の範囲 [(開始, 終了)] を登録する（最初の1回だけ有効）。登録するまで detect_body は None を返す。
@@ -1075,14 +1108,20 @@ mod pii_rs_detect {
 
     /// 文字クラスの範囲 [(開始, 終了)]。kind は "word" または "space"
     #[pyfunction]
-    fn class_ranges(kind: &str) -> Vec<(u32, u32)> {
-        super::class_ranges_impl(kind)
+    fn class_ranges(kind: &str) -> PyResult<Vec<(u32, u32)>> {
+        super::class_ranges_impl(kind).map_err(PyRuntimeError::new_err)
     }
 
     /// 点検用: 正規表現に当たる文字列の一覧
     #[pyfunction]
-    fn findall(pattern: &str, ci: bool, text: &str) -> Vec<String> {
-        super::findall_impl(pattern, ci, text)
+    fn findall(pattern: &str, ci: bool, text: &str) -> PyResult<Vec<String>> {
+        super::findall_impl(pattern, ci, text).map_err(PyRuntimeError::new_err)
+    }
+
+    /// 文字クラスの範囲を決める Unicode の表の版（食い違う範囲の計算結果を使い回してよいかの鍵）
+    #[pyfunction]
+    fn unicode_key() -> String {
+        super::unicode_key_impl()
     }
 
     /// この拡張が組み込んだ正規表現の表（patterns.json）の内容そのもの（食い違いの点検用）

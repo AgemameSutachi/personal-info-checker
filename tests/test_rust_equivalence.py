@@ -129,8 +129,8 @@ def test_seeds_are_same():
             text = detectors.normalize(seed)
             total += 1
             used += assert_same(text, header)
-    # 作り物の入力に、Rust で扱えない文字は混ぜていない（全部 Rust で処理される）
-    assert used == total
+    # 作り物の入力に、Rust で扱えない文字は混ぜていない。Python に回るのは「+81 90-…」のような携帯の形を含む入力だけ
+    assert used >= total * 0.95
 
 
 def test_seeds_find_something():
@@ -314,3 +314,114 @@ def test_no_rust_env_disables(monkeypatch):
     """PII_CHECKER_NO_RUST が立っていれば拡張を読み込まない。"""
     monkeypatch.setenv("PII_CHECKER_NO_RUST", "1")
     assert detectors._load_rust() is None
+
+
+# ---------------------------------------------------------------- 先読みの取り直し(+81 の固定電話)・退路
+
+
+def test_intl_landline_backtracking_forms_are_same():
+    """RE_LANDLINE_INTL の途中の先読み (?![5789]0) は、Python が「+81」の後ろの括弧・0 を取り直して通ることがある
+    （「+81(90-123-5678)」は電話として拾われる）。+81・区切り・括弧・0 の有無・本体の組み合わせを総当たりで比べる。"""
+    bodies = [
+        "90-123-5678",
+        "50-123-4567",
+        "(90)123-5678",
+        "(50)1234-5678",
+        "3-1234-5678",
+        "3 1234 5678",
+        "312345678",
+        "(3)1234-5678",
+        "03-1234-5678",
+        "90 1234 5678",
+        "80-1234-5678",
+        "70-123-4567",
+        "20-1234-5678",
+        "9-123-45678",
+        "0 90-123-5678",
+    ]
+    found_by_python = 0
+    for sep in ("", " ", "-", ".", "\t"):
+        for op in ("", "("):
+            for zero in ("", "0"):
+                for cl in ("", ")"):
+                    for body in bodies:
+                        for tail in ("", ")", " 以上"):
+                            text = f"+81{sep}{op}{zero}{cl}{body}{tail}"
+                            py = rows(detectors._detect_py(text, None))
+                            found_by_python += bool(py)
+                            # どちらの経路でも、detect() は Python 版と同じ（Rust が扱えない形は Python に回る）
+                            assert rows(detectors.detect(text)) == py, text
+                            assert_same(text, None)
+                            assert rows(detectors.detect("TEL " + text + " 以上")) == rows(
+                                detectors._detect_py("TEL " + text + " 以上")
+                            )
+    assert found_by_python > 100  # 陽性対照: Python 版が実際に電話を拾う形が多く含まれている
+    for text in ("+81(90-123-5678)", "+81 (50-123-4567)", "+81-(90)123-5678"):
+        assert rows(detectors._detect_py(text)) and rows(detectors.detect(text)) == rows(detectors._detect_py(text))
+
+
+def test_lone_surrogate_falls_back_to_python():
+    """単独のサロゲート（壊れた文字）を含む本文・見出しは、その 1 件だけ Python 版で検出する。拡張は使い続ける。"""
+    text = "a\ud800 090-1234-5678"
+    assert rows(detectors.detect(text)) == rows(detectors._detect_py(text))
+    assert rows(detectors.detect(text))  # 電話が見つかる
+    assert detectors._detect_rust(text, None) is None
+    assert rows(detectors.detect("電話 090-1234-5678", "電話\ud800")) == rows(
+        detectors._detect_py("電話 090-1234-5678", "電話\ud800")
+    )
+    assert detectors.rust_enabled()
+
+
+class _PanicLike(BaseException):
+    """pyo3 の PanicException（BaseException 由来）の代わり。"""
+
+
+@pytest.mark.parametrize("error", [RuntimeError("壊れた"), _PanicLike("panic")])
+def test_rust_failure_disables_rust_and_falls_back(monkeypatch, error):
+    class Broken:
+        def detect_body(self, *args):
+            raise error
+
+    monkeypatch.setattr(detectors, "_RUST", Broken())
+    with pytest.warns(RuntimeWarning):
+        hits = detectors.detect("電話 090-1234-5678")
+    assert rows(hits) == rows(detectors._detect_py("電話 090-1234-5678"))
+    assert not detectors.rust_enabled()  # 以後は使わない
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(3)])
+def test_keyboard_interrupt_is_not_swallowed(monkeypatch, error):
+    class Interrupted:
+        def detect_body(self, *args):
+            raise error
+
+    monkeypatch.setattr(detectors, "_RUST", Interrupted())
+    with pytest.raises(type(error)):
+        detectors.detect("電話 090-1234-5678")
+    assert detectors.rust_enabled()
+
+
+def test_guard_table_matches_computation():
+    """ビルド時に作って同梱する表(_rust_guard.py)が、その場で求めた範囲と一致する。"""
+    from pii_checker import _rust_guard
+
+    ext = detectors._RUST
+    assert list(_rust_guard.KEY) == detectors._guard_key(ext), "表の鍵が古い。python tools/build_rust_ext.py で作り直す"
+    assert [tuple(r) for r in _rust_guard.RANGES] == detectors._rust_guard_ranges(ext)
+
+
+def test_long_japanese_text_is_linear():
+    """長い日本語の本文(検出が多い)で、位置の変換が二乗に遅くならない。結果も Python 版と同じ。"""
+    import time
+
+    unit = "氏名：山田 太郎　電話 090-1234-5678　住所 東京都千代田区丸の内1-2-3　メール a@example.jp　あいうえお" * 1
+    text = detectors.normalize(unit * 3000)
+    t0 = time.perf_counter()
+    py = rows(detectors._detect_py(text))
+    t_py = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    rust = detectors._detect_rust(text, None)
+    t_rust = time.perf_counter() - t0
+    assert rust is not None and rows(rust) == py
+    assert len(py) > 10000
+    assert t_rust < t_py * 1.5 + 0.5  # 速さの測定ではなく、二乗に悪化していないことの目安

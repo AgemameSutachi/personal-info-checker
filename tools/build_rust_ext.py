@@ -68,10 +68,43 @@ def build_and_install() -> bool:
     if check.returncode != 0:
         _warn("入れた拡張を読み込めません")
         return False
+    # 食い違う文字の範囲を、ここで求めて同梱する（起動のたびに求めると約 0.15 秒かかる）
+    if subprocess.run([sys.executable, os.path.abspath(__file__), "--write-guard"]).returncode != 0:
+        _warn("食い違う文字の範囲の表を作れませんでした（起動時にその場で求めます）")
     print("Rust 拡張 pii_rs_detect を入れました")
     return True
 
 
+GUARD_FILE = os.path.join(ROOT, "pii_checker", "_rust_guard.py")
+
+
+def write_guard() -> None:
+    """Python と Rust で語の文字・空白の判定が食い違う文字の範囲を求め、pii_checker/_rust_guard.py に書く。
+
+    鍵（Python の Unicode データの版・拡張の Unicode の表の版）が実行時の環境と一致するときだけ使われる。
+    """
+    sys.path.insert(0, ROOT)
+    import pii_rs_detect as ext
+    from pii_checker import detectors
+
+    ranges = detectors._rust_guard_ranges(ext)
+    key = detectors._guard_key(ext)
+    lines = [
+        '"""tools/build_rust_ext.py が作る（Python と Rust で語の文字・空白の判定が食い違う文字の範囲）。リポジトリには入れない。"""',
+        "",
+        f"KEY = {tuple(key)!r}",
+        "RANGES = (",
+    ]
+    lines += [f"    {tuple(r)!r}," for r in ranges]
+    lines += [")", ""]
+    with open(GUARD_FILE, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines))
+    print(f"食い違う文字の範囲 {len(ranges)} 件を {GUARD_FILE} に書きました（鍵 {key}）")
+
+
 if __name__ == "__main__":
+    if "--write-guard" in sys.argv:
+        write_guard()
+        sys.exit(0)
     ok = build_and_install()
     sys.exit(0 if ok or "--strict" not in sys.argv else 1)

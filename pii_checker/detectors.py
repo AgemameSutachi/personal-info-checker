@@ -961,6 +961,26 @@ def _rust_guard_ranges(ext) -> list[tuple[int, int]]:
     return merged
 
 
+def _guard_key(ext) -> list[str]:
+    """食い違う範囲の計算結果を使い回してよいかの鍵。Python の Unicode データの版と、拡張の Unicode の表（regex-syntax）の版。"""
+    import unicodedata
+
+    return [unicodedata.unidata_version, ext.unicode_key()]
+
+
+def _guard_ranges_for(ext) -> list[tuple[int, int]]:
+    """食い違う範囲。ビルド時に求めて同梱した表(_rust_guard.py)の鍵が今の環境と一致すればそれを使い、
+    無い・一致しないときは、その場で求める（約 0.15 秒）。"""
+    try:
+        from . import _rust_guard
+
+        if list(_rust_guard.KEY) == _guard_key(ext):
+            return [tuple(r) for r in _rust_guard.RANGES]
+    except ImportError:
+        pass
+    return _rust_guard_ranges(ext)
+
+
 def _load_rust():
     """Rust 拡張を読み込んで、使える状態にして返す。使えなければ None（Python 版で動く）。"""
     import os
@@ -972,7 +992,7 @@ def _load_rust():
     except ImportError:
         return None
     try:
-        ext.set_mismatch_ranges(_rust_guard_ranges(ext))
+        ext.set_mismatch_ranges(_guard_ranges_for(ext))
     except Exception:  # noqa: BLE001 - 拡張が壊れていても、検出は Python 版で続ける
         return None
     return ext
@@ -986,9 +1006,18 @@ def rust_enabled() -> bool:
     return _RUST is not None
 
 
+def _disable_rust(error: BaseException) -> None:
+    """拡張が想定外の失敗をした（panic など）ので、以後は使わず Python 版で検出する。"""
+    global _RUST
+    _RUST = None
+    import warnings
+
+    warnings.warn(f"Rust 拡張が失敗したため、以後は Python の経路で検出します: {error!r}", RuntimeWarning, stacklevel=3)
+
+
 def _detect_rust(text: str, header: str | None = None) -> list[Hit] | None:
     """detect の Rust 版。Python 版と同じ結果を返す。この本文を Rust で扱えないとき（語の文字の判定が
-    Python と食い違う文字を含む）は None を返す。"""
+    Python と食い違う文字を含む・サロゲートを含む・拡張が失敗した）は None を返し、呼び出し側が Python 版で検出する。"""
     category = header_category(header)
     hdr = None
     hv = None
@@ -999,7 +1028,17 @@ def _detect_rust(text: str, header: str | None = None) -> list[Hit] | None:
     if not text or len(text) < 3:
         return [hv] if hv else []
     prefix = (normalize(header) + " ") if header else ""
-    rows = _RUST.detect_body(text, prefix, category, hdr)
+    try:
+        rows = _RUST.detect_body(text, prefix, category, hdr)
+    except UnicodeEncodeError:
+        return (
+            None  # 単独のサロゲート（壊れた文字）を含む本文は Rust の文字列にできない。この本文だけ Python 版で検出する
+        )
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - pyo3 の PanicException は BaseException 由来
+        _disable_rust(exc)
+        return None
     if rows is None:
         return None
     return [Hit(t, _CONFIDENCE_BY_NUM[c], v, s, e, rule, needs) for (t, c, v, s, e, rule, needs) in rows]

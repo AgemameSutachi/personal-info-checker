@@ -1,6 +1,6 @@
 """配布用の exe を作る。
 
-  python build.py [--python32-zip <python-3.12.x-embed-win32.zip>] [--jdk-dir <Temurin の JDK 21 のフォルダ>] [--skip-java]
+  python build.py [--python32-zip <python-3.12.x-embed-win32.zip>] [--jdk-dir <Temurin の JDK 21 のフォルダ>] [--skip-java] [--require-rust]
   python build.py --fetch-jackcess      … 開発・試験用に、Jackcess の jar を vendor/jackcess へ取り込んで終わる
 
 ダウンロードしたもの（Java 実行環境の元の JDK・Jackcess の jar）は、ビルド用のキャッシュ（build/cache。環境変数
@@ -68,7 +68,7 @@ hiddenimports = ['pii_checker.formats.archive', 'pii_checker.formats.database', 
                  'pii_checker.formats.misc', 'pii_checker.formats.office', 'pii_checker.formats.pdf',
                  'pii_checker.formats.pst', 'pii_checker.desktop', 'pii_checker.web.server',
                  'winrt._winrt_windows_foundation', 'winrt._winrt_windows_foundation_collections',
-                 'pii_rs_detect',
+                 'pii_rs_detect', 'pii_checker._rust_guard',
                  'uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.lifespan.on']
 for pkg in ('winrt', 'pymupdf', 'webview', 'extract_msg', 'msoffcrypto', 'py7zr'):
     try:
@@ -501,6 +501,11 @@ def main() -> int:
         action="store_true",
         help="開発・試験用に、Jackcess の jar を vendor/jackcess へ取り込んで終わる",
     )
+    ap.add_argument(
+        "--require-rust",
+        action="store_true",
+        help="Rust 拡張を作れなければ失敗にする（配布版の組み立て用。付けないと、作れなくても Python の経路の exe を作る）",
+    )
     args = ap.parse_args()
     if args.fetch_jackcess:
         for name, path in fetch_jackcess_jars(ROOT / "vendor" / "jackcess").items():
@@ -520,7 +525,7 @@ def main() -> int:
         f"LIBS = {library_versions()!r}\n",
         encoding="utf-8",
     )
-    build_rust_extension()
+    build_rust_extension(args.require_rust)
     run(
         [
             sys.executable,
@@ -550,10 +555,11 @@ def main() -> int:
     return 0
 
 
-def build_rust_extension() -> None:
+def build_rust_extension(require: bool = False) -> None:
     """検出の中心の Rust 拡張を作って、この Python の環境へ入れる（PyInstaller がそれを exe に取り込む）。
 
     cargo・maturin が無い、またはビルドに失敗したときは警告だけ出して続ける（その exe は Python の経路で検出する）。
+    require=True（--require-rust）のときは、作れなければ失敗にする（配布版の組み立て用）。
     入れ直す前の古い拡張が残っていて、それが exe に入ってしまわないよう、失敗したときは入っている拡張を外す。
     """
     sys.path.insert(0, str(ROOT / "tools"))
@@ -562,7 +568,12 @@ def build_rust_extension() -> None:
     if build_rust_ext.build_and_install():
         return
     subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "pii_rs_detect"], capture_output=True)
-    print("! Rust 拡張なしの exe を作ります（検出は Python の経路で動きます）")
+    if require:
+        raise SystemExit("! --require-rust が指定されているのに、Rust 拡張を作れませんでした（上の警告を見てください）")
+    print(
+        "! Rust 拡張なしの exe を作ります（検出は Python の経路で動きます）。"
+        "古い拡張が exe に入らないよう、この開発環境に入っていた pii_rs_detect も外しました"
+    )
 
 
 def check_rust_extension() -> None:

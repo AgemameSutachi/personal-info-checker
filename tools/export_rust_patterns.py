@@ -85,6 +85,10 @@ rg = {
 # 先読み・後読みの無いものは元の式をそのまま使う
 for name in ("RE_DATE", "RE_DATE_ERA", "RE_INSURANCE", "RE_NAME_LABEL", "RE_SENSITIVE"):
     rg[name] = getattr(d, name).pattern
+# RE_LANDLINE_INTL の途中の先読み (?![5789]0) の探知用: 「+81」の後ろ（区切り・括弧・0 のあと）に [5789]0 が続く形。
+# Python は前の部分（括弧・0）を取り直して先読みを通る場合があるが、Rust の regex は先読みが無く同じ結果にできない。
+# この形を含む本文は Rust で扱わず Python に回す（lib.rs の detect_py）
+rg["LANDLINE_INTL_GUARD"] = r"\+81[\s\-.]?\(?0?\)?[5789]0"
 # 全体一致用（Python の fullmatch 相当）
 rg["RE_DATE_ERA_FULL"] = r"\A(?:" + d.RE_DATE_ERA.pattern + r")\z"
 

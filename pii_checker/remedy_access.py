@@ -105,6 +105,74 @@ def access_format(path: str) -> str:
     return ""
 
 
+HEADER_MASK_KEY = (
+    0x6B39DAC7  # Jet 4・ACE の見出しの 0x18 バイト目からを伏せている RC4 の鍵（Jackcess・mdbtools と同じ）
+)
+HEADER_MASKED_AT = 0x18
+SORT_ORDER_AT = 110  # 伏せを戻した見出しの、並び順（2 バイト）の位置
+GENERAL_SORT_ORDER = 1033  # 「一般」（0x0409）。Jackcess が文字の索引を書けるのはこれだけ
+
+
+def _rc4_stream(key: bytes, n: int) -> bytes:
+    """RC4 の鍵の流れ（見出しの伏せを戻すためだけに使う。暗号としての強さは関係ない）。"""
+    s = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + s[i] + key[i % len(key)]) & 0xFF
+        s[i], s[j] = s[j], s[i]
+    i = j = 0
+    out = bytearray()
+    for _ in range(n):
+        i = (i + 1) & 0xFF
+        j = (j + s[i]) & 0xFF
+        s[i], s[j] = s[j], s[i]
+        out.append(s[(s[i] + s[j]) & 0xFF])
+    return bytes(out)
+
+
+def sort_order(path: str) -> int | None:
+    """Jet 4・ACE のファイルの並び順（1033＝「一般」・1041＝「日本語」など）。読めなければ None。"""
+    from .engine import long_path
+
+    try:
+        with open(long_path(path), "rb") as f:
+            head = f.read(SORT_ORDER_AT + 2)
+    except OSError:
+        return None
+    if len(head) < SORT_ORDER_AT + 2 or head[4:19] not in (b"Standard Jet DB", b"Standard ACE DB") or head[0x14] == 0:
+        return None
+    n = SORT_ORDER_AT + 2 - HEADER_MASKED_AT
+    stream = _rc4_stream(HEADER_MASK_KEY.to_bytes(4, "little"), n)
+    at = SORT_ORDER_AT - HEADER_MASKED_AT
+    return (head[SORT_ORDER_AT] ^ stream[at]) | ((head[SORT_ORDER_AT + 1] ^ stream[at + 1]) << 8)
+
+
+def jackcess_sort_problem(path: str, strategies: list[str], tables: dict, chosen) -> str:
+    """Jackcess で書き換えるとき、並び順のために書き換えられない表があれば、断る理由（無ければ空。句点で終わらない）。
+
+    並び順が「一般」以外（「日本語」など）のファイルでは、Jackcess は文字（テキスト・メモ）の列を含む索引を書けず、
+    行の削除・値の置き換えのどれも断られる。添付ファイル型などの複合列も、隠れた表の文字の索引で同じく断られる。
+    tables は検査で覚えた表ごとの情報（text_index・complex）。分からない表（古い記録・ほかの読み方）は断らない
+    （実行の段の Jackcess の断りに任せる）。chosen は対象にする表の名前。
+    """
+    if not strategies or strategies[0] != "jackcess":
+        return ""
+    order = sort_order(path)
+    if order is None or order == GENERAL_SORT_ORDER:
+        return ""
+    blocked = sorted(
+        t for t in chosen if (tables.get(t) or {}).get("text_index") or (tables.get(t) or {}).get("complex")
+    )
+    if not blocked:
+        return ""
+    shown = "、".join(f"「{t}」" for t in blocked[:5]) + (f"ほか {len(blocked) - 5} 個" if len(blocked) > 5 else "")
+    return (
+        f"表 {shown} は、この PC では書き換えられません（このファイルは並び順の設定が「一般」以外（「日本語」など）で、"
+        "同梱の部品（Jackcess）は、その設定の文字の索引や添付ファイル型の列のある表を書き換えられないため）。"
+        "IT 担当の方に「Microsoft Access Database Engine（64bit）」を入れてもらうと書き換えられます"
+    )
+
+
 def lock_file_problem(path: str) -> str:
     """元のファイルの隣にロックファイル（.laccdb・.ldb）があれば、断る理由（無ければ空）。他のプログラムが開いている印。"""
     if not os.path.isabs(path):

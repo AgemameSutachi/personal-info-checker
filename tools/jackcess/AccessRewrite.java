@@ -4,6 +4,7 @@ import com.healthmarketscience.jackcess.Cursor;
 import com.healthmarketscience.jackcess.DataType;
 import com.healthmarketscience.jackcess.Database;
 import com.healthmarketscience.jackcess.DatabaseBuilder;
+import com.healthmarketscience.jackcess.Index;
 import com.healthmarketscience.jackcess.Table;
 import com.healthmarketscience.jackcess.TableBuilder;
 import com.healthmarketscience.jackcess.complex.Attachment;
@@ -44,6 +45,7 @@ import java.util.TreeSet;
  *                            64MB を超える（載らない）ものは big\tord\t列名\tファイル名\t大きさ（載らなければ -1）
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
+ *   textindex table        … ok\t文字（テキスト・メモ）の列を含む索引の数
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
  *   delete table ords      … ok\tcount
  *   update table n         … 続く n 行（ord\tcolidx\tcell\tcolidx\tcell...）を書き込む → ok\tcount
@@ -354,6 +356,20 @@ public class AccessRewrite {
                         out.println("col\t" + b64(c.getName()) + "\t" + kindOf(c.getType()) + "\t" + c.getLengthInUnits());
                     }
                     out.println("end");
+                } else if (cmd.equals("textindex")) {
+                    // 文字（テキスト・メモ）の列を含む索引の数。並び順が「一般」以外のファイルでは、Jackcess はこの索引を書けない
+                    Table t = db.getTable(unb64(f[1]));
+                    int n = 0;
+                    for (Index ix : t.getIndexes()) {
+                        for (Index.Column ic : ix.getColumns()) {
+                            DataType dt = ic.getColumn().getType();
+                            if (dt == DataType.TEXT || dt == DataType.MEMO) {
+                                n++;
+                                break;
+                            }
+                        }
+                    }
+                    ok(String.valueOf(n));
                 } else if (cmd.equals("read")) {
                     Table t = db.getTable(unb64(f[1]));
                     Set<Integer> want = parseInts(f[2]);

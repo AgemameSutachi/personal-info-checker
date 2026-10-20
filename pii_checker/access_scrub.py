@@ -277,6 +277,7 @@ def scrub_file(path: str) -> dict:
     keep: dict[int, set[int]] = {}  # ページ番号 → 塗りつぶさない行（生きている指し示しの行き先）
     with open(p, "rb") as f:
         pos = PAGE_SIZE
+        f.seek(pos)  # 0 ページ目（ファイルの見出し）を飛ばす（飛ばさないと1ページずれ、最後のページを読み落とす）
         while pos + PAGE_SIZE <= size:
             page = f.read(PAGE_SIZE)
             if page[0] == DATA_PAGE and page[1] == 0x01:

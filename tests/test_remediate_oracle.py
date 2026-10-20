@@ -1,6 +1,6 @@
-"""Oracle のダンプ（旧 exp・expdp）への対処（T2-d）の試験。
+"""Oracle のダンプ（旧 exp・expdp）への対処の試験。
 
-守ること: T2-a〜c と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
+守ること: ほかの形式と同じ（検査は何も書き込まない・書き換えは一時の名前の新ファイルから確定・失敗で元を壊さない・記録とジョブの DB に生の値を入れない）に加えて、
 - 旧 exp: 行の削除・列の削除・ダミー化・表の削除。書き換えたダンプを検査（oracle_dump）で読み直して、消した行・列・表が無く、ダミーの値になり、
   ほかの行・列・表の値が元のまま（全行を比べる）・触らない区画のバイト列が元のまま・検査し直して検出が消える
 - expdp: 行の削除・ダミー化だけ（列・表の削除は、圧縮された DDL を書き換えられないので断る）。ファイルの大きさを変えず、制御ブロックの
@@ -1329,7 +1329,7 @@ def json_text(obj) -> str:
 
 @pytest.mark.parametrize("kind,nth", [("rename", 1), ("rename", 2), ("state", 3)])
 def test_exp_crash_during_commit_is_recovered(tmp_path, monkeypatch, trash, kind, nth):
-    """確定の手順は T2-a と同じ。どの段で落ちても、元か新が元の名前（か「対処前」の名前）で残る。"""
+    """確定の手順はほかの形式と同じ。どの段で落ちても、元か新が元の名前（か「対処前」の名前）で残る。"""
     from test_remediate import SimulatedCrash, crash_after, run_until_crash
 
     p = build_exp(tmp_path)
@@ -1497,7 +1497,7 @@ def test_dp_broken_header_is_not_touched_by_a_rewrite_that_finds_no_table(tmp_pa
 
 
 def test_oracle_rewrite_goes_through_temp_file_and_commit_rewrite(tmp_path, monkeypatch, trash):
-    """確定の手順は T2-a と同じ（一時の新ファイルを書く → fsync → 検査し直す → 記録に「始めた」→ 元を「対処前」の名前でごみ箱へ）。"""
+    """確定の手順はほかの形式と同じ（一時の新ファイルを書く → fsync → 検査し直す → 記録に「始めた」→ 元を「対処前」の名前でごみ箱へ）。"""
     p = build_exp(tmp_path)
     svc, store, job = make_service(tmp_path, [p])
     from pii_checker.remedy_write import sha256_file

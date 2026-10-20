@@ -1,4 +1,4 @@
-"""対処（remediate）で、SQL のダンプ（pg_dump の平文・mysqldump・一般の INSERT 文の .sql）を書き換える部分（T2-b）。
+"""対処（remediate）で、SQL のダンプ（pg_dump の平文・mysqldump・一般の INSERT 文の .sql）を書き換える部分。
 
 決まり:
 - 検査（formats/dbdump.py の scan_sql_lines）と同じ読み方で1行ずつ読み、一時の新ファイルへ1行ずつ書く（巨大でも全文をメモリに載せない。

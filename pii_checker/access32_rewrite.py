@@ -1,4 +1,4 @@
-"""Access データベースを 32bit プロセスで書き換える補助スクリプト（対処 T2-e。Jet 4.0 の ODBC ドライバを使う）。
+"""Access データベースを 32bit プロセスで書き換える補助スクリプト（対処で使う。Jet 4.0 の ODBC ドライバを使う）。
 
 64bit の本体は、ACE（64bit の ODBC）が無い PC で .mdb を書き換えるとき、この補助を子プロセスとして起動する。
 Windows 標準の Jet 4.0（msjet40.dll）は 32bit 版しか無いため、同梱の 32bit Python（python32/）で動かす。

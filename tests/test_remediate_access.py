@@ -1,4 +1,4 @@
-"""Access（.accdb・.mdb）への対処（T2-e）の試験。
+"""Access（.accdb・.mdb）への対処の試験。
 
 使える手段ごとに（無い手段の試験は skip）: ACE（64bit の ODBC）・Jet（Windows 標準の 32bit・同梱の 32bit Python の補助）・
 Jackcess（Java。tools/jackcess の補助を試験の中で javac でビルドして使う）。守ること:

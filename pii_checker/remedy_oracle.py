@@ -61,6 +61,9 @@ RE_UNIT_START = re.compile(
 RE_ANALSTATS_TABLE = re.compile(rb'ANALSTATS TS "((?:[^"\n]|"")*)"')
 RE_ANALSTATS_INDEX = re.compile(rb'ANALSTATS IS "((?:[^"\n]|"")*)"')
 RE_CREATE_INDEX = re.compile(rb'CREATE (?:UNIQUE |BITMAP )?INDEX "((?:[^"\n]|"")*)" ON ')
+# 索引の統計の文（ANALSTATS IS "表" の後ろの SET_INDEX_STATS）と、2 周目の ANALCOMPUTE の ANALYZE INDEX が指す索引の名前
+RE_SET_INDEX_STATS = re.compile(rb"""SET_INDEX_STATS\(NULL,'"((?:[^"\n]|"")*)"'""")
+RE_ANALYZE_INDEX = re.compile(rb'ANALCOMPUTE IS "(?:[^"\n]|"")*" ANALYZE\s+INDEX "((?:[^"\n]|"")*)"')
 RE_ALTER_ADD = re.compile(rb"ALTER TABLE .*? ADD\s+(?:\(\s*)?(?:CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK)\b", re.S)
 RE_COMMENT_COLUMN = re.compile(rb"COMMENT ON COLUMN ")
 
@@ -716,7 +719,8 @@ class _ExpRewriter:
         units = [part[starts[k] : starts[k + 1] if k + 1 < len(starts) else len(part)] for k in range(len(starts))]
         out = [part[: starts[0]]]
         tokens = [b'"' + c.replace('"', '""').encode(self.codec) + b'"' for c in dropped_cols]
-        gone_indexes: set[bytes] = set()
+        # 取り除いた索引の名前（2 周目の区画の ANALCOMPUTE でも使うので、書き換えの間ずっと覚えておく）
+        gone_indexes: set[bytes] = self.__dict__.setdefault("_gone_indexes", set())
         keep_flags = []
         for unit in units:
             drop = False
@@ -742,7 +746,14 @@ class _ExpRewriter:
         for unit, keep in zip(units, keep_flags):
             if keep:
                 mi = RE_ANALSTATS_INDEX.match(unit)
-                if mi is not None and mi.group(1) in gone_indexes:
+                if mi is not None:
+                    # ANALSTATS IS の後ろの名前は表の名前のことがあるので、統計の文の中の索引の名前でも見る
+                    ms = RE_SET_INDEX_STATS.search(unit)
+                    if mi.group(1) in gone_indexes or (ms is not None and ms.group(1) in gone_indexes):
+                        self.stats["statements"] += 1
+                        continue
+                ma = RE_ANALYZE_INDEX.match(unit)
+                if ma is not None and ma.group(1) in gone_indexes:
                     self.stats["statements"] += 1
                     continue
                 out.append(unit)

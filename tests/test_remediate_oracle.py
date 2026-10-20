@@ -516,6 +516,10 @@ def exp_extra_units() -> bytes:
         + 'ANALSTATS IS "IDX_NAME"\n'.encode()
         + struct.pack("<H", 10)
         + b"BEGIN END;\n"
+        # 実物の旧 exp の形: ANALSTATS IS の後ろは表の名前で、索引の名前は SET_INDEX_STATS の中にある
+        + 'ANALSTATS IS "顧客"\n'.encode()
+        + struct.pack("<H", 83)
+        + b"BEGIN  DBMS_STATS.SET_INDEX_STATS(NULL,'\"IDX_NAME\"',NULL,NULL,NULL,30,1,30,1,1,1,0,6); END;\n"
         + 'ALTER TABLE "顧客" ADD CONSTRAINT "PK_C" PRIMARY KEY ("ID") USING INDEX TABLESPACE "USERS" ENABLE\n'.encode()
         + 'COMMENT ON COLUMN "顧客"."電話番号" IS \'電話の列\'\n'.encode()
         + 'COMMENT ON COLUMN "顧客"."備考" IS \'備考の列\'\n'.encode()

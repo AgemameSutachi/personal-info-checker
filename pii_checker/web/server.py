@@ -246,8 +246,10 @@ def create_app(
     def _job_view(job: dict) -> dict:
         runner = registry.get(job["id"], create=False)
         running = bool(runner and runner.running)
-        # 検査中は画面が何度も呼ぶので、直前の集計を少しのあいだ使い回す（集計は件数に比例して重い）。終わった後は毎回数える
-        summary = store.summary_cached(job["id"]) if running else store.summary(job["id"])
+        # 検査中は画面が何度も呼ぶので、直前の集計を少しのあいだ使い回す（集計は件数に比例して重い）。終わった後は毎回数える。
+        # 状態は「終わり」でもスレッドの後片付けがまだ続いていることがある。その間に古い要約で最終の判定を出さないよう、状態も見る
+        use_cache = running and job["state"] == "running"
+        summary = store.summary_cached(job["id"]) if use_cache else store.summary(job["id"])
         v = decide(summary, job["state"])
         if running:
             phase = runner.phase

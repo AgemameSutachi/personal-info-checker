@@ -63,6 +63,58 @@ def test_summary_cached_reuses_and_expires(done_job, monkeypatch):
     assert len(calls) == 2
 
 
+def test_job_view_does_not_reuse_summary_after_finish(done_job):
+    """状態が「終わり」なら、スレッドの後片付けが残っていても古い要約で判定しない（画面の API で確かめる）。"""
+    import json
+    import socket
+    import threading
+    import urllib.request
+
+    import uvicorn
+
+    from pii_checker.web.server import create_app
+
+    store, job = done_job
+    app = create_app(db=store.path, token="t0ken")
+
+    class StillCleaningUp:
+        """状態は done を書いた後、FTP の片付けなどでスレッドがまだ生きている runner の代わり。"""
+
+        running = True
+        phase = "後片付け"
+        current = ""
+
+        def __getattr__(self, name):
+            return None
+
+    app.state.registry._runners[job] = StillCleaningUp()
+    # 検査中に覚えた古い要約（まだ何も数えていない）を仕込む。これが使われると「検出なし」の判定になる
+    stale = app.state.store.summary(job)
+    stale.update(files_done=0, files_with_findings=0, item_status={})
+    app.state.store._summary_cache[job] = (time.monotonic(), 10.0, stale)
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    try:
+        for _ in range(100):
+            if srv.started:
+                break
+            time.sleep(0.05)
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/jobs/{job}", headers={"X-Token": "t0ken"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            view = json.loads(r.read())
+    finally:
+        srv.should_exit = True
+        th.join(timeout=10)
+    assert view["state"] == "done"
+    assert view["summary"]["files_done"] == 5  # 古い 0 ではなく数え直した値
+    assert view["summary"]["files_with_findings"] == 4
+
+
 def test_summary_cached_is_bounded(done_job):
     store, job = done_job
     for i in range(40):

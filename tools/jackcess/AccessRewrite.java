@@ -31,6 +31,10 @@ import java.util.TreeSet;
  *
  * 命令:
  *   open  path             … 開く（書き込み可）
+ *   （検査用。元のファイルには何も書かない）
+ *   openro path            … 読み取り専用で開く
+ *   readall table max      … 表の全行を順に流す。row\tord\tcell... を1行ずつ（ord は read と同じ 1 始まりの順番）、最後に end。
+ *                            max は読む行数の上限（0 は無制限）。行を溜めずに出す
  *   tables                 … table\tname の並び、end
  *   columns table          … col\tname\tkind\tsize の並び、end
  *   read table ords        … row\tord\tcell... の並び、end（cell は下の形式）
@@ -158,6 +162,30 @@ public class AccessRewrite {
                     db = new DatabaseBuilder(new File(unb64(f[1]))).setReadOnly(false).setAutoSync(false).open();
                     db.setEnforceForeignKeys(false);
                     ok(null);
+                } else if (cmd.equals("openro")) {
+                    db = new DatabaseBuilder(new File(unb64(f[1]))).setReadOnly(true).open();
+                    ok(null);
+                } else if (cmd.equals("readall")) {
+                    Table t = db.getTable(unb64(f[1]));
+                    long max = f.length > 2 && !f[2].isEmpty() ? Long.parseLong(f[2]) : 0;
+                    Cursor cur = t.getDefaultCursor();
+                    cur.reset();
+                    long ord = 0;
+                    while ((max <= 0 || ord < max) && cur.moveToNextRow()) {
+                        ord++;
+                        StringBuilder sb = new StringBuilder("row\t" + ord);
+                        for (Column c : t.getColumns()) {
+                            Object v;
+                            try {
+                                v = cur.getCurrentRowValue(c);
+                            } catch (Exception e) {
+                                v = new Object();
+                            }
+                            sb.append('\t').append(cell(v));
+                        }
+                        out.println(sb);
+                    }
+                    out.println("end");
                 } else if (cmd.equals("create")) {
                     db = new DatabaseBuilder(new File(unb64(f[1]))).setFileFormat(Database.FileFormat.V2010).create();
                     db.setEnforceForeignKeys(false);

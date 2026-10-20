@@ -3,7 +3,8 @@
 Access は次の順で読めるものを使う:
   1. 64bit の ACE ODBC ドライバ（accdb/mdb）
   2. 32bit の補助プロセス（Jet4 ドライバ。Access 97 = Jet3 形式や、32bit Office しか無い PC）
-  3. 純 Python の access_parser
+  3. 同梱の Jackcess（Java。ACE の無い PC で .accdb を読む。読み取り専用で開く）
+  4. 純 Python の access_parser
 どれで読めても、加えてファイル全体を生データ走査する（削除済みレコードの残留を拾うため）。
 元のファイルは一時フォルダへ複製してから開く（NAS 上にロックファイルを作らない・元を変えない）。
 """
@@ -333,6 +334,119 @@ def _read_access_helper32(
     return f"32bit {opened.get('driver') if opened else ''}（{opened.get('method') if opened else ''}）"
 
 
+FORCED_READERS: list[str] | None = None  # 試験用: 検査の読み方をこれだけに絞る（odbc・helper32・jackcess・parser）
+READERS_ENV = "PIICHK_ACCESS_READERS"  # 診断・別プロセスの試験用: 環境変数で読み方を絞る（コンマ区切り）
+JACKCESS_STALL_SECONDS = 300  # Java から1行も来ないまま、これだけ経ったら止まったとみなして打ち切る
+
+
+def forced_readers() -> list[str] | None:
+    """検査の読み方を絞る指定（試験用の変数 → 環境変数の順）。無ければ None（全部、既定の順で）。"""
+    if FORCED_READERS is not None:
+        return FORCED_READERS
+    raw = os.environ.get(READERS_ENV, "").strip()
+    return [x.strip() for x in raw.split(",") if x.strip()] if raw else None
+
+
+def _read_access_jackcess(
+    ctx: ScanContext, path: str, col: Collector, item: ItemResult, depth: int, display: str
+) -> str:
+    """同梱の Jackcess（Java）で読む（ACE の無い PC の .accdb 用）。戻り値は手段の名前。読めなければ例外。
+
+    表・行の数え方は remedy_access の JackcessSession.read（対処で書き換えるときの手段）と同じ。
+    読み取り専用で開き、表は1行ずつ流れてくるので溜めない。
+    """
+    import threading
+    import time
+
+    from .. import remedy_access as ra
+
+    if ra.access_format(path) != "ace":
+        raise RuntimeError("Jackcess は .accdb（ACE 形式）だけ読む")
+    env = ra.find_jackcess()
+    if not env:
+        raise RuntimeError("同梱の Jackcess（Java）が見つからない")
+    # ヒープは対処（JackcessSession）と同じ小さめ（検査のワーカーのメモリ上限の内側で動かすため）
+    cmd = [env["java"], "-Xmx768m", "-XX:+UseSerialGC", "-cp", os.pathsep.join(env["classpath"]), "AccessRewrite"]
+    try:
+        pipe = ra._Pipe(cmd)
+    except OSError as e:
+        raise RuntimeError(f"Java を起動できない: {e}") from None
+    last_line = [time.monotonic()]
+    finished = threading.Event()
+
+    def watchdog() -> None:
+        while not finished.wait(5):
+            if time.monotonic() - last_line[0] > JACKCESS_STALL_SECONDS:
+                pipe.proc.kill()  # 読み出し側は「途中で終わった」で失敗し、次の手段へ回る
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
+
+    def call(*fields: str):
+        """命令を1つ送り、「end」までの行（タブで割ったもの）を1行ずつ返す。ok・err は1行だけ返して終わる。"""
+        pipe.send("\t".join(fields))
+        while True:
+            try:
+                parts = pipe.readline().split("\t")
+            except ra.Unavailable as e:
+                raise RuntimeError(f"Jackcess の補助が途中で終わった: {e}") from None
+            last_line[0] = time.monotonic()
+            if parts[0] == "err":
+                msg = ra._unb64(parts[1]) if len(parts) > 1 else ""
+                if _is_password_error(msg):
+                    raise NeedPassword("access", "Access にデータベースパスワードが掛かっている")
+                raise RuntimeError(f"Jackcess で読めなかった: {msg[:200]}")
+            if parts[0] in ("ok", "end"):
+                if parts[0] == "ok":
+                    yield parts
+                return
+            yield parts
+
+    try:
+        list(call("openro", ra._b64(path)))
+        names = [ra._unb64(p[1]) for p in call("tables") if p[0] == "table"]
+        n_tables = 0
+        for name in sorted(names):
+            if name.startswith(("MSys", "~")):
+                continue
+            columns = [ra._unb64(p[1]) for p in call("columns", ra._b64(name)) if p[0] == "col"]
+            n_tables += 1
+            col.pos_sheet = name
+            if col.collect_positions:
+                col.pos_info.setdefault("tables", {})[name] = {"columns": list(columns)}
+            limit = ctx.options.max_rows_per_table or 0
+
+            def rows(name=name, columns=columns, limit=limit):
+                width = len(columns)
+                for p in call("readall", ra._b64(name), str(limit)):
+                    if p[0] != "row":
+                        continue
+                    cells = [ra._parse_cell(t) for t in p[2:]][:width]
+                    # バイナリ・OLE の列は ODBC と同じく空にする（中身は生データ走査が拾う）
+                    yield [None if isinstance(v, ra.Binary) else v for v in cells] + [None] * (width - len(cells))
+
+            stream = rows()
+            col.add_records(
+                columns,
+                stream,
+                lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+                method="表のレコード（Jackcess）",
+            )
+            # 途中で読むのをやめても、残りの行を読み捨てる（残すと次の命令の返事として読まれ、やり取りがずれる）
+            for _ in stream:
+                pass
+        if n_tables == 0:
+            raise RuntimeError("表を1つも読めなかった")
+    finally:
+        finished.set()
+        try:
+            pipe.send("close")
+        except Exception:  # noqa: BLE001  既に終わっていてよい
+            pass
+        pipe.close()
+    return "Jackcess（Java）"
+
+
 def _read_access_parser(ctx: ScanContext, path: str, col: Collector, item: ItemResult) -> str:
     import contextlib
     import io as _io
@@ -394,11 +508,16 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     need_pw = False
     if col.collect_positions:
         col.pos_layout = "access"  # 対処（remedy_access）の位置: シートは表の名前、行は通し番号、列は列の番号
-    for label, fn in (
-        ("64bit ODBC", lambda: _read_access_odbc(ctx, path, col, item, depth, blob.display)),
-        ("32bit 補助", lambda: _read_access_helper32(ctx, path, col, item, depth, blob.display)),
-        ("access_parser", lambda: _read_access_parser(ctx, path, col, item)),
-    ):
+    readers = (
+        ("odbc", "64bit ODBC", lambda: _read_access_odbc(ctx, path, col, item, depth, blob.display)),
+        ("helper32", "32bit 補助", lambda: _read_access_helper32(ctx, path, col, item, depth, blob.display)),
+        ("jackcess", "Jackcess", lambda: _read_access_jackcess(ctx, path, col, item, depth, blob.display)),
+        ("parser", "access_parser", lambda: _read_access_parser(ctx, path, col, item)),
+    )
+    forced = forced_readers()
+    for key, label, fn in readers:
+        if forced is not None and key not in forced:
+            continue
         try:
             used = fn()
             break

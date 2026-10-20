@@ -883,3 +883,119 @@ def test_records_and_job_db_have_no_raw_values(case, trash, tmp_path):
     con.commit()
     con.close()
     assert _leak([str(q)], needles)
+
+
+# ---------------------------------------------------------------- 検査の読み方に Jackcess（ACE の無い PC の .accdb）
+
+
+def _scan_items(p: Path, tmp_path: Path):
+    (tmp_path / "scantmp").mkdir(exist_ok=True)
+    res = engine.scan_file(str(p), ScanOptions(temp_dir=str(tmp_path / "scantmp")), PasswordBook())
+    return res.items
+
+
+def _jackcess_sample(tmp_path: Path, folder: str = "src", n: int = N) -> Path:
+    """Jackcess で作った .accdb（ACE の無い PC に持ち込まれる検体と同じ作り）。"""
+    if not available("jackcess"):
+        pytest.skip("Jackcess が使えない環境")
+    p = tmp_path / folder / "people.accdb"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    build_with_jackcess(p, people(n))
+    return p
+
+
+def test_jackcess_reader_scans_accdb_with_locations_and_leaves_source_untouched(tmp_path, monkeypatch):
+    """ACE も 32bit 補助も使えない状況（Jackcess だけ）でも、表・列名・行の位置つきで検出でき、元のファイルは変わらない。"""
+    from pii_checker.formats import database
+
+    p = _jackcess_sample(tmp_path)
+    before = p.read_bytes()
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    items = _scan_items(p, tmp_path)
+    assert items[0].status.name != "UNCHECKABLE", items[0].reason
+    assert "Jackcess（Java）" in items[0].method
+    locations = [f.location for it in items for f in it.findings]
+    assert any("表「people」1行目 列「メール」" in loc for loc in locations), locations[:5]
+    assert p.read_bytes() == before and not [f for f in p.parent.iterdir() if f.suffix in ra.LOCK_SUFFIXES]
+
+
+def test_jackcess_reader_failure_falls_back_to_next_reader(tmp_path, monkeypatch):
+    """Java が無い・落ちたときは、理由を残して次の読み方へ回る（ここでは Jackcess だけにして、検査不能の理由に出ることを確かめる）。"""
+    from pii_checker.formats import database
+
+    p = _jackcess_sample(tmp_path)
+    monkeypatch.setattr(ra, "find_jackcess", lambda: None)
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    items = _scan_items(p, tmp_path)
+    assert items[0].status.name == "UNCHECKABLE" and "Jackcess: RuntimeError" in items[0].reason
+    # 既定の順（絞らない）なら access_parser まで進む。Jackcess の失敗は「先に試して失敗した方法」に残る
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess", "parser"])
+    items = _scan_items(p, tmp_path)
+    assert "Jackcess" in (items[0].reason + " ".join(items[0].notes))
+
+
+def test_jackcess_reader_killed_midway_falls_back(tmp_path, monkeypatch):
+    """読んでいる途中で Java が落ちたとき（途中までの検出を残さず）失敗として次の手段へ回る。"""
+    from pii_checker.formats import database
+
+    p = _jackcess_sample(tmp_path)
+    monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+    real = ra._Pipe.readline
+    state = {"n": 0}
+
+    def flaky(self):
+        state["n"] += 1
+        if state["n"] > 12:
+            self.proc.kill()
+        return real(self)
+
+    monkeypatch.setattr(ra._Pipe, "readline", flaky)
+    items = _scan_items(p, tmp_path)
+    assert items[0].status.name == "UNCHECKABLE" and "途中で終わった" in items[0].reason
+
+
+def test_jackcess_reader_positions_match_other_readers(tmp_path, monkeypatch):
+    """Jackcess で読んだときの位置（表・行の通し番号・列・値の範囲）が、ほかの読み方（64bit ODBC・純 Python）と同じになる。"""
+    from pii_checker.formats import database
+
+    if not available("ace"):
+        pytest.skip("基準にする ACE が使えない環境")
+    if not available("jackcess"):
+        pytest.skip("Jackcess が使えない環境")
+    p = tmp_path / "src" / "people.accdb"
+    build_db(p)
+
+    def positions(readers) -> dict:
+        monkeypatch.setattr(database, "FORCED_READERS", readers)
+        got = remediate.collect_task({"path": str(p), "options": ScanOptions(temp_dir=str(tmp_path))})
+        assert got["layout"] == "access" and got["status"] == "scanned"
+        return {k: list(v) for k, v in got["positions"].items()}, got["db_schema"]["tables"]
+
+    base, base_tables = positions(["odbc"])
+    assert base
+    jack, jack_tables = positions(["jackcess"])
+    assert jack == base
+    assert {k: v["columns"] for k, v in jack_tables.items()} == {k: v["columns"] for k, v in base_tables.items()}
+    assert positions(["parser"])[0] == base
+
+
+def test_jackcess_only_pc_can_delete_and_dummy_rows(tmp_path, monkeypatch, trash):
+    """ACE の無い PC（検査も書き換えも Jackcess だけ）で、Jackcess で作った .accdb の行の削除・ダミー化ができる。"""
+    from pii_checker.formats import database
+
+    for method in ("delete_rows", "dummy"):
+        # 行数は 60 に抑える（Jackcess が書いたメモの本文の塗りつぶしは、行数が多いとデータの偶然の並びで1つ消し損ねる場合が
+        # あり、確かめの門が止める。access_scrub.scrub_orphan_long_values の既知の限界。ここは読み方の試験）
+        rows = people(60)
+        p = _jackcess_sample(tmp_path, method, 60)
+        original = p.read_bytes()
+        monkeypatch.setattr(database, "FORCED_READERS", ["jackcess"])
+        monkeypatch.setattr(ra, "FORCED_STRATEGIES", ["jackcess"])
+        (tmp_path / ("svc_" + method)).mkdir()
+        svc, store, job = make_service(tmp_path / ("svc_" + method), [p])
+        r = run_ok(svc, job, p, method=method, **({"dummy_mode": "same"} if method == "dummy" else {}))
+        assert r["changed"]["engine"] == ra.STRATEGY_LABELS["jackcess"]
+        if method == "delete_rows":
+            assert r["changed"]["rows"] == len([1 for _i, row in rows if has_pii(row)])
+        assert r["remaining"]["total"] == 0
+        assert _leak([str(p)], needles_of(rows)) == [] and original in [f.read_bytes() for f in trash.files()]

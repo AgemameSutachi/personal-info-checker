@@ -21,9 +21,11 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
+            constraints.txt
       - name: 依存を入れる
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+        # 版は constraints.txt で手元と同じにそろえる（新しい版を拾って突然落ちないように）
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
       - name: 書式（black）
-        run: python -m black --check pii_checker tests build.py entry_app.py entry_cli.py
+        run: python -m black --check pii_checker tests tools build.py entry_app.py entry_cli.py
       - name: 試験
         run: python -m pytest tests -q -rs

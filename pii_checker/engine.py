@@ -224,6 +224,10 @@ class Collector:
     pos_layout: str = ""  # 取り込み側（形式ごとの処理）が決める。空のあいだは位置を集めない
     pos_sheet: str = ""
     cell_pos: tuple | None = None  # 表のセルを検査している間だけ（行, 列。どちらも 1 始まり・0 始まり）
+    # 表の行を、検査での通し番号（r_idx）ではなく別の鍵で位置に残すための関数（SQLite の rowid・SQL ダンプの行番号など）。
+    # 表を読んでいる間だけ形式ごとの処理が入れる。None のときは通し番号をそのまま使う
+    row_key: Callable[[int], int] | None = None
+    pos_off: bool = False  # True の間は位置を集めない（書き換えられない表を読んでいるとき）
     line_base: int | None = None  # 行の塊を検査している間だけ（塊の先頭の行番号）
 
     def add_text(
@@ -351,10 +355,12 @@ class Collector:
 
     def _record_position(self, hit, rank: int, norm: str) -> None:
         """検出1件の構造の位置（行・列・値の開始と終了）を集める。rank 0 は「人の手がかり待ち」（finish で決める）。"""
-        if self.pos_layout.startswith("csv") or self.pos_layout == "xlsx":
-            if self.cell_pos is None:
+        if self.pos_layout.startswith("csv") or self.pos_layout in ("xlsx", "sqlite", "sqldump"):
+            if self.cell_pos is None or self.pos_off:
                 return
             row, col = self.cell_pos
+            if self.row_key is not None:
+                row = self.row_key(row)
             start, end = hit.start, hit.end
         elif self.pos_layout == "lines" and self.line_base is not None:
             row = self.line_base + norm.count("\n", 0, hit.start)

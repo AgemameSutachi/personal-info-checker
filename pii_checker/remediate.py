@@ -1,4 +1,5 @@
-"""検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル）。
+"""検出した個人情報への対処（T2-a: 土台・ファイルの削除・csv/tsv/txt・xlsx/xlsm、T2-a2: 書庫の中のファイル、
+T2-b: SQLite・SQL のダンプ。Access・Oracle のダンプはファイルの削除だけ）。
 
 決まり:
 - 対処は、人が画面で選んで実行したときだけ。検査（scan）は何も書き込まない。自動では何もしない。
@@ -53,6 +54,7 @@ METHOD_LABELS = {
     "delete_columns": "該当する列を削除",
     "dummy": "ダミー化（該当する値だけを置き換える）",
     "delete_sheet": "該当するシートを削除",
+    "delete_table": "該当する表を削除（その表のデータはすべて消える）",
     # 書庫の中のファイルに対する方法（T2-a2）
     "remove_entry": "書庫から取り除く（中のファイルを削除）",
     "convert_zip": "zip に作り直す（形式が変わる）",
@@ -72,7 +74,10 @@ LAYOUT_METHODS = {
     "csv": ("delete_rows", "delete_columns", "dummy"),
     "lines": ("delete_rows", "dummy"),
     "xlsx": ("delete_rows", "delete_columns", "dummy", "delete_sheet"),
+    "sqlite": ("delete_rows", "delete_columns", "dummy", "delete_table"),
+    "sqldump": ("delete_rows", "delete_columns", "dummy", "delete_table"),
 }
+DB_LAYOUTS = ("sqlite", "sqldump")  # 位置の「シート」が表の名前になる形式
 XLSX_EXTS = (".xlsx", ".xlsm")
 NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
 STATES_UNFINISHED = ("started", "renamed", "swapped")  # 途中で止まった記録の状態（立て直しの対象）
@@ -499,6 +504,14 @@ def collect_task(args: dict) -> dict:
         reason = result.items[0].reason if result.items else ""
         raise RemedyError(f"元のファイルを読めませんでした: {reason}" if reason else "元のファイルを読めませんでした")
     others = sum(sum(it.finding_counts.values()) for it in result.items if it is not top)
+    db_schema: dict = {}
+    if top.pos_layout == "sqlite" and top.positions:
+        from .remedy_sqlite import schema_notes
+
+        try:
+            db_schema = schema_notes(args["path"], sorted({k[0] for k in top.positions}))
+        except Exception:  # noqa: BLE001  下見の注意が取れなくても、対処そのものは止めない
+            db_schema = {}
     return {
         "source": result.source,
         "status": top.status.value,
@@ -509,6 +522,7 @@ def collect_task(args: dict) -> dict:
         "positions": top.positions,
         "top_findings": sum(top.finding_counts.values()),
         "other_findings": others,
+        "db_schema": db_schema,
     }
 
 
@@ -548,6 +562,21 @@ def apply_task(args: dict) -> dict:
     return prepare_plain(args)
 
 
+def rewrite_file(src: str, dst: str, layout: str, method: str, sel: Selection, maker, name: str) -> dict:
+    """形式（検査のときに決まる位置の意味）に応じて、一時の新ファイル dst へ書き換えた結果を書く。元の src には書かない。"""
+    if layout == "xlsx":
+        return rewrite_xlsx_file(src, dst, method, sel, maker, keep_vba=name.lower().endswith(".xlsm"))
+    if layout == "sqlite":
+        from .remedy_sqlite import rewrite_sqlite_file
+
+        return rewrite_sqlite_file(src, dst, method, sel, maker)
+    if layout == "sqldump":
+        from .remedy_sqldump import rewrite_sql_dump_file
+
+        return rewrite_sql_dump_file(src, dst, method, sel, maker)
+    return rewrite_text_file(src, dst, layout, method, sel, maker)
+
+
 def _verify_new_file(tmp_new: str, options: ScanOptions, args: dict, dummies: list[str], book=None) -> dict:
     """出来上がった新ファイルを検査し直して、開けること・残った検出の数を確かめる（元には触らない）。"""
     try:
@@ -581,10 +610,7 @@ def prepare_plain(args: dict) -> dict:
     maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
     orig_sha = sha256_file(path)
     try:
-        if got["layout"] == "xlsx":
-            stats = rewrite_xlsx_file(path, tmp_new, method, sel, maker, keep_vba=path.lower().endswith(".xlsm"))
-        else:
-            stats = rewrite_text_file(path, tmp_new, got["layout"], method, sel, maker)
+        stats = rewrite_file(path, tmp_new, got["layout"], method, sel, maker, path)
         fsync_path(tmp_new)
         if sha256_file(path) != orig_sha:
             raise RemedyError("書き換えている間に元のファイルが変わりました。何も変えていません")
@@ -646,12 +672,7 @@ def prepare_inner(args: dict) -> dict:
                 raise RemedyError("選んだ種類・確度の検出が、ファイルに見つかりませんでした（何も変えていません）")
             maker = DummyMaker(args.get("dummy_mode") or "same") if method == "dummy" else None
             new_leaf = os.path.join(env.new_dir(), res.leaf_name)
-            if got["layout"] == "xlsx":
-                stats = rewrite_xlsx_file(
-                    res.leaf_path, new_leaf, method, sel, maker, keep_vba=res.leaf_name.lower().endswith(".xlsm")
-                )
-            else:
-                stats = rewrite_text_file(res.leaf_path, new_leaf, got["layout"], method, sel, maker)
+            stats = rewrite_file(res.leaf_path, new_leaf, got["layout"], method, sel, maker, res.leaf_name)
         dest = aw.zip_target_for(path) if convert else path
         if convert and os.path.exists(_long(dest)):
             raise RemedyError(
@@ -748,18 +769,48 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     status = info.get("status")
     if status == Status.NEEDS_PASSWORD.value:
         return "パスワードが必要な（暗号化された）ファイルは、中身を書き換えられません。ファイルの削除はできます"
+    kind_reason = file_only_reason(info.get("kind") or "")
+    if kind_reason:
+        return kind_reason
     if status != Status.SCANNED.value:
         return "中身を最後まで構造どおりに読めなかったファイルは、位置が分からないため中身を書き換えられません。ファイルの削除はできます"
     layout = info.get("layout") or ""
     family = "csv" if layout.startswith("csv") else layout
     if family not in LAYOUT_METHODS:
-        return "この形式の中身の書き換えには、まだ対応していません（対応: csv・tsv・txt・xlsx・xlsm）。ファイルの削除はできます"
+        return (
+            "この形式の中身の書き換えには、まだ対応していません"
+            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・SQL のダンプ）。ファイルの削除はできます"
+        )
     if family == "xlsx" and not path.lower().endswith(XLSX_EXTS):
         return "xlsx・xlsm 以外の Excel 形式は、中身を書き換えられません。ファイルの削除はできます"
     if info.get("overflow"):
         return "検出が多すぎて（200 万件超）位置を最後まで集められませんでした。ファイルの削除はできます"
     if method not in LAYOUT_METHODS[family]:
         return "この形式では選べない方法です"
+    if family == "sqlite":
+        from .remedy_sqlite import sidecar_problem, version_problem
+
+        return sidecar_problem(path) or version_problem(method)
+    return ""
+
+
+def file_only_reason(kind: str) -> str:
+    """中身の書き換えを作っていない形式（ファイルの削除だけできる）の理由。当てはまらなければ空。"""
+    if kind.startswith("Access"):
+        return (
+            "Access（.accdb・.mdb）は、書き換えの手段（ODBC ドライバ・Access 本体）が環境によって違うため、"
+            "いまはファイルの削除だけに対応しています"
+        )
+    if "Oracle" in kind and "ダンプ" in kind:
+        return (
+            "Oracle のダンプ（exp・expdp）は、長さ・区画の作りが細かく、書き換えて読み込める形を保つのが難しいため、"
+            "いまはファイルの削除だけに対応しています（中身の対処は今後対応します）"
+        )
+    if "PostgreSQL" in kind and "custom" in kind:
+        return (
+            "PostgreSQL のカスタム形式（-Fc）のダンプは、いまはファイルの削除だけに対応しています"
+            "（平文の SQL のダンプなら、行・列・表の対処ができます）"
+        )
     return ""
 
 
@@ -976,6 +1027,10 @@ class RemedyService:
             for m in METHOD_LABELS:
                 if m in ARCHIVE_ONLY_METHODS and not inner:
                     continue  # 実ファイルには出さない（書庫の中のファイルにだけ使える方法）
+                if m == "delete_table" and got["layout"] not in DB_LAYOUTS:
+                    continue  # 表の削除は、SQLite・SQL のダンプだけ
+                if m == "delete_sheet" and got["layout"] in DB_LAYOUTS:
+                    continue  # シートは Excel の言い方（DB は表）
                 reason = unsupported_reason(m, leaf_name, got)
                 label = ARCHIVE_DELETE_LABEL if (inner and m == "delete_file") else METHOD_LABELS[m]
                 methods[m] = {"label": label, "available": not reason, "reason": reason}
@@ -988,6 +1043,7 @@ class RemedyService:
                 "other_findings": got["other_findings"],
                 "dummy_modes": DUMMY_MODES,
                 "recycle_bin": has_recycle_bin(a.top_path),
+                "db_schema": got.get("db_schema") or {},
             }
             if inner:
                 a.info["archive"] = got["archive"]
@@ -1091,10 +1147,11 @@ class RemedyService:
         rows, cols = sel.rows(), sel.cols()
         n_rows = sum(len(v) for v in rows.values())
         n_cols = sum(len(v) for v in cols.values())
+        schema = a.info.get("db_schema") or {}
         sample: list[str] = []
         for sheet in sorted(rows):
             for r in sorted(rows[sheet])[: SAMPLE_ROWS - len(sample)]:
-                sample.append(f"{sheet}!{r}" if sheet else str(r))
+                sample.append(row_label(layout, sheet, r, schema))
             if len(sample) >= SAMPLE_ROWS:
                 break
         changes: dict = {"detections": sel.detections}
@@ -1106,12 +1163,12 @@ class RemedyService:
                 out["warnings"].append("1 行目（見出し行の可能性）も削除されます")
         elif method == "delete_columns":
             changes["cols"] = n_cols
-            letters = [f"{s}!{_letters(c)}" if s else _letters(c) for s in sorted(cols) for c in sorted(cols[s])]
+            letters = [col_label(layout, s, c, schema) for s in sorted(cols) for c in sorted(cols[s])]
             out["summary"] = f"{n_cols:,} 列を削除します（検出 {sel.detections:,} 件を含む列）"
             out["sample_cols"] = letters[:SAMPLE_ROWS]
         elif method == "dummy":
             changes["cells"] = sel.cell_count()
-            what = "行" if layout == "lines" else "セル"
+            what = "行" if layout == "lines" else ("欄" if layout in DB_LAYOUTS else "セル")
             out["summary"] = (
                 f"{changes['cells']:,} {what}の検出した値 {sel.detections:,} 件を置き換えます（{DUMMY_MODES[p['dummy_mode']]}）"
             )
@@ -1124,9 +1181,16 @@ class RemedyService:
             changes["sheet_names"] = targets
             out["summary"] = f"{len(targets)} シートを削除します: " + "、".join(targets)
             out["warnings"].append("ブックのすべてのシートは削除できません（1つ以上のシートが残る選びにしてください）")
+        elif method == "delete_table":
+            targets = sel.sheets()
+            changes["tables"] = len(targets)
+            changes["table_names"] = targets
+            out["summary"] = f"{len(targets)} 個の表を削除します: " + "、".join(targets)
         out["changes"] = changes
         if layout == "xlsx" and method != "dummy":
             out["warnings"].extend(XLSX_WARNINGS)
+        if layout in DB_LAYOUTS:
+            out["warnings"].extend(db_warnings(layout, method, sel, schema))
         if layout.startswith("csv") or layout == "lines":
             out["warnings"].append("文字コード・BOM・改行・区切り・引用符の付け方は元のまま保ちます")
         if a.info.get("other_findings"):
@@ -1401,6 +1465,134 @@ class RemedyService:
             self.store.update_remediation(rec["id"], state=state, note=json.dumps(plan, ensure_ascii=False))
             done.append({"id": rec["id"], "top_path": rec["top_path"], "state": state, "message": msg})
         return done
+
+
+def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> str:
+    """下見に出す「変わる行」の呼び名（Excel・csv は行番号、SQLite は rowid、SQL のダンプは行番号・何組目か）。"""
+    if layout == "sqldump":
+        from .formats.dbdump import ROW_KEY_SHIFT
+
+        line, n = key >> ROW_KEY_SHIFT, key & ((1 << ROW_KEY_SHIFT) - 1)
+        return f"{sheet}: {line} 行目" if n == 0 else f"{sheet}: {line} 行目〜の {n} 組目"
+    if layout == "sqlite":
+        info = ((schema or {}).get("tables") or {}).get(sheet)
+        if info is not None and not info.get("has_rowid", True):
+            return f"{sheet}: {key} 行目"
+        return f"{sheet}: rowid {key}"
+    return f"{sheet}!{key}" if sheet else str(key)
+
+
+def col_label(layout: str, sheet: str, idx0: int, schema: dict | None = None) -> str:
+    """下見に出す「変わる列」の呼び名（Excel は列の文字、DB は列名か何番目か）。"""
+    if layout in DB_LAYOUTS:
+        cols = (((schema or {}).get("tables") or {}).get(sheet) or {}).get("columns") or []
+        return f"{sheet}.{cols[idx0]}" if idx0 < len(cols) else f"{sheet} の {idx0 + 1} 番目の列"
+    return f"{sheet}!{_letters(idx0)}" if sheet else _letters(idx0)
+
+
+def _key_columns(info: dict, cols: list, idxs, kinds: tuple) -> list[str]:
+    """選んだ列のうち、主キー・一意の索引・外部キーなど（kinds のキー）に使われているものの名前。"""
+    names = []
+    for i in sorted(idxs):
+        if i < len(cols) and any(cols[i] in (info.get(k) or []) for k in kinds):
+            names.append(cols[i])
+    return names
+
+
+def db_warnings(layout: str, method: str, sel: Selection, schema: dict) -> list[str]:
+    """SQLite・SQL のダンプの下見の注意（値は含めない）。"""
+    out: list[str] = []
+    tables = (schema or {}).get("tables") or {}
+    if layout == "sqlite":
+        out.append(
+            "元のファイルは書き換えず、写しに SQL を当てて作ります。終わりに VACUUM（空き領域も詰める）をかけ、"
+            "消した値がファイルの空きに残らないようにします（ファイルは小さくなることがあります）"
+        )
+        out.append(
+            "外部キーの連鎖削除は動かしません。その表のトリガーは書き換えの間だけ外し、終わりに元の定義で作り直します"
+        )
+        for t in sel.sheets():
+            info = tables.get(t) or {}
+            by = "、".join(info.get("referenced_by") or [])
+            if method == "delete_rows" and by:
+                out.append(
+                    f"表「{t}」は、ほかの表（{by}）が外部キーで参照しています。行を消すと、参照先が無くなる行ができます"
+                )
+            if method == "delete_table":
+                extra = []
+                if info.get("indexes"):
+                    extra.append(f"索引 {info['indexes']} 個")
+                if info.get("triggers"):
+                    extra.append(f"トリガー {info['triggers']} 個")
+                tail = f"。表に付いている{'・'.join(extra)}も一緒に消えます" if extra else ""
+                out.append(f"表「{t}」のデータはすべて消えます（検出した行だけではありません）{tail}")
+                if by:
+                    out.append(f"表「{t}」は、ほかの表（{by}）が外部キーで参照しています")
+                if info.get("dependents"):
+                    out.append(
+                        f"表「{t}」を使うビュー・トリガー（{'、'.join(info['dependents'])}）は、あとで動かなくなります"
+                    )
+        if method == "delete_columns":
+            for t, idxs in sel.cols().items():
+                info = tables.get(t) or {}
+                cols = info.get("columns") or []
+                for i in sorted(idxs):
+                    if i >= len(cols):
+                        continue
+                    name = cols[i]
+                    why = []
+                    if name in (info.get("pk") or []):
+                        why.append("主キー")
+                    if name in (info.get("unique") or []):
+                        why.append("一意の索引")
+                    elif name in (info.get("indexed") or []):
+                        why.append("索引")
+                    if name in (info.get("fk_from") or []) or name in (info.get("referenced") or []):
+                        why.append("外部キー")
+                    deps = (info.get("col_deps") or {}).get(name)
+                    if deps:
+                        why.append(f"ビュー・トリガー（{'、'.join(deps)}）")
+                    if why:
+                        out.append(
+                            f"表「{t}」の列「{name}」は{'・'.join(why)}に使われているため、SQLite が削除を断ることがあります"
+                            "（断られたら何も変わりません）"
+                        )
+        if method == "dummy":
+            for t, idxs in sel.cols().items():
+                info = tables.get(t) or {}
+                keyed = _key_columns(info, info.get("columns") or [], idxs, ("pk", "unique", "fk_from", "referenced"))
+                if keyed:
+                    out.append(
+                        f"表「{t}」の列（{'、'.join(keyed)}）は主キー・一意の索引・外部キーに使われています。置き換えると、"
+                        "ほかの表との突き合わせが壊れたり、一意の制約で失敗したりすることがあります（失敗したら何も変わりません）"
+                    )
+        out.append(
+            "-wal・-shm・-journal の付属ファイルが元のファイルのそばにあるときは、他のプログラムが開いている可能性があるため実行を断ります"
+        )
+    else:
+        out.append(
+            "SQL のダンプを1行ずつ読みながら新しいファイルへ書きます。触らない行は元のバイト列のまま写し、文字コード・改行も元のままです"
+        )
+        if method == "delete_rows":
+            out.append(
+                "COPY のデータ行と、INSERT 文の VALUES の1組（1行）を取り除きます。組がすべて無くなった INSERT 文は文ごと消えます"
+            )
+        elif method == "delete_columns":
+            out.append(
+                "COPY の列・INSERT の列名と値・CREATE TABLE の列の定義を取り除きます。その列を使う索引・制約の文（CREATE INDEX・"
+                "ALTER TABLE … ADD CONSTRAINT・列のコメント）も取り除きます。ほかの表の外部キーがその列を参照している場合は、読み込み時に失敗します"
+            )
+        elif method == "dummy":
+            out.append("INSERT の値は、元の引用符・エスケープの流儀で書き直します（数値だった値は文字列になります）")
+        elif method == "delete_table":
+            out.append(
+                "CREATE TABLE・COPY のブロック・INSERT 文・DROP TABLE・LOCK TABLES・索引・制約・権限・コメントなど、その表の文を取り除きます。"
+                "表のデータはすべて消えます（検出した行だけではありません）。ほかの表の外部キーがその表を参照している場合は、読み込み時に失敗します"
+            )
+        out.append(
+            "pg_dump のカスタム形式・ディレクトリ形式、Oracle のダンプは、いまはファイルの削除だけです（平文の SQL のみ対応）"
+        )
+    return out
 
 
 def _letters(idx0: int) -> str:

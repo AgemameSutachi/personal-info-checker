@@ -166,6 +166,68 @@ def _parse_values(s: str, pos: int):
     return rows, pos
 
 
+def parse_values_spans(s: str, pos: int):
+    """_parse_values と同じ読み方で、各組・各値の元の文字列の位置も返す（対処の書き換え用。検査は使わない）。
+
+    戻り値は（組のリスト, 読み終えた位置）。組は (開始, 終了, 閉じたか, 値のリスト)、値は (開始, 終了, 文字列か None, 引用符つきか)。
+    値の位置は「区切りの , や ( ) の間」で、前後の空白も含む。_parse_values と読み方が食い違わないよう、試験で突き合わせている。
+    """
+    rows = []
+    n = len(s)
+    while pos < n:
+        while pos < n and s[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= n or s[pos] != "(":
+            break
+        t_start = pos
+        pos += 1
+        cells: list[tuple[int, int, str | None, bool]] = []
+        cur: list[str] = []
+        quoted = False
+        c_start = pos
+        closed = False
+        while pos < n:
+            ch = s[pos]
+            if ch == "'":
+                pos += 1
+                buf = []
+                while pos < n:
+                    c = s[pos]
+                    if c == "\\" and pos + 1 < n:
+                        buf.append({"n": "\n", "t": "\t", "r": "\r", "0": ""}.get(s[pos + 1], s[pos + 1]))
+                        pos += 2
+                        continue
+                    if c == "'":
+                        if pos + 1 < n and s[pos + 1] == "'":
+                            buf.append("'")
+                            pos += 2
+                            continue
+                        pos += 1
+                        break
+                    buf.append(c)
+                    pos += 1
+                cur.append("".join(buf))
+                quoted = True
+                continue
+            if ch == ",":
+                token = "".join(cur).strip()
+                cells.append((c_start, pos, None if (not quoted and token.upper() == "NULL") else token, quoted))
+                cur, quoted = [], False
+                pos += 1
+                c_start = pos
+                continue
+            if ch == ")":
+                token = "".join(cur).strip()
+                cells.append((c_start, pos, None if (not quoted and token.upper() == "NULL") else token, quoted))
+                pos += 1
+                closed = True
+                break
+            cur.append(ch)
+            pos += 1
+        rows.append((t_start, pos, closed, cells))
+    return rows, pos
+
+
 def scan_sql_text(text: str, col: Collector, item: ItemResult) -> None:
     """SQL 文を読む（メモリに読み込んだ本文）。列名の無い INSERT の見出しには、後ろにある CREATE TABLE も使う。"""
     import io
@@ -174,6 +236,7 @@ def scan_sql_text(text: str, col: Collector, item: ItemResult) -> None:
     scan_sql_lines(lines, col, item, create_cols=parse_create_tables(text))
 
 
+ROW_KEY_SHIFT = 24  # 位置の鍵 = 行番号 << 24 | 文の中の組の番号（対処の書き換え側 remedy_sqldump も同じ値を使う）
 RE_CREATE_START = re.compile(r"^\s*CREATE\s+TABLE\b", re.I)
 SQL_OTHER_BLOCK = 200  # COPY・INSERT 以外の行は、この行数ずつまとめて本文として検査する
 SQL_STMT_LIMIT = 50_000_000  # 1つの INSERT 文として連結する文字数の上限（閉じない文で際限なく溜めない）
@@ -230,18 +293,26 @@ def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | 
             table = _clean_ident(m.group(1))
             columns = [_clean_ident(c) for c in m.group(2).split(",")]
 
-            def rows():
-                for _, ln in it:
+            cur_line = [0]  # いま読んでいるデータ行のファイル上の行番号（対処のための位置の鍵に使う）
+
+            def rows(cur_line=cur_line):
+                for no, ln in it:
                     if ln == "\\.":
                         return
+                    cur_line[0] = no
                     yield [_unescape_copy(v) for v in ln.split("\t")]
 
-            col.add_records(
-                columns,
-                rows(),
-                lambda r, c, table=table, columns=columns, start=ln_no: f"表「{table}」データ{r}行目（{start + r}行目） 列「{columns[c] if c < len(columns) else c + 1}」",
-                method="COPY データ",
-            )
+            col.pos_sheet = table
+            col.row_key = lambda r, cur_line=cur_line: cur_line[0] << ROW_KEY_SHIFT
+            try:
+                col.add_records(
+                    columns,
+                    rows(),
+                    lambda r, c, table=table, columns=columns, start=ln_no: f"表「{table}」データ{r}行目（{start + r}行目） 列「{columns[c] if c < len(columns) else c + 1}」",
+                    method="COPY データ",
+                )
+            finally:
+                col.row_key = None
             n_copy += 1
             continue
         mi = RE_INSERT.search(line)
@@ -263,20 +334,32 @@ def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | 
             if not columns:
                 columns = create_cols.get(table) or create_cols.get(table.split(".")[-1]) or []
             values, _ = _parse_values(stmt, mi.end())
-            if columns:
-                col.add_records(
-                    columns,
-                    values,
-                    lambda r, c, table=table, columns=columns, i=ln_no: f"表「{table}」INSERT（{i}行目〜）{r}件目 列「{columns[c] if c < len(columns) else c + 1}」",
-                    method="INSERT 文",
-                )
-            else:
-                for r, row in enumerate(values, start=1):
-                    for c, v in enumerate(row):
-                        if v:
-                            col.add_text(
-                                v, f"表「{table}」INSERT（{ln_no}行目〜）{r}件目 {c + 1}番目の値", method="INSERT 文"
-                            )
+            col.pos_sheet = table
+            # 位置の鍵は（文の先頭の行番号, 文の中の何組目か）。COPY の行（r が 0）とは重ならない
+            col.row_key = lambda r, i=ln_no: (i << ROW_KEY_SHIFT) | r
+            try:
+                if columns:
+                    col.add_records(
+                        columns,
+                        values,
+                        lambda r, c, table=table, columns=columns, i=ln_no: f"表「{table}」INSERT（{i}行目〜）{r}件目 列「{columns[c] if c < len(columns) else c + 1}」",
+                        method="INSERT 文",
+                    )
+                else:
+                    for r, row in enumerate(values, start=1):
+                        for c, v in enumerate(row):
+                            if v:
+                                col.cell_pos = (r, c)
+                                try:
+                                    col.add_text(
+                                        v,
+                                        f"表「{table}」INSERT（{ln_no}行目〜）{r}件目 {c + 1}番目の値",
+                                        method="INSERT 文",
+                                    )
+                                finally:
+                                    col.cell_pos = None
+            finally:
+                col.row_key = None
             n_insert += 1
             continue
         if RE_CREATE_START.match(line):

@@ -423,23 +423,50 @@ def handle_sqlite(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     ok = False
     try:
         names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        for name in names:
-            cur = conn.execute(f'SELECT * FROM "{name.replace(chr(34), chr(34) * 2)}"')
-            columns = [d[0] for d in cur.description]
+        # 対処のための位置集め: 行は rowid（rowid の無い表は通し番号）で残す。仮想表などは書き換えないので位置を集めない
+        collecting = col.collect_positions
+        unsafe = set()
+        if collecting:
+            from ..remedy_sqlite import unsafe_tables
 
-            def rows(cur=cur):
+            col.pos_layout = "sqlite"
+            unsafe = unsafe_tables(conn)
+        for name in names:
+            alias = None
+            if collecting:
+                from ..remedy_sqlite import row_key_alias
+
+                col.pos_sheet = name
+                col.pos_off = name in unsafe
+                alias = None if col.pos_off else row_key_alias(conn, name)
+            q = '"' + name.replace(chr(34), chr(34) * 2) + '"'
+            cur = conn.execute(f"SELECT {alias}, * FROM {q}" if alias else f"SELECT * FROM {q}")
+            columns = [d[0] for d in cur.description][1 if alias else 0 :]
+            cur_key = [0]  # いま読んでいる行の rowid
+
+            def rows(cur=cur, alias=alias, cur_key=cur_key):
                 while True:
                     batch = cur.fetchmany(1000)
                     if not batch:
                         break
-                    yield from batch
+                    if alias:
+                        for row in batch:
+                            cur_key[0] = row[0]
+                            yield row[1:]
+                    else:
+                        yield from batch
 
-            col.add_records(
-                columns,
-                rows(),
-                lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
-                method="表のレコード",
-            )
+            col.row_key = (lambda r, cur_key=cur_key: cur_key[0]) if alias else None
+            try:
+                col.add_records(
+                    columns,
+                    rows(),
+                    lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+                    method="表のレコード",
+                )
+            finally:
+                col.row_key = None
+                col.pos_off = False
         ok = True
     except sqlite3.DatabaseError as e:
         item.notes.append(f"表を読めなかった（暗号化された SQLite の可能性）: {e}")

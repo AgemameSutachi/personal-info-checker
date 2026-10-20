@@ -38,6 +38,7 @@ def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
         return
 
     if blob.ext in SQL_EXTS or looks_like_sql(text):
+        col.pos_layout = "sqldump"  # 対処のために、表・行・列で位置を集める（COPY の行・INSERT の組）
         scan_sql_text(text, col, item)
     elif blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(text):
         _scan_delimited(text, col, item)
@@ -180,6 +181,7 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
             return
         if blob.ext in SQL_EXTS or looks_like_sql(sample):
             item.method = f"巨大な SQL（{enc}）を少しずつ読み取り"
+            col.pos_layout = "sqldump"
 
             def sql_lines():
                 for ln in io.StringIO(sample, newline=""):

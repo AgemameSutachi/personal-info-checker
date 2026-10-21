@@ -117,6 +117,12 @@ def unique_table_name(counts: dict[str, int], name: str) -> str:
 # ------------------------------------------------------------------ 値の解き方
 
 
+# NUMBER の1バイト（百進の1桁）→ 2桁の十進の文字列。正の数は バイト-1、負の数は 101-バイト が桁の値（0〜99）。
+# 桁の値が 0〜99 に収まらないバイトは None（読めない形）。表の値の数だけ呼ばれるので、1バイトずつの計算と書式を表引きにする
+_NUM_POS = [f"{x - 1:02d}" if 1 <= x <= 100 else None for x in range(256)]
+_NUM_NEG = [f"{101 - x:02d}" if 2 <= x <= 101 else None for x in range(256)]
+
+
 def decode_number(b: bytes) -> str | None:
     """Oracle NUMBER の内部形式を十進の文字列にする。読めない形（無限大など）は None。"""
     if not b:
@@ -126,23 +132,27 @@ def decode_number(b: bytes) -> str | None:
         return "0" if first == 0x80 else None
     if first & 0x80:
         exp = first - 0xC1
-        digs = [x - 1 for x in b[1:]]
+        body = b[1:]
+        table = _NUM_POS
         neg = False
     else:
         exp = 0x3E - first
         body = b[1:-1] if b[-1] == 0x66 else b[1:]  # 負数は末尾に 0x66 の終わりの印が付く（21バイト未満のとき）
-        digs = [101 - x for x in body]
+        table = _NUM_NEG
         neg = True
-    if not digs or any(not 0 <= d <= 99 for d in digs) or len(digs) > 21:
+    if not body or len(body) > 21:
         return None
+    pairs = [table[x] for x in body]
+    if None in pairs:
+        return None
+    digits = "".join(pairs)  # 百進の桁を十進の2桁ずつに並べたもの
     if exp >= 0:
-        int_part = digs[: exp + 1] + [0] * max(0, exp + 1 - len(digs))
-        frac_part = digs[exp + 1 :]
-        int_s = "".join(f"{d:02d}" for d in int_part).lstrip("0") or "0"
-        frac_s = "".join(f"{d:02d}" for d in frac_part).rstrip("0")
+        cut = 2 * (exp + 1)  # 整数部の桁数（足りない分は 0 で埋める）
+        int_s = (digits[:cut] + "0" * max(0, cut - len(digits))).lstrip("0") or "0"
+        frac_s = digits[cut:].rstrip("0")
     else:
         int_s = "0"
-        frac_s = ("00" * (-exp - 1) + "".join(f"{d:02d}" for d in digs)).rstrip("0")
+        frac_s = ("00" * (-exp - 1) + digits).rstrip("0")
     s = int_s + ("." + frac_s if frac_s else "")
     return "-" + s if neg and s != "0" else s
 

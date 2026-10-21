@@ -734,20 +734,35 @@ class Collector:
     def add_records(self, columns: list[str], rows, location_fn: Callable[[int, int], str], method: str = "") -> int:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""
         self._skip_seen = False
+        headers = list(columns)
+        # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
+        sure = [bool(h and detectors.header_category(h)) for h in headers]
         n = 0
         for r_idx, row in enumerate(rows, start=1):
             n += 1
             values = ["" if v is None else _cell_to_str(v) for v in row]
-            self._table_row(values, r_idx, list(columns), location_fn, method)
+            self._table_row(values, r_idx, headers, location_fn, method, sure)
         return n
 
-    def _table_row(self, values, r_idx, headers, location_fn, method) -> None:
+    def _table_row(self, values, r_idx, headers, location_fn, method, sure: list[bool] | None = None) -> None:
+        """表の1行を検査する。sure は列ごとの「見出しが個人情報の見出し語か」（無ければここで判定する）。
+
+        場所の文字列は明細に載せるときだけ要るので、セルごとには作らず location_fn に任せる（明細はセルの数より
+        ずっと少ない）。呼び出し側の location_fn は行・列だけで場所が決まること（後から呼んでも同じ文字列になること）。
+        """
+        skip_seen = getattr(self, "_skip_seen", False)
+        n_headers = len(headers)
         for c_idx, v in enumerate(values):
             if not v:
                 continue
-            header = headers[c_idx] if c_idx < len(headers) else None
+            if c_idx < n_headers:
+                header = headers[c_idx]
+                has_category = sure[c_idx] if sure is not None else bool(header and detectors.header_category(header))
+            else:
+                header = None
+                has_category = False
             weak = False
-            if not (header and detectors.header_category(header)):
+            if not has_category:
                 # 横持ち: 左隣（空白を挟んでもよい）のセルが見出し語なら、それを見出しにする。
                 # 左隣が「見出し語＋値」のセルなら、見出しのおかげで拾えた分は確度を低にする（座標を番号と取り違えないため）
                 for j in range(c_idx - 1, max(-1, c_idx - 3), -1):
@@ -760,10 +775,11 @@ class Collector:
             try:
                 self.add_text(
                     v,
-                    location_fn(r_idx, c_idx),
+                    "",
                     header=header,
                     method=method,
-                    skip_seen=getattr(self, "_skip_seen", False),
+                    location_fn=lambda _start, r=r_idx, c=c_idx: location_fn(r, c),
+                    skip_seen=skip_seen,
                     weak_header=weak,
                 )
             finally:

@@ -449,9 +449,23 @@ def _classify_addresses(hits: list[Hit], context_text: str, offset: int) -> None
             h.needs_person = True
 
 
+# 全角英数・全角記号（U+FF01〜FF5E）と全角空白 → 互換分解した先の ASCII。
+# 長い本文に「：」が1つあるだけで NFKC は本文全体を分解・合成し直す（280 文字で約 20µs）ので、
+# よく来るこれらの文字だけ先に写してから NFKC に回す。文字をその互換分解に置き換えても NFKC の結果は変わらない
+# （NFKC は互換分解してから合成するので、分解済みの形から始めても同じところに行き着く。試験が総当たりで確かめる）
+_PREMAP = {chr(c): unicodedata.normalize("NFKD", chr(c)) for c in [*range(0xFF01, 0xFF5F), 0x3000]}
+_RE_PREMAP = re.compile("[！-～　]")
+
+
+def _premap(m: re.Match) -> str:
+    return _PREMAP[m.group()]
+
+
 def normalize(text: str) -> str:
     """全角英数・全角記号を半角へ寄せる（NFKC）。"""
-    return unicodedata.normalize("NFKC", text)
+    if unicodedata.is_normalized("NFKC", text):
+        return text
+    return unicodedata.normalize("NFKC", _RE_PREMAP.sub(_premap, text))
 
 
 def my_number_is_valid(digits: str) -> bool:

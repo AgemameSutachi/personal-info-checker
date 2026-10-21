@@ -396,3 +396,32 @@ def test_short_cache_skips_second_detection(monkeypatch):
     assert len(calls) == 1
     detectors.detect("090-1234-5678", None)  # 見出しが違えば別に検出する
     assert len(calls) == 2
+
+
+def test_normalize_premap_matches_nfkc():
+    """全角英数・記号を先に写す normalize が、NFKC そのものと同じ結果を返す。
+    基本多言語面の全部の文字を、写す文字（全角の英字・記号・空白）の前後に置いて確かめる（合成・並べ替えの相手になる文字も含む）。"""
+    import unicodedata
+
+    nfkc = lambda s: unicodedata.normalize("NFKC", s)  # noqa: E731
+    for cp in range(0x10000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        c = chr(cp)
+        for s in (c + "Ａ", "Ａ" + c, "：" + c + "\u0301", c + "　\u3099", "ｶ" + c + "Ｚ"):
+            assert detectors.normalize(s) == nfkc(s), (hex(cp), s)
+
+
+def test_normalize_premap_random_mixes():
+    """写す文字・半角カナ・濁点・結合文字・互換文字・ハングルの字母を混ぜた乱択の本文で、NFKC と同じ結果を返す。"""
+    import unicodedata
+
+    pool = (
+        [chr(c) for c in range(0xFF01, 0xFF5F)]
+        + ["\u3000", "ｶ", "ﾞ", "ﾟ", "ﾊ", "\u3099", "\u309a", "\u0301", "\u0323", "\u0308", "①", "㍻", "ﬁ", "Å"]
+        + ["\u1100", "\u1161", "\u11a8", "か", "は", "A", "a", " ", "佐", "藤", "ー", "－", "～", "〜", "、", "。"]
+    )
+    rng = random.Random(20261021)
+    for _ in range(30000):
+        s = "".join(rng.choice(pool) for _ in range(rng.randint(1, 30)))
+        assert detectors.normalize(s) == unicodedata.normalize("NFKC", s), s

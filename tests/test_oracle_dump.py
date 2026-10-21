@@ -208,6 +208,54 @@ def test_number_known_vectors_from_real_dump():
     assert oracle_dump.decode_number(b"") is None
 
 
+def _old_decode_number(b: bytes) -> str | None:
+    """表引きにする前の decode_number（そのまま写したもの）。"""
+    if not b:
+        return None
+    first = b[0]
+    if len(b) == 1:
+        return "0" if first == 0x80 else None
+    if first & 0x80:
+        exp = first - 0xC1
+        digs = [x - 1 for x in b[1:]]
+        neg = False
+    else:
+        exp = 0x3E - first
+        body = b[1:-1] if b[-1] == 0x66 else b[1:]
+        digs = [101 - x for x in body]
+        neg = True
+    if not digs or any(not 0 <= d <= 99 for d in digs) or len(digs) > 21:
+        return None
+    if exp >= 0:
+        int_part = digs[: exp + 1] + [0] * max(0, exp + 1 - len(digs))
+        frac_part = digs[exp + 1 :]
+        int_s = "".join(f"{d:02d}" for d in int_part).lstrip("0") or "0"
+        frac_s = "".join(f"{d:02d}" for d in frac_part).rstrip("0")
+    else:
+        int_s = "0"
+        frac_s = ("00" * (-exp - 1) + "".join(f"{d:02d}" for d in digs)).rstrip("0")
+    s = int_s + ("." + frac_s if frac_s else "")
+    return "-" + s if neg and s != "0" else s
+
+
+def test_number_table_lookup_matches_old():
+    """表引きの decode_number が、前の実装と同じ結果（読めない形の None も）を返す。
+    先頭のバイトは全部・続くバイトは境目（0・1・2・100・101・102・0x66・255）と乱択で総当たりに近く確かめる。"""
+    import random
+
+    edge = [0, 1, 2, 50, 99, 100, 101, 102, 0x66, 255]
+    cases = [bytes([f]) for f in range(256)]
+    cases += [bytes([f, a]) for f in range(256) for a in edge]
+    cases += [bytes([f, a, b]) for f in range(256) for a in edge for b in edge]
+    rng = random.Random(20261021)
+    for _ in range(60000):
+        n = rng.randint(1, 24)
+        lo, hi = rng.choice([(1, 100), (2, 102), (0, 255)])
+        cases.append(bytes([rng.randint(0, 255)] + [rng.randint(lo, hi) for _ in range(n)]))
+    for b in cases:
+        assert oracle_dump.decode_number(b) == _old_decode_number(b), b.hex()
+
+
 def test_date_decode():
     assert oracle_dump.decode_date(bytes.fromhex("77840909010101")) == "1932-09-09"  # 実物の住基の生年月日
     assert oracle_dump.decode_date(enc_date(2026, 10, 19, 12, 34, 56)) == "2026-10-19 12:34:56"

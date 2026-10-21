@@ -1142,12 +1142,39 @@ def _detect_rust(text: str, header: str | None = None) -> list[Hit] | None:
     return [Hit(t, _CONFIDENCE_BY_NUM[c], v, s, e, rule, needs) for (t, c, v, s, e, rule, needs) in rows]
 
 
+# 短い本文の検出結果の覚え書き（(本文, 見出し) → 検出のタプル）。表では同じ短い値（性別・続柄・用途・年・区分など）が
+# 行ごとに繰り返し来るので、正規表現を通し直さずに返す。値ごとに異なる列でも溢れたら空にするだけなので、メモリは上限で止まる
+# （約 17MB。異なる値が続く列では空にし直すたびに覚え直すので効きは薄れるが、結果は変わらない）。
+# 覚えるのは Hit のフィールドを順に並べたタプル（Hit にフィールドを足したら、ここで写す並びも足すこと。試験が数を確かめる）
+_SHORT_CACHE_LEN = 24
+_SHORT_CACHE_LIMIT = 32768
+_short_cache: dict[tuple[str, str | None], tuple[tuple, ...]] = {}
+
+
 def detect(text: str, header: str | None = None) -> list[Hit]:
     """文字列から個人情報らしきものを探す。header は表の列見出し（無ければ None）。
 
     text は呼び出し側で normalize 済みであること（位置がずれないように）。
     Rust 拡張があればそれで検出する（結果は Python 版と同じ）。無いとき・Rust で扱えない本文のときは Python 版。
+    短い本文は結果を覚えておき、同じ本文・見出しには覚えた結果を新しい Hit にして返す（呼び出し側が Hit を書き換えるため）。
     """
+    if len(text) > _SHORT_CACHE_LEN:
+        return _detect_uncached(text, header)
+    key = (text, header)
+    got = _short_cache.get(key)
+    if got is None:
+        hits = _detect_uncached(text, header)
+        if len(_short_cache) >= _SHORT_CACHE_LIMIT:
+            _short_cache.clear()
+        _short_cache[key] = tuple(
+            (h.pii_type, h.confidence, h.value, h.start, h.end, h.rule, h.needs_person) for h in hits
+        )
+        return hits
+    return [Hit(*t) for t in got]
+
+
+def _detect_uncached(text: str, header: str | None) -> list[Hit]:
+    """detect の本体（覚え書きを通さない）。"""
     if _RUST is not None:
         hits = _detect_rust(text, header)
         if hits is not None:

@@ -319,3 +319,80 @@ def test_header_category_prefilter_every_char():
             if detectors.cannot_be_header(s):
                 assert old_header_category(s) is None, hex(cp)
     detectors.header_category.cache_clear()
+
+
+def _rows(hits):
+    return [(h.pii_type, h.confidence, h.value, h.start, h.end, h.rule, h.needs_person) for h in hits]
+
+
+SHORT_SAMPLES = [
+    "男",
+    "世帯主",
+    "佐藤太郎",
+    "090-1234-5678",
+    "1950-03-04",
+    "123456789018",
+    "〒100-0005",
+    "東京都千代田区丸の内9-9-9",
+    "",
+    "ab",
+    "null",
+]
+SHORT_HEADERS = [None, "氏名", "電話番号", "生年月日", "住所", "性別", "個人番号", "備考"]
+
+
+def test_short_cache_matches_uncached(monkeypatch):
+    """短い本文の覚え書きを通しても、1回目・2回目とも覚え書きなしと同じ検出になる。"""
+    monkeypatch.setattr(detectors, "_short_cache", {})
+    for _ in range(2):
+        for text in SHORT_SAMPLES:
+            for header in SHORT_HEADERS:
+                norm = detectors.normalize(text)
+                assert _rows(detectors.detect(norm, header)) == _rows(detectors._detect_uncached(norm, header)), (
+                    text,
+                    header,
+                )
+    assert detectors._short_cache, "短い本文が覚えられていない"
+
+
+def test_short_cache_returns_fresh_hits(monkeypatch):
+    """呼び出し側が Hit を書き換えても（add_text は規則名に追記し確度を変える）、次に返す結果は変わらない。"""
+    monkeypatch.setattr(detectors, "_short_cache", {})
+    first = detectors.detect("090-1234-5678", "電話番号")
+    assert first
+    expected = _rows(first)
+    for h in first:
+        h.rule += "（書き換え）"
+        h.confidence = Confidence.LOW
+        h.needs_person = True
+    second = detectors.detect("090-1234-5678", "電話番号")
+    assert _rows(second) == expected
+    assert all(a is not b for a, b in zip(first, second))
+
+
+def test_short_cache_skips_long_text_and_is_bounded(monkeypatch):
+    """長い本文は覚えない。覚え書きは上限に達したら空にするので、上限を超えて増えない。"""
+    monkeypatch.setattr(detectors, "_short_cache", {})
+    monkeypatch.setattr(detectors, "_SHORT_CACHE_LIMIT", 5)
+    long_text = "連絡先は 090-1234-5678 です。" + "あ" * detectors._SHORT_CACHE_LEN
+    detectors.detect(long_text)
+    assert not detectors._short_cache
+    for i in range(23):
+        detectors.detect(f"値{i}")
+        assert len(detectors._short_cache) <= 5
+
+
+def test_short_cache_skips_second_detection(monkeypatch):
+    """同じ短い本文・見出しの2回目は検出をやり直さない（覚え書きを読んでいる）。覚えるタプルは Hit の全フィールド。"""
+    import dataclasses
+
+    assert len(dataclasses.fields(Hit)) == 7, "Hit のフィールドが変わった: detect の覚え書きで写す並びも直すこと"
+    monkeypatch.setattr(detectors, "_short_cache", {})
+    calls = []
+    real = detectors._detect_uncached
+    monkeypatch.setattr(detectors, "_detect_uncached", lambda t, h: calls.append(t) or real(t, h))
+    detectors.detect("090-1234-5678", "電話番号")
+    detectors.detect("090-1234-5678", "電話番号")
+    assert len(calls) == 1
+    detectors.detect("090-1234-5678", None)  # 見出しが違えば別に検出する
+    assert len(calls) == 2

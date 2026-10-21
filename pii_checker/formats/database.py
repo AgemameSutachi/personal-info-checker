@@ -194,7 +194,7 @@ def _dump_odbc(ctx: ScanContext, conn, col: Collector, item: ItemResult, depth: 
         n = col.add_records(
             columns,
             rows(),
-            lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+            lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
             method="表のレコード",
         )
         item.notes.append(f"表「{name}」{n}行")
@@ -509,7 +509,7 @@ def _read_access_jackcess(
             col.add_records(
                 columns,
                 stream,
-                lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+                lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
                 method="表のレコード（Jackcess）",
             )
             # 途中で読むのをやめても、残りの行を読み捨てる（残すと次の命令の返事として読まれ、やり取りがずれる）
@@ -586,7 +586,7 @@ def _read_access_parser(ctx: ScanContext, path: str, col: Collector, item: ItemR
         col.add_records(
             columns,
             rows(),
-            lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+            lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
             method="表のレコード（純Python）",
         )
     if n_tables == 0:
@@ -720,7 +720,7 @@ def handle_sqlite(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
                 col.add_records(
                     columns,
                     rows(),
-                    lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c]}」",
+                    lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
                     method="表のレコード",
                 )
             finally:
@@ -776,7 +776,9 @@ def handle_dbf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                 p += length
             yield out
 
-    n = col.add_records(columns, rows(), lambda r, c: f"{r}行目 列「{columns[c]}」", method="レコード")
+    n = col.add_records(
+        columns, rows(), lambda r, c: f"{r}行目 列「{columns[c] if c < len(columns) else c + 1}」", method="レコード"
+    )
     item.method = f"dBase の全レコード {n} 件（削除フラグ付き {deleted} 件を含む）"
     if truncated:
         raise PartialScan(

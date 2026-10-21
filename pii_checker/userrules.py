@@ -70,6 +70,9 @@ _SPEED_ABORT = 0.05  # 試し文字列1本でこれ（秒）を超えたら、�
 # 1本あたり基準の数倍に収まり、区切って当てるので検査を止めない。それより桁違いに遅い形（\w+\w?\d+x は数百倍）だけを断る
 _SPEED_RATIO = 10.0
 _SPEED_FLOOR = 0.002  # これ（秒）より速ければ比べない（測り方の揺れで断らない）
+# 明らかに遅く見えた1本を、もう1回だけ測り直す上限（秒）。これより長くかかった1本は測り直さずに断る
+# （PC が一瞬止まった揺れは測り直せば消える。本当に遅い規則を何秒も測り直して待たせない）
+_SPEED_RECHECK_LIMIT = 1.0
 _SPEED_REFERENCE = r"\w+@"  # 「名前@」のように、普通に書かれる程度の手間の正規表現
 _SPEED_DEFAULT_CHARS = ("a", "1", "あ", " ", "-", "A", "漢")
 # 2つの繰り返しが同じ文字に当たりうるかを確かめる文字（本文は NFKC で寄せてあるので半角の記号・英数字と仮名・漢字）
@@ -597,12 +600,15 @@ def _check_speed(compiled: re.Pattern, tree) -> str | None:
             # 1本で _SPEED_ABORT を超えたら、長い文字列へ進まずにここで決める（急に遅くなる形で固まらないため）。
             # PC が混んでいると普通の規則でも超えうるので、同じ長さの基準と交互に測り直して、桁違いのときだけ断る
             if took > _SPEED_ABORT:
-                # 明らかに遅い（_SPEED_ABORT の10倍超）ものは測り直さずに断る（遅い規則ほど測り直しも遅く、待たせるため）。
-                # 境目のものは、PC の混み具合の揺れかもしれないので、同じ長さの基準と交互に測り直して決める
-                # 遅くないと分かっても、ここでは受け付けない。残りの試し文字列（本当に遅い文字の並び）と
+                # (a) 明らかに遅い（_SPEED_ABORT の10倍超）とき: 規則をもう1回だけ測り直し、2回とも基準の _SPEED_RATIO 倍を
+                #     超えたら断る（1回だけで決めると、PC が一瞬止まっただけの普通の規則まで断る）。1本が
+                #     _SPEED_RECHECK_LIMIT を超えたものは測り直さずに断る（遅い規則ほど測り直しも遅く、待たせるため）。
+                # (b) 境目のとき: PC の混み具合の揺れかもしれないので、同じ長さの基準と交互に3回ずつ測って決める。
+                # どちらも「遅くない」と分かったら、ここでは受け付けない。残りの試し文字列（本当に遅い文字の並び）と
                 # 長い文字列を調べ終えてから受け付ける（混んでいて速い並びが一瞬遅く見えただけのことがあるため）
                 if took > 10 * _SPEED_ABORT:
-                    if took > _SPEED_RATIO * _reference_time_now(len(text)):
+                    limit = _SPEED_RATIO * _reference_time_now(len(text))
+                    if took > limit and (took > _SPEED_RECHECK_LIMIT or _time_once(compiled, text) > limit):
                         return _MSG_SLOW
                     continue
                 if _slower_than_reference(compiled, text):

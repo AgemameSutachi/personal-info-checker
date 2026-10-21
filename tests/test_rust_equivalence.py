@@ -383,6 +383,7 @@ def test_rust_failure_disables_rust_and_falls_back(monkeypatch, tmp_path, error)
             raise error
 
     monkeypatch.setattr(detectors, "_RUST", Broken())
+    monkeypatch.setattr(detectors, "_short_cache", {})  # 覚え書きに残った結果を返さず、拡張を呼ばせる
     monkeypatch.setattr(detectors, "_RUST_NOTE", "")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))  # engine.log は試験の一時フォルダへ
     with pytest.warns(RuntimeWarning):
@@ -420,6 +421,7 @@ def test_keyboard_interrupt_is_not_swallowed(monkeypatch, error):
             raise error
 
     monkeypatch.setattr(detectors, "_RUST", Interrupted())
+    monkeypatch.setattr(detectors, "_short_cache", {})  # 覚え書きに残った結果を返さず、拡張を呼ばせる
     with pytest.raises(type(error)):
         detectors.detect("電話 090-1234-5678")
     assert detectors.rust_enabled()

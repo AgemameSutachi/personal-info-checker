@@ -24,6 +24,19 @@ def _tempdir(base, name, marker_open=False, marker=True):
     return d, f
 
 
+@pytest.fixture(autouse=True)
+def _own_system_temp(tmp_path, monkeypatch):
+    """片付けはシステムの一時フォルダも見るので、試験ごとの空のフォルダに差し替える。
+
+    差し替えないと、その PC に残っていた本物の一時フォルダまで数え（数が合わずに落ちる）、片付けてしまう。
+    """
+    import tempfile
+
+    own = tmp_path / "systemp"
+    own.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(own))
+
+
 def test_cleanup_keeps_live_owner_and_removes_dead(tmp_path):
     live, handle = _tempdir(tmp_path, "live", marker_open=True)
     dead, _ = _tempdir(tmp_path, "dead")
@@ -41,6 +54,19 @@ def test_cleanup_keeps_live_owner_and_removes_dead(tmp_path):
         handle.close()
     runner.cleanup_stale_temp([str(tmp_path)], no_mark_grace=0)
     assert not live.exists() and not fresh_nomark.exists()
+
+
+def test_cleanup_removes_read_only_members(tmp_path):
+    """展開した中身の読み取り専用のファイルがあっても片付け、消せたものだけを数える（Windows で残っていた不具合）。"""
+    import stat
+
+    dead, _ = _tempdir(tmp_path, "readonly")
+    (dead / "sub").mkdir()
+    for p in (dead / "member.bin", dead / "sub" / "a.txt"):
+        p.write_bytes(b"x")
+        os.chmod(p, stat.S_IREAD)
+    assert runner.cleanup_stale_temp([str(tmp_path)]) == 1
+    assert not dead.exists()
 
 
 def test_context_marks_and_cleans(tmp_path):

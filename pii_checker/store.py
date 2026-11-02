@@ -131,8 +131,14 @@ FILE_EXTRA_COLUMNS = {
     "access": "TEXT",
     "access_who": "TEXT",  # 読み取りを許された「広く誰でも」の名前、または読めなかった理由
     "access_owner": "TEXT",  # 親フォルダの所有者の名前（取れたときだけ）
+    # 時間の内訳（遅さの原因を後から確かめるため）。elapsed はワーカーの中で測った検査の時間
+    # 結果を DB へ書くのにかかった秒。SAVE_RECHECK_SECONDS 以上かかったときだけ確定の書き込みを含む。NULL は使い回し・古い版
+    "save_elapsed": "REAL",
+    "wall_elapsed": "REAL",  # ワーカーへ配ってから結果を受け取るまでの秒（待ち行列・プロセスの起動を含む）
 }
 REUSABLE_STATUSES = (Status.SCANNED, Status.PARTIAL, Status.OUT_OF_SCOPE)
+# 保存がこの秒数以上かかったら、確定の書き込みを含めた時間で save_elapsed を書き直す
+SAVE_RECHECK_SECONDS = 0.5
 
 
 def _add_counts(acc: dict[str, int], text: str | dict | None) -> None:
@@ -591,9 +597,12 @@ class Store:
 
     # ------------------------------------------------------------ 結果
 
-    def save_result(self, job_id: str, result: FileResult, engine_sig: str | None = None) -> None:
+    def save_result(
+        self, job_id: str, result: FileResult, engine_sig: str | None = None, wall_elapsed: float | None = None
+    ) -> None:
         from .engine import risk_of, worst_status
 
+        save_started = time.perf_counter()
         worst = worst_status(result.items) if result.items else Status.UNCHECKABLE
         risk = risk_of(result.items)
         n_findings = sum(sum(i.finding_counts.values()) for i in result.items)
@@ -662,7 +671,8 @@ class Store:
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
                 " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
                 " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
-                " access=NULL, access_who=NULL, access_owner=NULL WHERE job_id=? AND top_path=?",
+                " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?"
+                " WHERE job_id=? AND top_path=?",
                 (
                     worst.value,
                     risk,
@@ -680,10 +690,26 @@ class Store:
                     reportflags.encode(mark["flags"]),
                     mark["people_n"],
                     mark["people_type"],
+                    time.perf_counter() - save_started,
+                    wall_elapsed,
                     job_id,
                     result.top_path,
                 ),
             )
+        # 上で書いた値は確定の書き込みを含まない。検出が数百万件あると確定の重さが効くので、遅かったときだけ
+        # 確定まで含めた時間で書き直す（速い保存のたびに確定を1回増やすと、数万ファイルで無視できない）
+        total = time.perf_counter() - save_started
+        if total >= SAVE_RECHECK_SECONDS:
+            try:
+                with self.tx() as c:
+                    c.execute(
+                        "UPDATE files SET save_elapsed=? WHERE job_id=? AND top_path=?",
+                        (total, job_id, result.top_path),
+                    )
+            except (
+                Exception
+            ):  # noqa: BLE001  時間の記録は補助。結果は確定済みなので、ここで検査を止めない（満杯なら次の保存で止まる）
+                pass
 
     # ------------------------------------------------------------ 前回の結果の使い回し
 
@@ -729,7 +755,7 @@ class Store:
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
                 " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, scanned_at=?,"
                 " atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL, access_who=NULL,"
-                " access_owner=NULL WHERE job_id=? AND top_path=?",
+                " access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL WHERE job_id=? AND top_path=?",
                 (
                     src["worst_status"],
                     src["risk"],
@@ -776,14 +802,14 @@ class Store:
                 if it.status == Status.PENDING:
                     it.status = Status.UNCHECKABLE
                     it.reason = "外側のファイルの時間切れで、途中までしか検査していない"
-            self.save_result(job_id, FileResult(top_path=top_path, items=items, elapsed=elapsed))
+            self.save_result(job_id, FileResult(top_path=top_path, items=items, elapsed=elapsed), wall_elapsed=elapsed)
             return
         item = ItemResult(path=top_path, kind="", status=Status.UNCHECKABLE, reason=reason)
         try:
             item.size = os.path.getsize(top_path)
         except OSError:
             pass
-        self.save_result(job_id, FileResult(top_path=top_path, items=[item], elapsed=elapsed))
+        self.save_result(job_id, FileResult(top_path=top_path, items=[item], elapsed=elapsed), wall_elapsed=elapsed)
 
     def file_size(self, job_id: str, top_path: str) -> int | None:
         """列挙したときのファイルの大きさ（時間制限を大きさに合わせるのに使う）。"""

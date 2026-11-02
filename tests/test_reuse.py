@@ -59,6 +59,99 @@ def test_unchanged_files_are_reused(env):
     assert _reused(store, j3)["f0.txt"] == j1
 
 
+def test_time_breakdown_is_recorded(env):
+    """検査したファイルには保存の時間と配ってから受け取るまでの時間が残り、使い回したものには残らない。"""
+    folder, store, tmp = env
+    j1 = _run(store, folder, tmp)
+    rows = store.query("SELECT elapsed, save_elapsed, wall_elapsed FROM files WHERE job_id=?", (j1,))
+    assert len(rows) == 4
+    for elapsed, save_elapsed, wall_elapsed in rows:
+        assert save_elapsed is not None and save_elapsed >= 0
+        # 配ってから受け取るまでは、ワーカーの中の検査の時間を含む（時計が違うので少しの誤差は許す）
+        assert wall_elapsed is not None and wall_elapsed >= elapsed - 0.5
+    j2 = _run(store, folder, tmp)
+    for name, save_elapsed, wall_elapsed in (
+        (os.path.basename(r[0]), r[1], r[2])
+        for r in store.query("SELECT top_path, save_elapsed, wall_elapsed FROM files WHERE job_id=?", (j2,))
+    ):
+        if name == "photo.heic":
+            assert save_elapsed is not None  # 検査不能だったものは毎回読み直す
+        else:
+            assert save_elapsed is None and wall_elapsed is None
+
+
+def _one_file_job(store, tmp_path):
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    store.add_files(job, [("a.txt", 10, 0.0)])
+    return job
+
+
+def _times(store, job):
+    return tuple(
+        store.query(
+            "SELECT elapsed, save_elapsed, wall_elapsed FROM files WHERE job_id=? AND top_path='a.txt'", (job,)
+        )[0]
+    )
+
+
+def test_save_result_writes_given_wall_and_rewrites_slow_saves(tmp_path, monkeypatch):
+    """渡した wall_elapsed がそのまま入る。遅い保存だけ、確定を含めた時間で書き直す（確定が1回増える）。"""
+    import pii_checker.store as store_mod
+    from pii_checker.models import FileResult, ItemResult, Status
+
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = _one_file_job(store, tmp_path)
+    calls = []
+    real_tx = store.tx
+
+    def counting_tx():
+        calls.append(1)
+        return real_tx()
+
+    monkeypatch.setattr(store, "tx", counting_tx)
+    result = FileResult(
+        top_path="a.txt", items=[ItemResult(path="a.txt", kind="", status=Status.SCANNED)], elapsed=0.25
+    )
+    store.save_result(job, result, wall_elapsed=1.5)
+    elapsed, save_elapsed, wall_elapsed = _times(store, job)
+    assert (elapsed, wall_elapsed) == (0.25, 1.5)
+    assert 0 <= save_elapsed < store_mod.SAVE_RECHECK_SECONDS
+    assert len(calls) == 1  # 速い保存では確定を増やさない
+
+    calls.clear()
+    monkeypatch.setattr(store_mod, "SAVE_RECHECK_SECONDS", 0.0)
+    store.save_result(job, result, wall_elapsed=2.0)
+    assert len(calls) == 2  # 確定まで含めた時間で書き直した
+    assert _times(store, job)[1] > 0
+
+
+def test_failure_records_wall_elapsed(tmp_path):
+    """時間切れ・異常終了の行にも、配ってから受け取るまでの時間を残す（遅さの調べで一番知りたい行）。"""
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = _one_file_job(store, tmp_path)
+    store.save_failure(job, "a.txt", "時間切れ", 120.0)
+    assert _times(store, job)[2] == 120.0
+
+
+def test_old_db_gets_time_columns(tmp_path):
+    """列の無い古い版の DB を開くと、時間の内訳の列が足される。"""
+    import sqlite3
+
+    path = str(tmp_path / "old.sqlite3")
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE files (job_id TEXT, top_path TEXT, state TEXT, worst_status TEXT, risk TEXT, size INTEGER,"
+        " mtime REAL, elapsed REAL, n_findings INTEGER DEFAULT 0, PRIMARY KEY (job_id, top_path))"
+    )
+    con.execute("INSERT INTO files (job_id, top_path, state) VALUES ('j', 'x', 'done')")
+    con.commit()
+    con.close()
+    store = Store(path)
+    cols = {r[1] for r in store.query("PRAGMA table_info(files)")}
+    assert {"save_elapsed", "wall_elapsed"} <= cols
+    assert tuple(store.query("SELECT save_elapsed, wall_elapsed FROM files")[0]) == (None, None)
+
+
 def test_changed_files_are_rescanned(env):
     folder, store, tmp = env
     _run(store, folder, tmp)

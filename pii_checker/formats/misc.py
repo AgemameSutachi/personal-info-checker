@@ -465,6 +465,11 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
     data = blob.read_all()
     import io
 
+    from .. import ocr
+
+    if ocr.is_jpeg_xr(data):
+        _handle_jpeg_xr(ctx, data, item, col)
+        return
     try:
         with Image.open(io.BytesIO(data)) as im:
             w, h = im.size
@@ -476,12 +481,39 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
         return
     if not ctx.options.ocr:
         raise Uncheckable("OCR を無効にして実行したため画像の中の文字を検査していない（要目視）")
-    from .. import ocr
-
     if not ocr.is_available():
         raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}")
     text = ocr.ocr_image_bytes(data)
     item.method = f"OCR（{w}×{h}px・{frames}ページ）"
+    item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
+    col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)
+
+
+def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collector) -> None:
+    """JPEG XR（HD Photo。PowerPoint・Word で画像に効果をかけたときに残る元の画像 .wdp など）を OCR で検査する。
+
+    PIL では開けないので、Windows の画像の部品（WIC）で開く。WIC は OCR と同じ WinRT で呼ぶので、OCR が使えないときは
+    大きさも分からず、検査できない理由を OCR が使えないことにする。
+    """
+    from .. import ocr
+
+    if not ctx.options.ocr:
+        raise Uncheckable("OCR を無効にして実行したため画像（JPEG XR）の中の文字を検査していない（要目視）")
+    if not ocr.is_available():
+        raise Uncheckable(
+            "OCR が使えないため画像（JPEG XR）の中の文字を検査できない（要目視。JPEG XR は Windows の部品で開くため、"
+            f"OCR が使えないと開けない）: {ocr.unavailable_reason()}"
+        )
+    try:
+        img = ocr.open_with_wic(data)
+    except ValueError as e:
+        raise Uncheckable(f"画像（JPEG XR）を開けなかった: {e}")
+    w, h = img.size
+    if max(w, h) < ctx.options.min_image_px:
+        item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
+        return
+    text = ocr.ocr_pil_image(img)
+    item.method = f"OCR（JPEG XR・{w}×{h}px）"
     item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
     col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)
 

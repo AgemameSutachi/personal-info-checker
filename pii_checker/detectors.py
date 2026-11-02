@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .models import Confidence
+from .tlds import TLDS
 
 # 種類のキー → 表示名。レポートの列順もこの順にする。
 PII_TYPES: dict[str, str] = {
@@ -1252,6 +1253,64 @@ _RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[1
 _RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
 _NUMERIC_CHARS = frozenset("0123456789.+-:/,")
 _RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
+# IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
+# 予約語の .test・.example・.invalid・.localhost は実在の宛先にならないので入れない
+_PRIVATE_TLDS = frozenset({"local", "localdomain", "internal", "lan", "corp", "home", "intranet"})
+# 直後に1文字続いたアドレスから、その1文字を外してよい TLD（_email_trim_tail）
+# 画像の倍率つきの名前の「@2x」「@3x」の部分（_email_domain_plausible）
+_RE_SCALE_LABEL = re.compile(r"[0-9]x")
+_TRIM_TLDS = frozenset({"com", "org", "net", "edu", "gov", "mil", "info", "io"})
+
+
+def _email_domain_plausible(value: str) -> bool:
+    """メールアドレスの形の値のドメインが、実在しうるものか。
+
+    プログラムの識別子・バイナリの断片がメールの形に当たったもの（実物の検査の生データ走査で 7,107 件）を捨てるため:
+    - TLD が IANA の一覧（と社内向けの .local など）に無い: 「z@FlaxRobertaPreLayerNormLayerCollection.setup」「-x@TestX.test」
+    - TLD の大文字・小文字が混ざる: 「6x@W.lC」（.lc は実在するが、人が書くアドレスでは「lC」とは書かない）
+    - ラベルが3つ以上で、TLD だけが頭文字の大文字・ほかは小文字だけ: Java の注釈「x@org.example.annotation.Data」の形
+      （.data・.app・.page のように、注釈の名前が実在の TLD に当たるもの）
+      （「taro@gmail.Com」のような2つのラベルは人の書き間違いもありうるので残す。「taro@mail.example.Com」は見落とす）
+    - 2つ目のラベルが1文字で、TLD が小文字だけでない: バイナリの断片「x@r.JO」「x@H.Se」（「x@q.com」は残す）
+    - 2つ目のラベルが「2x」「3x」: 画像・動画の倍率つきの名前「icon@2x.mov」「logo@3x.zip」（.mov・.zip は実在の TLD。
+      実在のドメイン「x@3x.com」も見落とすが、画像の名前のほうがずっと多い）
+    """
+    domain = value.rpartition("@")[2]
+    head, _, tld = domain.rpartition(".")
+    if not (tld.islower() or tld.isupper() or tld.istitle()):
+        return False
+    if tld.lower() not in TLDS and tld.lower() not in _PRIVATE_TLDS:
+        return False
+    label = head.rpartition(".")[2]
+    if len(label) == 1 and not tld.islower():
+        return False
+    if _RE_SCALE_LABEL.fullmatch(label):
+        return False
+    return not (tld.istitle() and "." in head and head == head.lower())
+
+
+def _email_trim_tail(h: Hit) -> Hit | None:
+    """TLD の直後に英字が空白なしで続いたアドレスなら、続いた分を外した Hit を返す。そうでなければ None。
+
+    - 小文字の TLD の直後に大文字で始まる語: 改行の消えた本文「taro@example.comTEL 03-…」「x@example.co.jpTel」・
+      .pyc の中の「x@cam.ac.ukE」（式は英字を続く限り TLD として取るので、外さないと TLD が実在しない形になる）
+    - 汎用の TLD の直後に1文字: .pyc の中で次の文字列の型の1バイトが続いた「x@gmail.comz」。国の2文字の TLD は
+      拡張子と取り違える（「x@2x.png」の .pn・.jpg の .jp）ので、小文字が続く形は汎用のもの（_TRIM_TLDS）に限る
+    """
+    tld = h.value.rpartition(".")[2]
+    cut = 0
+    lower_run = len(tld) - len(tld.lstrip("abcdefghijklmnopqrstuvwxyz"))
+    if 2 <= lower_run < len(tld) and tld[:lower_run] in TLDS:
+        cut = lower_run  # 小文字の TLD ＋ 大文字で始まる続き
+    elif len(tld) >= 3 and (tld[:-1].islower() or tld[:-1].isupper()) and tld[:-1].lower() in _TRIM_TLDS:
+        cut = len(tld) - 1
+    if not cut:
+        return None
+    extra = len(tld) - cut
+    trimmed = h.value[:-extra]
+    if not _email_domain_plausible(trimmed):
+        return None
+    return Hit(h.pii_type, h.confidence, trimmed, h.start, h.end - extra, h.rule, h.needs_person)
 
 
 def _decimal_adjacent(text: str, start: int, end: int) -> bool:
@@ -1317,6 +1376,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - 手がかり語の無い番号の形（マイナンバー・カード 中・電話 低）: 数字ばかりの並びの中のもの
     - マイナンバー（手がかり語なし）: 小数の並びの途中（「104.4447.1657.9170.6」）・年月日で始まる12桁
     - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
+    - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
     """
     out = []
     for h in hits:
@@ -1331,6 +1391,11 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
         elif h.rule == "和暦の日付（生年月日の可能性）":
             if _era_date_is_broken(text, h):
                 continue
+        elif h.pii_type == "email":
+            if not _email_domain_plausible(h.value):
+                h = _email_trim_tail(h)
+                if h is None:
+                    continue
         elif h.pii_type == "credit_card":
             if (
                 h.confidence != Confidence.HIGH

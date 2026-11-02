@@ -500,7 +500,7 @@ class JobRunner:
             for it in result.items[:1]:
                 if it.path != path and it.depth == 0:
                     it.path = path
-            self.store.save_result(self.job_id, result, self.engine_sig)
+            self.store.save_result(self.job_id, result, self.engine_sig, wall_elapsed=elapsed)
             if any(i.finding_counts for i in result.items):
                 self._record_access(path)
             if version != self.password_version and any(i.status == Status.NEEDS_PASSWORD for i in result.items):

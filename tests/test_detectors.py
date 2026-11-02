@@ -235,6 +235,57 @@ def test_email_column_needs_at_mark():
 @pytest.mark.parametrize(
     "text",
     [
+        "z@FlaxRobertaPreLayerNormLayerCollection.setup.",  # 実在しない TLD（Python の識別子）
+        "x-0@TestDataFramePlots.test_plot",  # 予約語の .test
+        "6x@W.lC",  # 大文字小文字の混ざり（.lc は実在する）
+        "2x@A13.BCA+",  # 実在しない TLD
+        "@Inject x@org.example.annotation.Data",  # Java の注釈（.data は実在する）
+        "\x00x@r.JO\x01",  # バイナリの断片（1文字のラベル＋大文字の TLD）
+        "\x00x@builtins.BaseExceptionl\x01",  # 末尾の1文字を外しても TLD にならない
+        "icon@2x.png",  # 画像の名前（.pn は国の TLD だが、拡張子の .png から1文字を外したもの）
+        "logo@3x.zip",  # 倍率つきの名前（.zip は実在の TLD）
+    ],
+)
+def test_email_needs_real_tld(text):
+    """メールアドレスの形でも、TLD が実在しない・識別子の形のものは拾わない（実物の検査の生データ走査から）。"""
+    assert "email" not in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "taro.yamada@example.jp",
+        "TARO@EXAMPLE.CO.JP",
+        "taro@gmail.Com",  # 2つのラベルの頭文字の大文字は人の書き方もある
+        "hanako@example.tokyo",
+        "admin@corp.local",  # 社内の .local
+        "Taro@Example.Org",
+    ],
+)
+def test_email_with_real_tld_kept(text):
+    assert "email" in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("\x00taro@gmail.comz\x05", "taro@gmail.com"),
+        ("(x@cpan.orgE\x01", "x@cpan.org"),
+        ("<x@cam.ac.ukE\x01", "x@cam.ac.uk"),  # 国の TLD は、後ろが大文字で始まるときだけ
+        ("メール taro@example.comTEL 03-1234-5678", "taro@example.com"),  # 改行の消えた本文
+        ("info2@example.co.jpTel", "info2@example.co.jp"),
+    ],
+)
+def test_email_trailing_type_byte_trimmed(text, value):
+    """.pyc の中のアドレスの直後に次の文字列の型の1バイト（z・E など）が続いたものは、その1文字を外して拾う。"""
+    hits = [h for h in detect(normalize(text)) if h.pii_type == "email"]
+    assert [h.value for h in hits] == [value]
+    assert text[hits[0].start : hits[0].end] == value
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "JANコード 4901234567894",
         "注文番号 202410170001",
         "金額 1,234,567円",

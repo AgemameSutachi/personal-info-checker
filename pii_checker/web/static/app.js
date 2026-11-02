@@ -21,6 +21,14 @@ const fmtSize = (b) => {
   while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
   return `${b.toFixed(i ? 1 : 0)} ${u[i]}`;
 };
+// 秒を「約2時間10分」「約5分」「1分未満」の形にする（終わりの見込み用）
+const fmtDuration = (sec) => {
+  const m = Math.round(sec / 60);
+  if (m < 1) return "1分未満";
+  if (m < 60) return `約${m}分`;
+  const h = Math.floor(m / 60);
+  return h >= 48 ? `約${Math.round(h / 24)}日` : `約${h}時間${m % 60 ? `${m % 60}分` : ""}`;
+};
 const STATE_JA = { running: "実行中", done: "完了", cancelled: "中止", interrupted: "中断", error: "エラー", created: "準備中" };
 
 async function api(path, opts = {}) {
@@ -442,6 +450,7 @@ async function openJob(id) {
   state.jobId = id;
   state.tab = null; // 開いたときの最初のタブは中身を見て決める
   state.offset = 0;
+  $("#f-status").value = ""; // 前の検査で押したタイルの絞り込みを持ち越さない
   setActMsg("", "");
   closeResumePw();
   history.replaceState(null, "", `#job=${id}`);
@@ -464,6 +473,7 @@ function setTab(name) {
   $("#f-conf").classList.toggle("hidden", name !== "findings");
   $("#sample-note").classList.toggle("hidden", name !== "findings");
   $("#rv-mask-wrap").classList.toggle("hidden", name !== "findings");
+  $("#f-status").classList.toggle("hidden", name !== "attention");
   $("#f-diff").classList.toggle("hidden", name !== "diff");
   $("#diff-note").classList.toggle("hidden", name !== "diff");
 }
@@ -513,30 +523,53 @@ async function refreshJob(reloadTable = false) {
   box.querySelector(".verdict-detail").innerHTML = v.detail.map((d) => `<li>${esc(d)}</li>`).join("");
   box.querySelector(".verdict-next").textContent = hint ? "次にすること: " + hint : "";
 
-  const pct = s.files_total ? Math.round((s.files_done / s.files_total) * 100) : (j.running ? 0 : 100);
-  $("#progress-bar").style.width = `${pct}%`;
-  $("#progress-text").textContent = `${j.phase}：${fmtNum(s.files_done)} / ${fmtNum(s.files_total)} ファイル（${pct}%）`;
+  // 進み具合は、ファイルの数と大きさの遅いほうで出す（大きな zip 1つに何十分もかかると、数では止まって見え、
+  // 小さなファイルが先に片付くと、数では早く進みすぎて見える）。10% 未満は小数1桁まで出して、動いていることが分かるようにする
+  const frac = (done, total) => (total ? done / total : null);
+  const fFiles = frac(s.files_done, s.files_total), fBytes = frac(s.bytes_done || 0, s.bytes_total || 0);
+  let f = fFiles === null ? (j.running ? 0 : 1) : fBytes === null ? fFiles : Math.min(fFiles, fBytes);
+  if (j.running) f = Math.min(f, 0.999); // 終わっていないのに 100% と出さない
+  const pctText = (x) =>
+    x > 0 && x < 0.001
+      ? "0.1%未満"
+      : x >= 0.995 && x < 1
+        ? `${(Math.floor(x * 1000) / 10).toFixed(1)}%` // 終わっていないのに 100.0% と出さないよう切り捨てる
+        : `${x > 0 && x < 0.0995 ? (x * 100).toFixed(1) : Math.round(x * 100)}%`;
+  $("#progress-bar").style.width = `${(f * 100).toFixed(1)}%`;
+  let progress = `${j.phase}：${fmtNum(s.files_done)} / ${fmtNum(s.files_total)} ファイル`;
+  if (s.bytes_total) progress += `・${fmtSize(s.bytes_done || 0)} / ${fmtSize(s.bytes_total)}`;
+  progress += `（${pctText(f)}）`;
+  progress += paceText(j, f);
+  $("#progress-text").textContent = progress;
   $("#current").innerHTML = j.current.length ? "検査中のファイル: " + j.current.map((p) => `<span title="${esc(p)}">${esc(leafName(p))}</span>`).join("、") : "";
 
   const nItems = Object.values(st).reduce((a, b) => a + b, 0);
   $("#tiles-caption").textContent = `ファイル ${fmtNum(s.files_total)} 件（zip などの中身を含めると ${fmtNum(nItems)} 項目）。「ファイル」は実際のファイルの数、「項目」は中身を含めた数です。`;
+  // 要対応の区分のタイルは、その区分だけに絞って要対応のタブを開く（簡易検査が何万件もあると、
+  // 「検査できなかった 1」がその後ろに埋もれてどれか分からなかった）
   const tiles = [
-    ["個人情報の可能性があるファイル", s.files_with_findings, s.files_with_findings ? "bad" : "", "hits"],
-    ["パスワードが必要な項目", st.needs_password || 0, st.needs_password ? "warn" : "", "attention"],
-    ["検査できなかった項目", st.uncheckable || 0, st.uncheckable ? "bad" : "", "attention"],
-    ["簡易検査の項目", st.partial || 0, st.partial ? "warn" : "", "attention"],
-    ["開けなかったフォルダ・リンク", s.folder_errors + s.links, s.folder_errors + s.links ? "bad" : "", "attention"],
-    ["検査済みの項目", st.scanned || 0, "", "all"],
-    ["対象外の項目", st.out_of_scope || 0, "", "all"],
+    ["個人情報の可能性があるファイル", s.files_with_findings, s.files_with_findings ? "bad" : "", "hits", ""],
+    ["パスワードが必要な項目", st.needs_password || 0, st.needs_password ? "warn" : "", "attention", "needs_password"],
+    ["検査できなかった項目", st.uncheckable || 0, st.uncheckable ? "bad" : "", "attention", "uncheckable"],
+    ["簡易検査の項目", st.partial || 0, st.partial ? "warn" : "", "attention", "partial"],
+    ["開けなかったフォルダ・リンク", s.folder_errors + s.links, s.folder_errors + s.links ? "bad" : "", "attention", "folder"],
+    ["検査済みの項目", st.scanned || 0, "", "all", ""],
+    ["対象外の項目", st.out_of_scope || 0, "", "all", ""],
   ];
   const tilesHtml = tiles
-    .map(([l, n, c, tab]) => `<button type="button" class="tile ${c}" data-tab="${tab}"><span class="num">${fmtNum(n)}</span><span class="lbl">${esc(l)}</span></button>`)
+    .map(([l, n, c, tab, status]) => `<button type="button" class="tile ${c}" data-tab="${tab}" data-status="${status}"><span class="num">${fmtNum(n)}</span><span class="lbl">${esc(l)}</span></button>`)
     .join("");
   // 数字が変わったときだけ作り直す（定期更新でキーボードのフォーカスが消えないように）
   if ($("#tiles").dataset.html !== tilesHtml) {
     $("#tiles").innerHTML = tilesHtml;
     $("#tiles").dataset.html = tilesHtml;
-    $("#tiles").querySelectorAll(".tile").forEach((t) => t.addEventListener("click", () => { setTab(t.dataset.tab); state.offset = 0; loadTable(); }));
+    $("#tiles").querySelectorAll(".tile").forEach((t) => t.addEventListener("click", () => {
+      $("#f-status").value = t.dataset.status;
+      setTab(t.dataset.tab);
+      state.offset = 0;
+      loadTable();
+      $("#q").scrollIntoView({ block: "start", behavior: "smooth" }); // 表が画面の下にあっても、押した結果が見えるように
+    }));
   }
 
   $("#btn-cancel").classList.toggle("hidden", !j.running);
@@ -564,6 +597,36 @@ async function refreshJob(reloadTable = false) {
   if (justFinished) loadJobs();
   clearTimeout(state.timer);
   state.timer = setTimeout(() => refreshJob(false).then(() => j.running && loadJobs()), j.running ? 1500 : 6000);
+}
+
+// 終わりの見込みの文（進み具合の後ろに付ける）。この画面で見た直近2分の進み方で残りを割る。
+// 再開した検査の止まっていた時間や、前回の結果の使い回しで一気に進んだ分を混ぜないため、見始めからの平均は使わず、
+// 1回の更新で 5% 以上跳ねたら数え直す。大きさの偏りで外れるので「目安」とする
+const PACE_WINDOW = 120; // 秒
+function paceText(j, f) {
+  const now = Date.now() / 1000;
+  if (!j.running || !j.enum_done) {
+    state.pace = null;
+    return "";
+  }
+  let p = state.pace;
+  const last = p && p.samples[p.samples.length - 1];
+  if (!p || p.job !== j.id || f < last.f || f - last.f >= 0.05) {
+    p = state.pace = { job: j.id, samples: [], movedAt: now };
+  }
+  if (!p.samples.length || f > p.samples[p.samples.length - 1].f) p.movedAt = now;
+  p.samples.push({ t: now, f });
+  while (p.samples.length > 2 && now - p.samples[1].t >= PACE_WINDOW) p.samples.shift();
+  const first = p.samples[0], seen = now - first.t;
+  // 1つの大きなファイル（数 GB の zip など）を読んでいる間は、数も大きさも進まない。止まっているのではないと伝える
+  if (now - p.movedAt >= 60) return "・大きなファイルを検査中のため、割合はしばらく変わりません（検査中のファイルは下に出ています）";
+  if (seen < 30 || f - first.f < 0.001) return "・残りの目安は、しばらく見ていると出ます";
+  const rest = ((1 - f) * seen) / (f - first.f);
+  if (rest > 7 * 86400) return "・残りの目安 1週間以上";
+  const end = new Date((now + rest) * 1000);
+  const hm = end.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  const day = end.toDateString() === new Date().toDateString() ? "" : `${end.getMonth() + 1}/${end.getDate()} `;
+  return `・残りの目安 ${fmtDuration(rest)}（${day}${hm} ごろ終わる見込み）`;
 }
 
 async function renderPasswordPanel(j) {
@@ -786,6 +849,7 @@ $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTime
 $("#f-type").addEventListener("change", () => { state.offset = 0; loadTable(); });
 $("#f-conf").addEventListener("change", () => { state.offset = 0; loadTable(); });
 $("#f-diff").addEventListener("change", () => { state.offset = 0; loadTable(); });
+$("#f-status").addEventListener("change", () => { state.offset = 0; loadTable(); });
 $("#prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadTable(); });
 $("#next").addEventListener("click", () => { state.offset += state.limit; loadTable(); });
 
@@ -808,12 +872,13 @@ const EMPTY_TEXT = {
 
 async function loadTable() {
   if (!state.jobId || !state.tab) return;
+  const seq = (state.tableSeq = (state.tableSeq || 0) + 1); // この読み込みの番号（古い応答を捨てるため）
   const id = encodeURIComponent(state.jobId);
   const q = encodeURIComponent($("#q").value.trim());
   const base = `offset=${state.offset}&limit=${state.limit}&q=${q}`;
   let r, head, rows, click;
   if (state.tab === "attention") {
-    r = await api(`/api/jobs/${id}/attention?${base}`);
+    r = await api(`/api/jobs/${id}/attention?${base}&status=${encodeURIComponent($("#f-status").value)}`);
     head = ["区分", "ファイル", "形式", "理由・対処"];
     rows = r.rows.map((x) => [pill(x.status, x.status_label), pathCell(x.path), esc(x.kind), esc(x.reason)]);
     click = r.rows.map((x) => x.top_path);
@@ -874,6 +939,9 @@ async function loadTable() {
     rows = r.rows.map((x) => [pathCell(x.path), `<td class="nowrap">${esc(x.type)}</td>`, pill(x.confidence, x.confidence_label), `<td class="nowrap"><span class="mono rv-value" ${rvAttr(x, x.value)}>${esc(x.value)}</span>${rvButton(x)}</td>`, `<td class="loc">${esc(x.location)}</td>`, `<span class="small rv-ctx" ${rvAttr(x, x.context)} title="${esc(x.rule + " / " + x.method)}">${esc(x.context)}</span>`]);
     click = r.rows.map((x) => x.top_path);
   }
+  // 待っている間に別の読み込みが始まっていたら、この古い結果は捨てる（巨大な検査では全件の応答が数秒遅れて届き、
+  // あとから押したタイルの絞り込みの結果を上書きしていた）
+  if (seq !== state.tableSeq) return;
   // 作り直しの前にフォーカスしていた行を覚えて、後で戻す
   const focusedRow = document.activeElement && document.activeElement.closest && document.activeElement.closest("#table tbody tr[data-i]");
   const focusIdx = focusedRow ? focusedRow.dataset.i : null;

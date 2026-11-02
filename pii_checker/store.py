@@ -826,8 +826,12 @@ class Store:
     def summary(self, job_id: str) -> dict:
         """進捗と総合判定の材料。"""
         q = self.query
-        files_total = q("SELECT COUNT(*) FROM files WHERE job_id=?", (job_id,))[0][0]
-        files_done = q("SELECT COUNT(*) FROM files WHERE job_id=? AND state='done'", (job_id,))[0][0]
+        # ファイルの数と大きさ（大きさの進み具合は、1つで何十分もかかる大きなファイルがあると数では止まって見えるため）
+        files_total, files_done, bytes_total, bytes_done = q(
+            "SELECT COUNT(*), COALESCE(SUM(state='done'), 0), COALESCE(SUM(size), 0),"
+            " COALESCE(SUM(CASE WHEN state='done' THEN size END), 0) FROM files WHERE job_id=?",
+            (job_id,),
+        )[0]
         status_counts = {
             r[0]: r[1]
             for r in q(
@@ -913,6 +917,8 @@ class Store:
             "distinct_totals": totals,
             "files_total": files_total,
             "files_done": files_done,
+            "bytes_total": bytes_total,
+            "bytes_done": bytes_done,
             "item_status": status_counts,
             "file_status": top_status,
             "risk": risk_counts,

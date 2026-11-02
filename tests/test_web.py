@@ -203,9 +203,25 @@ def test_scan_password_and_reports(server):
     j = wait_done(base, job_id)
     s = j["summary"]
     assert s["files_total"] == len(SAMPLES) and s["files_done"] == len(SAMPLES)
+    # 大きさの進み具合（終わった検査では全部済み）と、列挙を終えた印
+    assert s["bytes_total"] > 0 and s["bytes_done"] == s["bytes_total"], s
+    assert j["enum_done"] is True
     assert s["password_files"] == 3, s
     assert j["verdict"]["level"] == "found" and j["verdict"]["next_step"]
     assert j["phase"] == "完了" and j["attention_total"] == 3
+
+    # 要対応の区分で絞り込める（タイルを押したとき、その区分の項目だけを出す）。重い区分が先に並ぶ
+    st, _, data = call(base, f"/api/jobs/{job_id}/attention")
+    rows = json.loads(data)["rows"]
+    order = {"needs_password": 0, "uncheckable": 1, "error": 2, "link": 2, "pending": 3}
+    assert [order.get(r["status"], 4) for r in rows] == sorted(order.get(r["status"], 4) for r in rows), rows
+    st, _, data = call(base, f"/api/jobs/{job_id}/attention?status=needs_password")
+    got = json.loads(data)
+    assert st == 200 and got["total"] == 3 and {r["status"] for r in got["rows"]} == {"needs_password"}, got
+    for other in ("uncheckable", "folder", "pending"):
+        st, _, data = call(base, f"/api/jobs/{job_id}/attention?status={other}")
+        assert st == 200 and json.loads(data)["total"] == 0, (other, data)
+    assert call(base, f"/api/jobs/{job_id}/attention?status=bogus")[0] == 400
 
     # パスワードを1回入れると、要パスワードの全件に試される
     st, _, data = call(base, f"/api/jobs/{job_id}/passwords", "POST", {"password": "secret123"})

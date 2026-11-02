@@ -39,6 +39,8 @@ __all__ = [
     "ocr_image_bytes",
     "ocr_pil_image",
     "ocr_pil_image_lines",
+    "is_jpeg_xr",
+    "open_with_wic",
 ]
 
 # 文字の高さ（px）の目安。これより小さければ拡大して読み直す
@@ -504,6 +506,60 @@ def ocr_pil_image_lines(img) -> list[dict]:
                 chars.append((prev_end if prev_end is not None else nxt, nxt if nxt is not None else prev_end))
         out.append({"text": text, "chars": chars, "top": line["top"] / scale, "bottom": line["bottom"] / scale})
     return out
+
+
+def is_jpeg_xr(data: bytes) -> bool:
+    """JPEG XR（HD Photo。Office の文書の中の .wdp など）の画像か。PIL では開けないので WIC で開く。"""
+    return bytes(data[:3]) == b"II\xbc"
+
+
+def open_with_wic(data: bytes) -> Image.Image:
+    """PIL で開けない画像（JPEG XR）を、Windows の画像の部品（WIC）で開いてグレースケールの PIL 画像にする。
+
+    Raises:
+        OcrUnavailable: OCR（WinRT）が使えない環境のとき
+        ValueError: 壊れている・開けないとき
+    """
+    _require_available()
+    try:
+        return _open_with_wic_here(bytes(data))
+    except RuntimeError as exc:
+        if "single-threaded apartment" not in str(exc):
+            raise ValueError(f"画像を読み込めませんでした（壊れている可能性があります）: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"画像を読み込めませんでした（壊れている可能性があります）: {exc}") from exc
+    try:
+        return _sta_fallback_executor().submit(_open_with_wic_here, bytes(data)).result()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"画像を読み込めませんでした（壊れている可能性があります）: {exc}") from exc
+
+
+def _open_with_wic_here(data: bytes) -> Image.Image:
+    """``open_with_wic`` の本体。呼んだスレッドの上で WinRT の BitmapDecoder を使う。"""
+    imaging = _winrt["imaging"]
+    streams = _winrt["streams"]
+    stream = streams.InMemoryRandomAccessStream()
+    writer = streams.DataWriter(stream)
+    writer.write_bytes(data)
+    writer.store_async().get()
+    writer.detach_stream()
+    stream.seek(0)
+    decoder = imaging.BitmapDecoder.create_async(stream).get()
+    w, h = decoder.pixel_width, decoder.pixel_height
+    if w * h > (Image.MAX_IMAGE_PIXELS or 1 << 62):
+        raise ValueError(f"画像の画素数が大きすぎるため読み込みを中止しました（{w}×{h}）")
+    # WIC は GRAY8 へ直接は変換できないので、BGRA8 で取り出して PIL でグレースケールにする
+    bitmap = decoder.get_software_bitmap_converted_async(
+        imaging.BitmapPixelFormat.BGRA8, imaging.BitmapAlphaMode.IGNORE
+    ).get()
+    try:
+        w, h = bitmap.pixel_width, bitmap.pixel_height
+        buf = streams.Buffer(w * h * 4)
+        bitmap.copy_to_buffer(buf)
+        raw = bytes(memoryview(buf)[: buf.length])
+    finally:
+        bitmap.close()
+    return Image.frombytes("RGBA", (w, h), raw, "raw", "BGRA").convert("L")
 
 
 def ocr_image_bytes(data: bytes) -> str:

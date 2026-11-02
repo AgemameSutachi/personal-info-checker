@@ -301,6 +301,8 @@ def sniff(blob: Blob) -> str:
         return "image"
     if head[:4] in (b"II*\x00", b"MM\x00*"):
         return "image"
+    if head[:4] == b"II\xbc\x01":
+        return "image"  # JPEG XR（HD Photo。Office の文書の中の .wdp など）。WIC で開く（formats.misc.handle_image）
     if head.startswith(b"BM") and ext in (".bmp", ".dib", ""):
         return "image"
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":

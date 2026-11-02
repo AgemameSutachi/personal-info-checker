@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -625,6 +625,7 @@ _RE_WORD_CHAR = re.compile(r"[A-Za-z一-龥ぁ-んァ-ヶ]")
 _RE_YYYYMMDD = re.compile(r"(19|20)[0-9]{6}")
 _RE_ISO_DATE_HEAD = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _RE_DATE_SERIAL = re.compile(r"[0-9]{4,5}(\.0+)?")
+_RE_AT_WORD = re.compile(r"[\[(（]\s*at\s*[\])）]|\sat\s|アットマーク", re.I)
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -687,6 +688,11 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         if not digits or len(v) > 30:
             return None
         conf = Confidence.LOW
+    elif category == "email":
+        # 見出しが「メール」でも、@ の無い値（コードを表として読んだときの「'」「(」で始まる断片など）はメールではない。
+        # 「taro[at]example.jp」のように @ を書き換えたものは残す（全角の ＠ は normalize で @ になっている）
+        if "@" not in v and "＠" not in v and not _RE_AT_WORD.search(v):
+            return None
     elif category in ("gender", "age"):
         conf = Confidence.LOW
     elif category == "sensitive":
@@ -1189,11 +1195,109 @@ def detect(text: str, header: str | None = None) -> list[Hit]:
 
 def _detect_uncached(text: str, header: str | None) -> list[Hit]:
     """detect の本体（覚え書きを通さない）。"""
-    if _RUST is not None:
-        hits = _detect_rust(text, header)
-        if hits is not None:
-            return hits
-    return _detect_py(text, header)
+    hits = _detect_rust(text, header) if _RUST is not None else None
+    if hits is None:
+        hits = _detect_py(text, header)
+    return _drop_false_shapes(text, _drop_inside_hash(text, hits)) if hits else hits
+
+
+# カード番号の区切り方として普通の並び（4桁ずつ・最後だけ1〜7桁、Amex の 4-6-5、Diners の 4-6-4）
+_CARD_GROUPS = re.compile(
+    r"[0-9]{4}(?:[ \-][0-9]{4}){2}[ \-][0-9]{1,7}|[0-9]{4}(?:[ \-][0-9]{4}){3}[ \-][0-9]{1,3}"  # 19桁の 4-4-4-4-3 も
+    r"|[0-9]{4}[ \-][0-9]{6}[ \-][0-9]{4,5}"
+)
+# 「様」「殿」で終わっても敬称ではない語（名前の終わりになりにくい字に限る。「健一様」「和正様」は落とさない）
+_HONORIFIC_WORDS = (
+    "仕様",
+    "同様",
+    "模様",
+    "異様",
+    "態様",
+    "紋様",
+    "有様",
+    "両様",
+    "別様",
+    "各様",
+    "神様",
+    "王様",
+    "宮殿",
+    "神殿",
+    "本殿",
+    "拝殿",
+    "社殿",
+    "寝殿",
+    "仏殿",
+    "霊殿",
+)
+# 様式・様子・多様性・様態・殿堂（「様相」は「○○様相談」のように人の名前の後ろにも来るので入れない）
+_HONORIFIC_NOT_AFTER = "式子性態堂"
+
+
+def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
+    """実物の検査（2026-10-21・ドライブ全体）で多かった、形だけ当たる誤検出を除く。
+
+    - カード番号: 区切りがあるのに普通の並びでないもの（16進のダンプ「3f 32 30 …」の数字だけの組など）。
+      確度 高（カードの語・列の見出し）と、カード番号の語があって Luhn が合わない 低 は残す
+    - 電話（確度 低 のもの）: 小数の途中から始まる・小数へ続くもの（SVG の座標「0.07612 -0.4056」など）。
+      区切りのある携帯などの確度 中 は、「項目1.090-…」のような箇条書きもあるので落とさない
+    - 「様」「殿」: 仕様・同様・宮殿のような語と、様式・殿堂のように後ろへ続く語
+    """
+    out = []
+    for h in hits:
+        if h.rule.startswith("列見出し"):
+            out.append(h)  # 列の見出しで決めたものは値の形で落とさない
+            continue
+        if h.pii_type == "credit_card":
+            if (
+                h.confidence != Confidence.HIGH
+                and "カード番号の語あり" not in h.rule
+                and not h.value.isdigit()
+                and not _CARD_GROUPS.fullmatch(h.value)
+            ):
+                continue
+        elif h.pii_type == "phone" and h.confidence == Confidence.LOW:
+            before = text[max(0, h.start - 2) : h.start]
+            after = text[h.end : h.end + 2]
+            decimal_before = len(before) == 2 and before[1] == "." and before[0].isdigit()
+            if decimal_before and text[max(0, h.start - 4) : h.start] == "+81.":
+                decimal_before = False  # 「+81.90-…」の国番号の区切り（小数ではない）
+            if decimal_before or (len(after) == 2 and after[0] == "." and after[1].isdigit()):
+                continue
+        elif h.rule == "漢字の名前＋様・殿":
+            nxt = text[h.end : h.end + 1]
+            if h.value[-2:] in _HONORIFIC_WORDS or (nxt and nxt in _HONORIFIC_NOT_AFTER):
+                continue
+        out.append(h)
+    return out
+
+
+# ハッシュ・識別子（git のオブジェクトや pack の名前・SHA-1/SHA-256/MD5・UUID）。16進の数字だけの並びが偶然
+# 12桁の検査数字に合うと、マイナンバー等として拾ってしまう（40桁のランダムな16進の約0.15%）。英字を1つ以上含む
+# 32文字以上の16進の並び（頭の 0x は許す）と、UUID の形の中で見つけたものは、種類を問わず捨てる
+# （数字だけの長い並びは今までどおり扱う）。利用者が足した規則（userrules）の検出は detect を通らないので対象外
+_HASH_LIKE = re.compile(
+    r"(?<![0-9A-Za-z])(?:0[xX])?"
+    r"(?:[0-9A-Fa-f]{32,}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
+    r"(?![0-9A-Za-z])"
+)
+
+
+def _drop_inside_hash(text: str, hits: list[Hit]) -> list[Hit]:
+    """ハッシュ・UUID の並びの中で見つけた検出を除く（検出があるときだけ呼ばれる）。"""
+    if len(text) < 32:
+        return hits  # 32文字に満たない本文に16進の並び・UUID は入らない
+    spans = [m.span() for m in _HASH_LIKE.finditer(text) if not m.group().replace("-", "").isdigit()]
+    if not spans:
+        return hits
+    starts = [s for s, _ in spans]
+    out = []
+    for h in hits:
+        # 並びは位置の順で重ならないので、検出の始まりより前で最後に始まる並びだけを見ればよい
+        i = bisect_right(starts, h.start) - 1
+        if i >= 0 and h.end <= spans[i][1]:
+            continue
+        out.append(h)
+    return out
 
 
 # 本人確認書類の写しの判別（書類の名前, 書類の名前の語, 一緒に載る語, 一緒に載る語がいくつ要るか）。

@@ -301,6 +301,8 @@ def create_app(
             "created": job["created"],
             "started": job["started"],
             "finished": job["finished"],
+            # ファイルを数え終えたか（数え終わるまでは全体が分からないので、画面は終わりの見込みを出さない）
+            "enum_done": bool(job.get("enum_done")),
             "summary": summary,
             "verdict": {
                 "level": v.level,
@@ -646,17 +648,44 @@ def create_app(
         return total, rows
 
     @app.get("/api/jobs/{job_id}/attention")
-    def attention(job_id: str, offset: int = 0, limit: int = 100, q: str = ""):
+    def attention(job_id: str, offset: int = 0, limit: int = 100, q: str = "", status: str = ""):
+        """要対応の一覧。status で区分を絞る（needs_password・uncheckable・partial・pending・folder。空ならすべて）。
+
+        並びは重い区分から（パスワード → 検査できなかった → 開けなかったフォルダ・リンク → 未検査 → 簡易検査）。
+        簡易検査が何万件もあると、名前の順では「検査できなかった」がその後ろに埋もれて見つからなかった。
+        """
         _job_or_404(job_id)
+        if status not in ("", "needs_password", "uncheckable", "partial", "pending", "folder"):
+            raise HTTPException(400, f"区分の指定が正しくありません: {status}")
         like = f"%{q}%"
+        parts, args = [], []
+        item_statuses = ("needs_password", "uncheckable", "partial", "pending") if not status else (status,)
+        if status != "folder":
+            marks = ",".join("?" * len(item_statuses))
+            parts.append(
+                "SELECT 'item' AS src, status, path, kind, reason, top_path, size FROM items WHERE job_id=? "
+                f"AND status IN ({marks}) AND path LIKE ?"
+            )
+            args += [job_id, *item_statuses, like]
+        if status in ("", "folder"):
+            parts.append(
+                "SELECT 'folder' AS src, kind AS status, path, '' AS kind, reason, path AS top_path, NULL AS size"
+                " FROM folder_errors WHERE job_id=? AND path LIKE ?"
+            )
+            args += [job_id, like]
+        if status in ("", "pending"):
+            parts.append(
+                "SELECT 'file' AS src, 'pending' AS status, top_path AS path, '' AS kind, 'まだ検査していない' AS reason,"
+                " top_path, size FROM files"
+                " WHERE job_id=? AND state='pending' AND top_path LIKE ?"
+            )
+            args += [job_id, like]
+        # 複合の SELECT の ORDER BY には式を書けないので、外側で包んで並べる
         sql = (
-            "SELECT 'item' AS src, status, path, kind, reason, top_path, size FROM items WHERE job_id=? "
-            "AND status IN ('needs_password','uncheckable','partial','pending') AND path LIKE ? "
-            "UNION ALL SELECT 'folder', kind, path, '', reason, path, NULL FROM folder_errors WHERE job_id=? AND path LIKE ? "
-            "UNION ALL SELECT 'file', 'pending', top_path, '', 'まだ検査していない', top_path, size FROM files WHERE job_id=? AND state='pending' AND top_path LIKE ? "
-            "ORDER BY 2, 3"
+            "SELECT * FROM (" + " UNION ALL ".join(parts) + ") ORDER BY CASE status WHEN 'needs_password' THEN 0"
+            " WHEN 'uncheckable' THEN 1 WHEN 'error' THEN 2 WHEN 'link' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END, path"
         )
-        total, rows = _page(sql, (job_id, like, job_id, like, job_id, like), offset, limit)
+        total, rows = _page(sql, tuple(args), offset, limit)
         label = {**STATUS_JA, "error": "読めなかったフォルダ", "link": "リンク"}
         return {
             "total": total,

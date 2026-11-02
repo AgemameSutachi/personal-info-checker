@@ -300,3 +300,84 @@ def test_speed_is_reasonable():
     elapsed = time.perf_counter() - started
     _assert_main_values(text)
     assert elapsed < 5.0, f"{elapsed:.2f} 秒かかった"
+
+
+# ---------------------------------------------------------------------------
+# JPEG XR（PowerPoint・Word で画像に効果をかけたときに残る .wdp）
+# ---------------------------------------------------------------------------
+
+
+def _to_jpeg_xr(img: Image.Image) -> bytes:
+    """PIL 画像を WinRT の符号器で JPEG XR にする（PIL は JPEG XR を書けないため）。"""
+    import uuid
+
+    import winrt.windows.graphics.imaging as wimaging
+    import winrt.windows.storage.streams as wstreams
+
+    rgba = img.convert("RGBA")
+    stream = wstreams.InMemoryRandomAccessStream()
+    jpeg_xr_encoder = uuid.UUID("AC4CE3CB-E1C1-44CD-8215-5A1665509EC2")
+    enc = wimaging.BitmapEncoder.create_async(jpeg_xr_encoder, stream).get()
+    enc.set_pixel_data(
+        wimaging.BitmapPixelFormat.RGBA8,
+        wimaging.BitmapAlphaMode.IGNORE,
+        rgba.width,
+        rgba.height,
+        96,
+        96,
+        rgba.tobytes(),
+    )
+    enc.flush_async().get()
+    reader = wstreams.DataReader(stream.get_input_stream_at(0))
+    n = reader.load_async(stream.size).get()
+    return bytes(memoryview(reader.read_buffer(n)))
+
+
+def test_jpeg_xr_is_sniffed_as_image(tmp_path):
+    """JPEG XR の目印の画像を「形式不明（圧縮または暗号化）」にせず、画像として扱う（不具合の修正）。"""
+    from pii_checker import sniff
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "hdphoto1.wdp"
+    p.write_bytes(b"II\xbc\x01" + bytes(range(256)) * 64)  # 目印だけ本物で中身は壊れたもの
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False))
+    item = res.items[0]
+    assert item.kind == sniff.KIND_LABELS["image"]
+    assert item.status == Status.UNCHECKABLE and "JPEG XR" in item.reason, item.reason
+
+
+@needs_ocr
+def test_jpeg_xr_is_read_by_ocr(tmp_path):
+    """JPEG XR の画像の文字を OCR で読んで検査する（PowerPoint の中の hdphoto1.wdp が「検査できなかった」になっていた）。"""
+    import zipfile
+
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions, Status
+
+    data = _to_jpeg_xr(_render(SAMPLE_LINES, 32))
+    assert ocr.is_jpeg_xr(data)
+    text = ocr.ocr_pil_image(ocr.open_with_wic(data))
+    # JPEG XR は非可逆なので、メールの「.」のような細かい字は読み落としうる（電話・氏名で確かめる）
+    assert "090-1234-5678" in text and "山田太郎" in text, text
+    # zip の中（pptx の ppt/media と同じ置き方）でも、検査できなかった項目にならず中身を読む
+    z = tmp_path / "slides.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("ppt/media/hdphoto1.wdp", data)
+    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path)))
+    bad = [(it.path, it.status, it.reason) for it in res.items if it.status != Status.SCANNED]
+    assert bad == []
+    found = {k for it in res.items for k in it.finding_counts}
+    assert "phone" in found, found
+
+
+@needs_ocr
+def test_broken_jpeg_xr_is_uncheckable_with_reason(tmp_path):
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "broken.wdp"
+    p.write_bytes(b"II\xbc\x01" + b"\x00" * 100)
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
+    item = res.items[0]
+    assert item.status == Status.UNCHECKABLE and "JPEG XR" in item.reason, item.reason

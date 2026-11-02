@@ -84,6 +84,94 @@ def test_detects(text, expected):
 @pytest.mark.parametrize(
     "text",
     [
+        # git の pack・オブジェクトの名前（SHA-1）。12桁の数字の並びが偶然マイナンバーの検査数字に合う
+        "pack-a123456789018bc0d1e2f3a4b5c6d7e8f9a0b1.pack",
+        "a123456789018bc0d1e2f3a4b5c6d7e8f9a0b1",
+        # SHA-256・MD5・UUID の中のカード番号・電話番号の形
+        "sha256: 4111111111111111abcdef0123456789abcdef0123456789abcdef01234567",
+        "md5 090123456780abcdef0123456789abcd",
+        "id=0a1b2c3d-4e5f-4a6b-8c7d-123456789018",
+        "0x4111111111111111abcdef0123456789abcdef01",
+    ],
+)
+def test_nothing_inside_hash(text):
+    """ハッシュ・UUID の16進の並びの中の数字は、確度を問わず何も拾わない（git の中のファイル名からの誤検出の修正）。"""
+    assert types_of(text) == {}
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        # 16進の並びが短い・英字を含まない・前後に英数字が続くものは今までどおり拾う
+        ("個人番号 123456789018 abcdef", "my_number"),
+        ("a123456789018bc", "my_number"),
+        ("カード 4111111111111111 sha 0123456789abcdef0123456789abcdef", "credit_card"),
+    ],
+)
+def test_near_hash_still_found(text, expected):
+    assert expected in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text, pii_type",
+    [
+        # 16進のダンプ（2桁ずつ）・区切りの位置がカードとして不自然な並び
+        ("41 11 11 11 11 11 11 11", "credit_card"),
+        ("411111111111-1111", "credit_card"),
+        # SVG の座標・小数の並びの続き
+        ('<path d="M0.07612 -0.4056,0.1 0.2"/>', "phone"),
+        ("1.03-1234-5678", "phone"),
+        ("03-1234-5678.25", "phone"),
+        # 「様」「殿」で終わる普通の語・後ろへ続く語
+        ("この画面の表示仕様", "name"),
+        ("前回報告同様", "name"),
+        ("京都の平安宮殿", "name"),
+        ("帳票出力様式", "name"),
+        ("生物の遺伝子多様性", "name"),
+        ("野球名誉殿堂", "name"),
+    ],
+)
+def test_shape_only_false_positive(text, pii_type):
+    """実物の検査（ドライブ全体）で多かった、形だけ当たる誤検出を拾わない。"""
+    assert pii_type not in types_of(text), types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("4111 1111 1111 1111", "credit_card"),
+        ("4111-1111-1111-1111", "credit_card"),
+        ("3782 822463 10005", "credit_card"),  # Amex の 4-6-5
+        ("4111111111111111", "credit_card"),
+        ("カード 41 11 11 11 11 11 11 11", "credit_card"),  # カードの語があれば区切りが変でも拾う
+        ("カード番号 4111-1111-1111-1112", "credit_card"),  # 語つきの打ち間違い（低）は残す
+        ("TEL.03-1234-5678", "phone"),
+        ("+81.090-123-5678", "phone"),  # 国番号の後ろの「.」は小数ではない
+        ("項目1.090-1234-5678", "phone"),  # 区切りのある携帯（確度 中）は、箇条書きの番号の後ろでも拾う
+        ("3560 1234 5678 9012 347", "credit_card"),  # 19桁の 4-4-4-4-3
+        ("大和田様相談の件", "name"),  # 「様相」は人の名前の後ろにも来る
+        ("連絡先 03-1234-5678。", "phone"),
+        ("山田健一様", "name"),
+        ("佐藤和正様", "name"),
+        ("鈴木一郎殿", "name"),
+    ],
+)
+def test_shape_filter_keeps_real_ones(text, expected):
+    assert expected in types_of(text)
+
+
+def test_email_column_needs_at_mark():
+    """見出しが「メールアドレス」の列でも、@ の無い値はメールとして拾わない。"""
+    assert "email" not in types_of("'utf-8'", "メールアドレス")
+    assert "email" not in types_of("(x)", "メールアドレス")
+    assert "email" in types_of("taro@example.jp", "メールアドレス")
+    for v in ("taro＠example.jp", "taro[at]example.jp", "taro(at)example.jp", "taro アットマーク example.jp"):
+        assert "email" in types_of(v, "メールアドレス"), v
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "JANコード 4901234567894",
         "注文番号 202410170001",
         "金額 1,234,567円",

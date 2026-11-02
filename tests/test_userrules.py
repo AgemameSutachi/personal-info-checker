@@ -611,6 +611,30 @@ def test_busy_pc_does_not_let_a_slow_pattern_through(monkeypatch):
         assert check_pattern(p) is None, p
 
 
+def test_single_spike_does_not_reject_a_normal_pattern(monkeypatch):
+    """PC が一瞬止まって、規則の1回の時間だけが大きく跳ねても、普通の規則を断らない（測り直して決める）。
+
+    CI の機械で \\w+@\\w+ が断られた（1回の時間だけで決めていた）ことの再発防止。
+    """
+    monkeypatch.setattr(userrules, "_SPEED_ABORT", 0.0)
+    real = userrules._time_once
+    spiked = []
+
+    def time_once(compiled, text):
+        took = real(compiled, text)
+        # 基準の正規表現を測る呼び出しには足さない（跳ねるのは規則の1回だけ）
+        if not spiked and compiled.pattern != userrules._SPEED_REFERENCE:
+            spiked.append(text)
+            return took + 0.05  # 最初の1回だけ、止まったぶんを足す
+        return took
+
+    monkeypatch.setattr(userrules, "_time_once", time_once)
+    assert check_pattern(r"\w+@\w+") is None
+    assert spiked, "跳ねを差し込めていない"
+    spiked.clear()
+    assert check_pattern(r"\w+\w?\d+x"), "遅い規則を通した"
+
+
 @pytest.mark.parametrize(
     "value, masked",
     [

@@ -552,6 +552,16 @@ class Store:
             )
         ]
 
+    def pending_files_sized(self, job_id: str) -> list[tuple[str, int]]:
+        """未検査のファイルと、列挙したときの大きさ（分からなければ 0）。名前の順。"""
+        return [
+            (r[0], r[1] or 0)
+            for r in self.query(
+                "SELECT top_path, size FROM files WHERE job_id=? AND state='pending' ORDER BY top_path",
+                (job_id,),
+            )
+        ]
+
     def mark_pending(self, job_id: str, top_paths: list[str]) -> None:
         with self.tx() as c:
             c.executemany(

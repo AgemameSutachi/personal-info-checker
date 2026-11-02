@@ -625,6 +625,7 @@ _RE_WORD_CHAR = re.compile(r"[A-Za-z一-龥ぁ-んァ-ヶ]")
 _RE_YYYYMMDD = re.compile(r"(19|20)[0-9]{6}")
 _RE_ISO_DATE_HEAD = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _RE_DATE_SERIAL = re.compile(r"[0-9]{4,5}(\.0+)?")
+_RE_PLAIN_NUMBER = re.compile(r"[0-9]{1,9}(\.[0-9]+)?")
 _RE_AT_WORD = re.compile(r"[\[(（]\s*at\s*[\])）]|\sat\s|アットマーク", re.I)
 
 
@@ -694,6 +695,9 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         if "@" not in v and "＠" not in v and not _RE_AT_WORD.search(v):
             return None
     elif category in ("gender", "age"):
+        # 数だけの値が年齢にありえない大きさなら年齢ではない（競馬の表の「age」列の 1879 など・2026-11-02 実物の検査）
+        if category == "age" and _RE_PLAIN_NUMBER.fullmatch(v.strip()) and float(v) > 130:
+            return None
         conf = Confidence.LOW
     elif category == "sensitive":
         conf = Confidence.MEDIUM
@@ -1231,6 +1235,74 @@ _HONORIFIC_WORDS = (
 )
 # 様式・様子・多様性・様態・殿堂（「様相」は「○○様相談」のように人の名前の後ろにも来るので入れない）
 _HONORIFIC_NOT_AFTER = "式子性態堂"
+# 「様」で終わる語のうち、終わりの2文字だけでは名前と分けられないもの（「美歩様」は名前なので「歩様」では落とさない）
+_HONORIFIC_LONG_WORDS = ("交差歩様",)  # 馬の歩き方（競馬の調教の寸評）
+# 手がかり語の無い番号の形（数字ばかりの並びの中にあれば、数値のデータとみなして捨てる）
+_BARE_NUMBER_RULES = frozenset(
+    {
+        "12桁・検査数字一致（手がかり語なし）",
+        "12桁・検査数字一致（手がかり語なし。フリーダイヤル等の番号の形にも見える）",
+        "Luhn一致・ブランド番号体系一致",
+        "携帯電話番号の形",
+        "固定電話番号の形",
+    }
+)
+# 年月日（19xx・20xx の年＋月＋日）で始まる12桁。レースの ID・時刻つきのファイル名（202205020606・202610211234）
+_RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[0-9]{4}")
+_RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
+_NUMERIC_CHARS = frozenset("0123456789.+-:/,")
+_RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
+
+
+def _decimal_adjacent(text: str, start: int, end: int) -> bool:
+    """検出の直前が「数字＋.」か、直後が「.＋数字」か（小数の並びの途中から始まる・小数へ続く）。"""
+    before = text[max(0, start - 2) : start]
+    after = text[end : end + 2]
+    return (len(before) == 2 and before[1] == "." and before[0].isdigit()) or (
+        len(after) == 2 and after[0] == "." and after[1].isdigit()
+    )
+
+
+def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
+    """検出と同じ行の前後（各 width 文字）が数字と数の記号だけで、ほかの数の塊が3つ以上・数字が10個以上あるか。
+
+    固定長のレコード（競馬のデータ「3132512031318081   231050710450   1770  2001-18.3」）・数値の列の並びの中の
+    番号の形は、人の番号ではなく数値のデータ。前後の行は見ない（番号だけの行が並ぶ一覧を落とさないため）。
+    番号が2つ並ぶだけの行（「09012345678 09087654321」）も、塊が足りないので当たらない。
+    """
+    before = text[max(0, start - width) : start].rsplit("\n", 1)[-1]
+    after = text[end : end + width].split("\n", 1)[0]
+    digits = 0
+    for c in before + after:
+        if c.isspace():
+            continue
+        if c not in _NUMERIC_CHARS:
+            return False
+        digits += c.isdigit()
+    if digits < 10:
+        return False
+    chunks = [x for x in _RE_NUMBER_CHUNK_SPLIT.split(before + " " + after) if x]
+    # 塊がどれも10桁以上の番号なら、番号を並べた一覧（「09012345678 09087654321 …」）とみなして捨てない
+    # （窓の端で切れた塊は短く見えるので、両端の塊は数えない）
+    inner = chunks[1:-1] if len(chunks) > 2 else chunks
+    if all(sum(c.isdigit() for c in x) >= 10 for x in inner):
+        return False
+    return len(chunks) >= 3
+
+
+def _era_date_is_broken(text: str, h: Hit) -> bool:
+    """和暦の日付の形（確度 低）が、日付としてありえないか、数値の並びの一部か。
+
+    「532637H 10.3-13.0」（固定長のレコードの英字の後ろの数）・「H 15.3-99」（日が99）を拾わないため。
+    """
+    nums = _RE_DATE_NUMBERS.findall(h.value)
+    if len(nums) >= 3 and nums[1] != "元" and nums[2] != "元":
+        if not (1 <= int(nums[1]) <= 12 and 1 <= int(nums[2]) <= 31):
+            return True
+    prev = text[h.start - 1 : h.start]
+    if h.value[:1].isascii() and prev.isascii() and prev.isalnum():
+        return True  # 1文字の元号（H・S）の前に英数字が続く
+    return text[h.end : h.end + 1] == "." and text[h.end + 1 : h.end + 2].isdigit()
 
 
 def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
@@ -1241,13 +1313,25 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - 電話（確度 低 のもの）: 小数の途中から始まる・小数へ続くもの（SVG の座標「0.07612 -0.4056」など）。
       区切りのある携帯などの確度 中 は、「項目1.090-…」のような箇条書きもあるので落とさない
     - 「様」「殿」: 仕様・同様・宮殿のような語と、様式・殿堂のように後ろへ続く語
+    以下は 2026-11-02 に同じ検査の結果を見直して足したもの（競馬のデータ・小数の並び・時刻つきの名前）:
+    - 手がかり語の無い番号の形（マイナンバー・カード 中・電話 低）: 数字ばかりの並びの中のもの
+    - マイナンバー（手がかり語なし）: 小数の並びの途中（「104.4447.1657.9170.6」）・年月日で始まる12桁
+    - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
     """
     out = []
     for h in hits:
         if h.rule.startswith("列見出し"):
             out.append(h)  # 列の見出しで決めたものは値の形で落とさない
             continue
-        if h.pii_type == "credit_card":
+        if h.rule in _BARE_NUMBER_RULES and h.confidence != Confidence.HIGH and _in_numeric_run(text, h.start, h.end):
+            continue
+        if h.pii_type == "my_number" and h.rule.startswith("12桁・検査数字一致（手がかり語なし"):
+            if _decimal_adjacent(text, h.start, h.end) or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value)):
+                continue
+        elif h.rule == "和暦の日付（生年月日の可能性）":
+            if _era_date_is_broken(text, h):
+                continue
+        elif h.pii_type == "credit_card":
             if (
                 h.confidence != Confidence.HIGH
                 and "カード番号の語あり" not in h.rule
@@ -1265,7 +1349,11 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 continue
         elif h.rule == "漢字の名前＋様・殿":
             nxt = text[h.end : h.end + 1]
-            if h.value[-2:] in _HONORIFIC_WORDS or (nxt and nxt in _HONORIFIC_NOT_AFTER):
+            if (
+                h.value[-2:] in _HONORIFIC_WORDS
+                or h.value.endswith(_HONORIFIC_LONG_WORDS)
+                or (nxt and nxt in _HONORIFIC_NOT_AFTER)
+            ):
                 continue
         out.append(h)
     return out

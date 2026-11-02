@@ -66,6 +66,42 @@ def depends_on_neighbors(path: str) -> bool:
     return bool(RE_PG_DATA.fullmatch(name)) and os.path.exists(os.path.join(os.path.dirname(path), "toc.dat"))
 
 
+# 大きなファイル（この大きさ以上）は先に配る。名前の順に配ると、最後のほうに残った数 GB の zip 1〜2個だけが
+# 何時間も動き、ほかのワーカーが空く（ドライブ全体 6.8 時間の検査で、終わりの約 6,200 秒は 7.8GB の zip 2つだけだった）
+BIG_FILE_BYTES = 1024**3
+# 大きなファイルを同時に配る本数の上限（一時領域・メモリを大きなファイルばかりで食わないように）。
+# 実物の検査時間での模擬では、上限2で全部を大きい順にしたときとほぼ同じ速さ（ワーカー6本で 18,821→15,071 秒）
+BIG_FILE_CONCURRENCY = 2
+
+
+class PendingQueue:
+    """未検査のファイルを配る順を決める（検査スレッドだけが使う）。
+
+    大きなファイル（BIG_FILE_BYTES 以上）は大きい順に先に配り、同時に配っている大きなファイルは cap 本まで。
+    ほかは名前の順。小さいファイルが尽きたら、上限を超えても大きなファイルを配る（ワーカーを空けない）。
+    """
+
+    def __init__(self, pending: list[tuple[str, int]], cap: int):
+        self._big = sorted(((p, s) for p, s in pending if s >= BIG_FILE_BYTES), key=lambda x: (x[1], x[0]))
+        self._small = [p for p, s in reversed(pending) if s < BIG_FILE_BYTES]  # 末尾から取る（名前の順）
+        self.cap = max(1, cap)
+        self._big_out: set[str] = set()
+
+    def next(self) -> str | None:
+        """次に配るファイル。尽きたら None。"""
+        if self._big and (len(self._big_out) < self.cap or not self._small):
+            path = self._big.pop()[0]  # 大きい順（末尾が一番大きい）
+            self._big_out.add(path)
+            return path
+        if self._small:
+            return self._small.pop()
+        return None
+
+    def done(self, path: str) -> None:
+        """配ったファイルが終わった（検査した・使い回した・失敗した）。"""
+        self._big_out.discard(path)
+
+
 def options_from_dict(d: dict) -> ScanOptions:
     names = {f.name for f in fields(ScanOptions)}
     return ScanOptions(**{k: v for k, v in d.items() if k in names})
@@ -360,23 +396,23 @@ class JobRunner:
             initargs=(self.memory_limit,),
         ) as pool:
             while not self._stop.is_set():
-                pending = self.store.pending_files(self.job_id)
+                pending = self.store.pending_files_sized(self.job_id)
                 with self._lock:
                     self._requeue.clear()
                 if not pending:
                     break
                 futures = {}
-                it = iter(pending)
+                queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
                 exhausted = False
                 while (futures or not exhausted) and not self._stop.is_set():
                     # 同時に投げる数を絞る（大量のファイルでもメモリを食わない）
                     while not exhausted and len(futures) < self.workers * 4 and self._db_space_ok():
-                        try:
-                            path = next(it)
-                        except StopIteration:
+                        path = queue.next()
+                        if path is None:
                             exhausted = True
                             break
                         if not self.rechecking and self._try_reuse(path):
+                            queue.done(path)
                             continue  # 前回から変わっていない（前回の結果を写した）
                         with self._lock:
                             book = PasswordBook(
@@ -394,6 +430,7 @@ class JobRunner:
                     for f in done:
                         path, started, version = futures.pop(f)
                         self.current.discard(path)
+                        queue.done(path)
                         self._save(f, path, started, ProcessExpired, version)
                 if self._stop.is_set():
                     pool.stop()

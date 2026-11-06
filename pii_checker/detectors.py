@@ -1253,6 +1253,12 @@ _RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[1
 _RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
 _NUMERIC_CHARS = frozenset("0123456789.+-:/,")
 _RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
+# 16進のダンプの行（番地＋2桁の組が8つ以上「0000030  36 32 34 4B …」か、4桁の組が4つ以上「00000030: 3632 344b …」）
+_RE_DUMP_LINE = re.compile(
+    r"\s*[0-9A-Fa-f]{4,8}:?(?:(?:[ \t]+[0-9A-Fa-f]{2}){8,}|(?:[ \t]+[0-9A-Fa-f]{4}){4,})(?![0-9A-Fa-f])"
+)
+# Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
+_RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
 # 予約語の .test・.example・.invalid・.localhost は実在の宛先にならないので入れない
 _PRIVATE_TLDS = frozenset({"local", "localdomain", "internal", "lan", "corp", "home", "intranet"})
@@ -1371,6 +1377,19 @@ def _across_number_lines(text: str, start: int, end: int) -> bool:
     return False
 
 
+def _in_dump_or_mesh_line(text: str, start: int) -> bool:
+    """検出の始まる行が、16進のダンプの行か Wavefront OBJ の要素の行か。
+
+    - ダンプ（od・hexdump・xxd の出力をログに貼ったもの）: 右の文字の欄「624K000135004120」に数字が並ぶと、
+      左の16進の欄と同じ中身が12桁の番号の形に見える（実物の検査の見本で 1,322 件中 約600件）
+    - OBJ の面・頂点の行「f 1074 1076 1075」: 4桁の数が3つ空白で並ぶと、区切りつきの12桁の形になる
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", start)
+    line = text[line_start : line_end if line_end >= 0 else len(text)]
+    return bool(_RE_DUMP_LINE.match(line) or _RE_OBJ_LINE.fullmatch(line.strip()))
+
+
 def _era_date_is_broken(text: str, h: Hit) -> bool:
     """和暦の日付の形（確度 低）が、日付としてありえないか、数値の並びの一部か。
 
@@ -1399,7 +1418,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - マイナンバー（手がかり語なし）: 小数の並びの途中（「104.4447.1657.9170.6」）・年月日で始まる12桁
     - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
-    2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）
+    2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
+    16進のダンプの行と OBJ の要素の行の中のもの
     """
     out = []
     for h in hits:
@@ -1409,7 +1429,11 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
         if (
             h.rule in _BARE_NUMBER_RULES
             and h.confidence != Confidence.HIGH
-            and (_in_numeric_run(text, h.start, h.end) or _across_number_lines(text, h.start, h.end))
+            and (
+                _in_numeric_run(text, h.start, h.end)
+                or _across_number_lines(text, h.start, h.end)
+                or _in_dump_or_mesh_line(text, h.start)
+            )
         ):
             continue
         if h.pii_type == "my_number" and h.rule.startswith("12桁・検査数字一致（手がかり語なし"):

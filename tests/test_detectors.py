@@ -184,6 +184,12 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("5926\n608\n1234\n5678\n9018\n", "my_number"),
         ("1234\n5678\n9018\n45379\n609\n", "my_number"),
         ("610\n090\n1234\n5678\n0\n", "phone"),
+        # 16進のダンプの行の右の文字の欄（od・hexdump・xxd の出力をログに貼ったもの）
+        ("0000030  36 32 34 4B 30 30 30 31 33 35 30 30 34 31 32 30  624K123456789018\n", "my_number"),
+        ("0000020  2e 7c 31 30 33 32 32 30 32 36 38 30 30      .|123456789018\n", "my_number"),
+        ("00000030: 3632 344b 3030 3031 3335 3030 3431 3230  624K123456789018\n", "my_number"),
+        # Wavefront OBJ の面・頂点の行で4桁の数が3つ空白で並ぶもの
+        ("f 1074 1076 1075\nf 1234 5678 9018\n", "my_number"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -220,6 +226,11 @@ def test_numeric_data_false_positive(text, pii_type):
         ("氏名 山田太郎\n1234\n5678\n9018\n以上", "my_number"),
         ("1234\n5678\n9018", "my_number"),
         ("個人番号\n1234\n5678\n9018\n608\n", "my_number"),  # 語があれば確度 高 で残る
+        # ダンプ・OBJ に似ているが当たらない行（16進の組が8つ未満・英字の語で始まる行）
+        ("0001  12 34 56  山田 123456789018\n", "my_number"),
+        ("no 1234 5678 9018\n", "my_number"),
+        ("for 1234 5678 9018\n", "my_number"),
+        ("個人番号 0000030  36 32 34 4B 30 30 30 31 33 35 30 30  123456789018", "my_number"),  # 語があれば残す
     ],
 )
 def test_numeric_data_filter_keeps_real_ones(text, expected):

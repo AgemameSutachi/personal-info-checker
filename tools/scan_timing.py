@@ -8,9 +8,10 @@ DB は読み取り専用で開くので、検査の途中の DB にも当てて�
   --top      保存の長いファイルを何件並べるか
   --after    保存の長いファイルの直後の何件で「配ってから受け取るまでの待ち」を見るか
 
-動いていた時間は、各ファイルが手元を離れていた区間（受け取った時刻 − 配ってから受け取るまでの秒 〜 受け取った時刻）を
-重ねた長さ。どのファイルも配られていない区間（中断して続きから再開したジョブの止めていた間）は入らず、
-大きなファイルだけが長く走っていた区間は入る。
+動いていた時間は、最初に配ってから最後に受け取るまでから、どのファイルも手元を離れていない60秒以上の空き
+（中断して続きから再開したジョブの止めていた間。使い回しだけが続いた間もこう見える）を引いた長さ。
+手元を離れていた区間は「受け取った時刻 − 配ってから受け取るまでの秒 〜 受け取った時刻」で、大きなファイルだけが
+長く走っていた区間は空きにならない。受け取った時刻は保存の書き込みの直前の時刻なので、区間は保存の分だけ後ろにずれる。
 """
 
 import argparse
@@ -51,22 +52,21 @@ def load_rows(con: sqlite3.Connection, job_id: str) -> list[sqlite3.Row]:
 
 
 def active_time(rows: list) -> tuple[float, float, int, float]:
-    """(最初に配ってから最後に受け取るまで, 動いていた時間, 止めていた区間の数, その合計) を返す。"""
-    spans = sorted((r["scanned_at"] - (r["wall_elapsed"] or 0.0), r["scanned_at"]) for r in rows)
-    first, end = spans[0]
-    active = 0.0
-    holes = []
+    """(最初に配ってから最後に受け取るまで, 動いていた時間, 止めていた区間の数, その合計) を返す。
+
+    動いていた時間は、全体から HOLE_SECONDS 以上の空き（止めていた間）だけを引いたもの。
+    それより短い空き（使い回しの続く間など、時間の内訳の無い行だけが流れた間）は動いていた時間に入れる。
+    """
+    # 時計が戻ったなどで wall_elapsed が負の行は、受け取った時刻の一点として扱う
+    spans = sorted((r["scanned_at"] - max(0.0, r["wall_elapsed"] or 0.0), r["scanned_at"]) for r in rows)
+    end = spans[0][1]
+    long_holes = []
     for a, b in spans[1:]:
-        if a > end:
-            active += end - first
-            holes.append(a - end)
-            first, end = a, b
-        else:
-            end = max(end, b)
-    active += end - first
-    whole = max(b for _, b in spans) - spans[0][0]
-    long_holes = [h for h in holes if h >= HOLE_SECONDS]
-    return whole, active, len(long_holes), sum(long_holes)
+        if a - end >= HOLE_SECONDS:
+            long_holes.append(a - end)
+        end = max(end, b)
+    whole = end - spans[0][0]
+    return whole, whole - sum(long_holes), len(long_holes), sum(long_holes)
 
 
 def summarize(rows: list, workers: int | None = None, top: int = 10, after: int = 20) -> dict:

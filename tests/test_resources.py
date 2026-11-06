@@ -142,3 +142,78 @@ def test_low_db_space_stops_before_full(tmp_path, monkeypatch):
     job = store.job(job_id)
     assert job["state"] == "interrupted" and "空きが無くなった" in job["message"]
     assert store.summary(job_id)["files_done"] == 0
+
+
+def test_run_starts_scanning_before_cleanup_finishes(tmp_path, monkeypatch):
+    """前の検査の残りの片付けが長くても、終わるのを待たずに検査を始め、ジョブの終わりまでには片付け終える。
+
+    以前は片付けが終わるまで検査を始めず、86万ファイルの検査の再開で7分「待機」のままだった（2026-11-06 の実測）。
+    """
+    import threading
+
+    release = threading.Event()
+    events = []
+
+    def slow_cleanup(dirs, no_mark_grace=600.0):
+        events.append("cleanup-start")
+        release.wait(10)
+        events.append("cleanup-end")
+        return 0
+
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    store.set_job(job, enum_done=1)
+    r = runner.JobRunner(store, job, workers=1)
+    monkeypatch.setattr(runner, "cleanup_stale_temp", slow_cleanup)
+    monkeypatch.setattr(r, "_low_space", lambda: False)
+
+    def fake_scan():
+        events.append("scan")
+        release.set()  # 検査が始まってから片付けを終わらせる（待っていたらここに来ない）
+
+    monkeypatch.setattr(r, "_scan_pending", fake_scan)
+    r.start()
+    r.wait(20)
+    assert events == ["cleanup-start", "scan", "cleanup-end"], events
+    assert store.job(job)["state"] == "done"
+
+
+def test_run_waits_for_cleanup_when_space_is_low(tmp_path, monkeypatch):
+    """空きが少ないときは、片付けで空くのを待ってから始める（満杯と判断して止めないため）。"""
+    events = []
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    store.set_job(job, enum_done=1)
+    r = runner.JobRunner(store, job, workers=1)
+    monkeypatch.setattr(runner, "cleanup_stale_temp", lambda dirs, no_mark_grace=600.0: events.append("cleanup") or 0)
+    monkeypatch.setattr(r, "_low_space", lambda: True)
+    monkeypatch.setattr(r, "_scan_pending", lambda: events.append("scan"))
+    r.start()
+    r.wait(20)
+    assert events == ["cleanup", "scan"]
+
+
+def test_background_cleanup_reruns_when_asked_during_run(tmp_path, monkeypatch):
+    """片付けの最中に頼まれたら、終わった後にもう1回走らせる（打ち切ったワーカーの残りを取りこぼさない）。"""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake(dirs, no_mark_grace=600.0):
+        calls.append(list(dirs))
+        if len(calls) == 1:
+            started.set()
+            release.wait(10)
+        return 1
+
+    monkeypatch.setattr(runner, "cleanup_stale_temp", fake)
+    bg = runner.BackgroundCleanup()
+    bg.request(["a"])
+    assert started.wait(5)
+    bg.request(["b"])
+    bg.request(["c"])  # 走っている間に何回頼まれても、後で1回だけ
+    release.set()
+    bg.wait(10)
+    assert calls == [["a"], ["c"]] and bg.removed == 2

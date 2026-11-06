@@ -162,6 +162,7 @@ class JobRunner:
         self._net_retries: dict[str, int] = {}  # ファイルごとの「接続が切れた」の回数
         self._ftp_stat_off = False  # FTP の使い回しの問い合わせに失敗したら、その回はもう問い合わせない
         self._acl = AccessCache()  # 検出のあったファイルの親フォルダのアクセス権（同じフォルダは1回だけ読む）
+        self._cleanup = BackgroundCleanup()  # 持ち主のいない一時フォルダの片付け（配る側を止めないよう裏で）
 
     # ------------------------------------------------------------ 前回の結果の使い回し
 
@@ -289,7 +290,11 @@ class JobRunner:
             pass
 
     def _run(self) -> None:
-        cleanup_stale_temp([self.options.temp_dir])
+        # 前の検査の残り（数万ファイルの展開など）を消すのに数分かかることがあり、終わるまで検査を始められなかった
+        # （86万ファイルの検査の再開で7分。%TEMP% に残っていた 98 個も消していた・実測）。裏で消して、すぐ配り始める
+        self._cleanup.request([self.options.temp_dir])
+        if self._low_space():
+            self._cleanup.wait()  # 空きが少ないときは、片付けで空くのを待ってから始める（満杯と判断して止めない）
         self.halt_reason = ""
         self.error = ""  # 前回止めた理由を、再開して最後まで終わったあとに残さない（実測）
         self._acl = AccessCache()  # 前の回に読んだアクセス権は使わない（その後で変わっていることがある）
@@ -329,6 +334,7 @@ class JobRunner:
             if "beating" in locals():
                 beating.set()
             self._close_ftp_pool()
+            self._cleanup.wait()  # 片付けの途中でプロセスが終わって、消しかけの一時フォルダを残さない
             self.phase = "待機"
             self.rechecking = False
             self.current.clear()
@@ -455,6 +461,18 @@ class JobRunner:
             self.halt_reason = reason
         self._stop.set()
 
+    def _low_space(self) -> bool:
+        """結果の保存先か一時フォルダのドライブの空きが 1GB を切っているか（調べられなければ少ないとみなす）。"""
+        import tempfile
+
+        for d in (os.path.dirname(os.path.abspath(self.store.path)), self.options.temp_dir or tempfile.gettempdir()):
+            try:
+                if free_bytes(d) < 1024**3:
+                    return True
+            except Exception:  # noqa: BLE001
+                return True
+        return False
+
     def _db_space_ok(self) -> bool:
         """結果の保存先のドライブに最低限の空きがあるか。無ければ満杯になる前に止める。"""
         now = time.time()
@@ -522,7 +540,7 @@ class JobRunner:
         except FutureTimeout:
             # ワーカーが途中で書き出した項目を先に読む（それまでの検出を残す）。そのあと一時フォルダを片付ける
             partial = read_checkpoint(checkpoint_path(self.options, path))
-            cleanup_stale_temp([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダをすぐ片付ける
+            self._cleanup.request([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダを（裏で）すぐ片付ける
             limit = self._timeout_for(path)
             minutes = f"{limit // 60}分" if limit >= 60 else f"{limit}秒"  # 1分未満を「0分」と出さない
             if partial and any(i.finding_counts for i in partial):
@@ -535,7 +553,7 @@ class JobRunner:
             self.store.save_failure(self.job_id, path, reason, elapsed, partial=partial)
         except process_expired as e:
             partial = read_checkpoint(checkpoint_path(self.options, path))
-            cleanup_stale_temp([self.options.temp_dir])
+            self._cleanup.request([self.options.temp_dir])
             limit_gb = self.memory_limit / 1024**3
             kept = (
                 "途中までに見つけた分は記録した（残りは未検査）。"
@@ -554,6 +572,50 @@ class JobRunner:
             if is_disk_full(e):
                 raise
             self.store.save_failure(self.job_id, path, f"検査に失敗した（{type(e).__name__}: {e}）", elapsed)
+
+
+class BackgroundCleanup:
+    """cleanup_stale_temp を裏のスレッドで1本ずつ走らせる。
+
+    走っている間に頼まれたら、終わった後にもう1回だけ走らせる（その間に打ち切ったワーカーの残りも消すため）。
+    持ち主が生きている一時フォルダは目印を消せないので、検査と並べて走らせても使用中のものは消さない。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._again = False
+        self._dirs: list[str | None] = []
+        self.removed = 0  # 消した数の合計（試験・調べ用）
+
+    def request(self, extra_dirs: list[str | None]) -> None:
+        with self._lock:
+            self._dirs = list(extra_dirs)
+            if self._thread is not None:
+                self._again = True
+                return
+            self._thread = threading.Thread(target=self._loop, name="temp-cleanup", daemon=True)
+            self._thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            with self._lock:
+                dirs = self._dirs
+                self._again = False
+            try:
+                self.removed += cleanup_stale_temp(dirs)
+            except Exception:  # noqa: BLE001  片付けは補助。消せなかった分は次の機会にまた試す
+                pass
+            with self._lock:
+                if not self._again:
+                    self._thread = None
+                    return
+
+    def wait(self, timeout: float | None = None) -> None:
+        with self._lock:
+            t = self._thread
+        if t is not None:
+            t.join(timeout)
 
 
 def cleanup_stale_temp(extra_dirs: list[str | None] | tuple = (), no_mark_grace: float = 600.0) -> int:

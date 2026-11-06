@@ -20,6 +20,7 @@ KIND_LABELS = {
     "xls_biff_legacy": "Excel 2.x〜4.0（BIFF2-4）",
     "access": "Access データベース",
     "sqlite": "SQLite データベース",
+    "parquet": "Parquet（列指向の表）",
     "pdf": "PDF",
     "rtf": "リッチテキスト（RTF）",
     "7z": "7z アーカイブ",
@@ -253,6 +254,10 @@ def sniff(blob: Blob) -> str:
         return "access"
     if head.startswith(b"SQLite format 3\x00"):
         return "sqlite"
+    from .formats import parquet as _parquet
+
+    if _parquet.looks_like_parquet(blob, head):
+        return "parquet"
     pdf_at = head.find(b"%PDF", 0, 1024)
     if pdf_at == 0 or (pdf_at > 0 and b" obj" in head):  # 先頭以外の %PDF は本物らしいときだけ
         return "pdf"
@@ -432,8 +437,10 @@ def _looks_like_text(head: bytes) -> bool:
 
 def handler_for(kind: str):
     """形式のキーから担当の処理関数を返す。"""
-    from .formats import archive, database, dbdump, git, misc, office, pdf, pst
+    from .formats import archive, database, dbdump, git, misc, office, parquet, pdf, pst
 
+    if kind == "parquet" and not parquet.available():
+        return misc.handle_unknown  # pyarrow の無い環境では今までどおり生データ走査
     table = {
         "empty": misc.handle_empty,
         "xlsx": office.handle_xlsx,
@@ -448,6 +455,7 @@ def handler_for(kind: str):
         "xls_biff_legacy": office.handle_xls_legacy,
         "access": database.handle_access,
         "sqlite": database.handle_sqlite,
+        "parquet": parquet.handle_parquet,
         "dbf": database.handle_dbf,
         "pdf": pdf.handle_pdf,
         "rtf": misc.handle_rtf,

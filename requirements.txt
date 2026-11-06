@@ -18,6 +18,7 @@ pillow
 chardet
 access-parser
 pyodbc
+pyarrow  # Parquet を表として読む（無ければ生データ走査に戻る）
 # OCR（Windows 標準の OCR を呼ぶ）
 winrt-runtime
 winrt-Windows.Media.Ocr

@@ -15,6 +15,7 @@ CI が落ちると持ち主へメールが届くので、手元で落ちるも�
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -75,10 +76,20 @@ def check_versions() -> list[str]:
     return problems
 
 
+def clean_env() -> dict[str, str]:
+    """git のフックが立てる GIT_DIR などを外した環境変数。
+
+    worktree から push すると、フックには GIT_DIR（など）が渡る。そのまま試験を流すと、試験が作る一時の
+    リポジトリへの git の操作が、このリポジトリ本体へ当たる（2026-11-06 に実際に起きた: 本体の設定が
+    bare=true・user=Tester に書き換わり、ブランチに検体のコミットが積まれた）。
+    """
+    return {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+
+
 def run(cmd: list[str], label: str) -> bool:
     _say(f"{label} …")
     started = time.monotonic()
-    code = subprocess.run(cmd, cwd=ROOT).returncode
+    code = subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
     _say(f"{label}: {'通った' if code == 0 else '落ちた'}（{time.monotonic() - started:.0f} 秒）")
     return code == 0
 

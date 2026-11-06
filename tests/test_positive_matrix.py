@@ -187,7 +187,7 @@ def _sqlite(tmp_path: Path) -> bytes:
 
 
 def _parquet() -> bytes:
-    pa = pytest.importorskip("pyarrow")
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     table = pa.table({h: [row[i] for row in ROWS[1:]] for i, h in enumerate(ROWS[0])})
@@ -284,8 +284,9 @@ CSV_U8 = _csv(ROWS).encode("utf-8")
 
 def _builders(tmp_path: Path) -> dict[str, tuple[bytes, set[str]]]:
     """ファイル名 → (中身, 必ず拾うべき種類)。"""
-    zstd = pytest.importorskip("zstandard")
-    lz4f = pytest.importorskip("lz4.frame")
+    # どれも requirements.txt の依存。黙って飛ばすと全部の形式の試験が消えるので、無ければ落とす
+    import lz4.frame as lz4f
+    import zstandard as zstd
     samples = {
         "本文_utf8.txt": (TEXT_U8, TEXT_TYPES),
         "本文_utf8bom.txt": (b"\xef\xbb\xbf" + TEXT_U8, TEXT_TYPES),
@@ -328,15 +329,12 @@ def _builders(tmp_path: Path) -> dict[str, tuple[bytes, set[str]]]:
         "書庫.tar.gz": (_tar({"本文.txt": TEXT_U8}, "w:gz"), TEXT_TYPES),
         "入れ子.zip": (_zip({"内.zip": _zip({"本文.docx": _docx()})}), TEXT_TYPES),
     }
-    try:
-        import py7zr
+    import py7zr
 
-        buf = io.BytesIO()
-        with py7zr.SevenZipFile(buf, "w") as z:
-            z.writestr(TEXT_U8, "本文.txt")
-        samples["書庫.7z"] = (buf.getvalue(), TEXT_TYPES)
-    except ImportError:
-        pass
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as z:
+        z.writestr(TEXT_U8, "本文.txt")
+    samples["書庫.7z"] = (buf.getvalue(), TEXT_TYPES)
     return samples
 
 
@@ -392,3 +390,30 @@ def test_data_xml_uses_element_names_as_headers():
     assert not misc.is_document_xml(src)
     lines = [s for s in misc.data_xml_to_text(src).splitlines() if s.strip()]
     assert lines == ["電話番号：090-1234-5678", "備考：A&B"]
+
+
+@pytest.mark.parametrize(
+    "src, kinds",
+    [
+        # 値の途中に要素が入る文（DocBook・SVG の tspan・データの中の強調）: 今までの読み方で拾う（評価の指摘）
+        ("<article><para>電話は090-<phrase>1234</phrase>-5678です</para></article>", {"phone"}),
+        ("<svg><text><tspan>電話 090-</tspan><tspan>1234-5678</tspan></text></svg>", {"phone"}),
+        ("<r><電話番号>090-<b>1234</b>-5678</電話番号></r>", {"phone"}),
+        ("<TEI><p>氏名 <persName>山田太郎</persName> 電話 090-1234-5678</p></TEI>", {"name", "phone"}),
+        # CDATA の中・名前空間の接頭辞つきの要素名（文書の部品ではない）
+        ("<r><電話番号><![CDATA[090-1234-5678]]></電話番号><生年月日><![CDATA[1985年4月1日]]></生年月日></r>", {"phone", "birthdate"}),
+        ('<a:r xmlns:a="urn:x"><a:電話番号>090-1234-5678</a:電話番号><a:生年月日>1985年4月1日</a:生年月日></a:r>', {"phone", "birthdate"}),
+    ],
+)
+def test_xml_shapes(tmp_path, src, kinds):
+    p = tmp_path / "x.xml"
+    p.write_text('<?xml version="1.0" encoding="UTF-8"?>' + src, encoding="utf-8")
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert kinds <= set(item.finding_counts), (src, item.finding_counts)
+
+
+def test_document_xml_marks():
+    from pii_checker.formats import misc
+
+    assert misc.is_document_xml('<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>a</w:t></w:r></w:p></w:body></w:document>')
+    assert not misc.is_document_xml('<a:Customer xmlns:a="urn:x"><a:Phone>090-1234-5678</a:Phone></a:Customer>')

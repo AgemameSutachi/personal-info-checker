@@ -676,12 +676,19 @@ class Collector:
             self._add_sample(hit, hit.confidence, norm, location, None, method, False, [])
 
     def add_lines(
-        self, text: str, location_prefix: str = "", method: str = "", ocr: bool = False, line_offset: int = 0
+        self,
+        text: str,
+        location_prefix: str = "",
+        method: str = "",
+        ocr: bool = False,
+        line_offset: int = 0,
+        skip_seen: bool = False,
     ) -> None:
         """長い本文を行の塊に分けて検査する（位置は「N行目」で示す）。
 
         ocr=True は OCR で読んだ1項目分の文字（本人確認書類の写しの判別もする）。
         line_offset は、text がファイルの途中から始まるときの、それまでの行数（位置を集めるときの行番号に使う）。
+        skip_seen=True は既に見つけた値を数えない（同じ本文を別の読み方でもう一度読むとき。add_text と同じ）。
         """
         if ocr:
             self.add_id_documents(text, location_prefix.strip() or "OCR", method or "OCR")
@@ -696,7 +703,7 @@ class Collector:
 
             self.line_base = base + line_offset
             try:
-                self.add_text(chunk, "", method=method, location_fn=loc)
+                self.add_text(chunk, "", method=method, location_fn=loc, skip_seen=skip_seen)
             finally:
                 self.line_base = None
 

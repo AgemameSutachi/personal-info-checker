@@ -6,10 +6,23 @@
 
 from __future__ import annotations
 
+import re
+
 from ..engine import Blob, Collector, ItemResult, NeedPassword, ScanContext, Uncheckable
 from ..models import Status
 
 OCR_DPI = 200
+
+# 中身を読めなかったことを示す MuPDF の警告（壊れた圧縮・読めない内容のストリーム・壊れた辞書）。
+# 実物の PDF 1,500 件ではどれも出ず、出たのは文字の位置の警告（ActualText…）1件だけだった。
+# 警告は MuPDF のプロセス全体で1つの溜まりなので、1つのプロセスで PDF を同時に2つ読むと混ざる
+# （検査は1ファイルずつ別のプロセスで読むので混ざらない）
+DAMAGE_WARNINGS = ("zlib error", "cannot load content stream", "syntax error", "cannot find object", "aes padding")
+# 暗号化の辞書を指す印（trailer の「/Encrypt <<…」「/Encrypt 5 0 R」と、辞書そのものの「/Filter/Standard」）。
+# 本文や文書情報に「/Encrypt」という字が書いてあるだけでは当たらないように、後ろに続く形まで見る
+ENCRYPT_MARK = re.compile(rb"/Encrypt\s*(?:<<|\d+\s+\d+\s+R)|/Filter\s*/Standard\b")
+ENCRYPT_MARK_TAIL = 64  # 読む塊の境目をまたぐ印を拾うため、前の塊の末尾をこれだけ残す
+ACTION = "元のファイルを取り直すか、元のアプリで開いて目で確かめる"
 
 
 def page_sheet(no: int, ocr: bool) -> str:
@@ -35,6 +48,7 @@ def _page_image_coverage(page) -> float:
 def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     import pymupdf as fitz
 
+    fitz.TOOLS.reset_mupdf_warnings()
     try:
         if blob.data is not None:
             doc = fitz.open(stream=blob.data, filetype="pdf")
@@ -43,6 +57,13 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     except Exception as e:
         raise Uncheckable(f"PDF を開けなかった（壊れている可能性）: {e}")
     with doc:
+        repaired = doc.is_repaired
+        if repaired and not doc.is_encrypted and _has_encrypt_mark(blob):
+            # 途中で切れた等で暗号化の情報（末尾の trailer）が失われ、MuPDF が暗号化されていない PDF として組み直した。
+            # 中身は暗号のままなので、読んでも文字は出ない（「検査済み・0件」と黙らないようにする）
+            raise Uncheckable(
+                f"暗号化された PDF が壊れていて（途中で切れている等）、復号できないため中身を検査できていない。{ACTION}"
+            )
         if doc.needs_pass:
             opened = False
             for pw in [""] + ctx.password_candidates():
@@ -74,12 +95,21 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         except Exception:
             pass
 
+        warnings: list[str] = []
+
+        def keep_warnings() -> None:
+            # 添付を読む（入れ子の PDF が警告を消す）前に、ここまでの警告を取っておく
+            warnings.append(fitz.TOOLS.mupdf_warnings())
+            fitz.TOOLS.reset_mupdf_warnings()
+
         ocr_pages: list[int] = []
         ocr_missing: list[int] = []
         ocr_reason = ""
+        n_chars = 0
         for page in doc:
             no = page.number + 1
             text = page.get_text("text") or ""
+            n_chars += len(text.strip())
             if text.strip():
                 col.pos_sheet = page_sheet(no, False)
                 try:
@@ -103,6 +133,7 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                     try:
                         data = annot.get_file()
                         name = annot.file_info.get("filename") or f"注釈の添付{no}"
+                        keep_warnings()
                         ctx.scan_nested(f"{blob.display}!{name}", data=data, depth=depth + 1, name_hint=name)
                     except Exception as e:
                         item.notes.append(f"{no}ページの注釈の添付を取り出せなかった: {e}")
@@ -129,6 +160,7 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                 )
                 continue
             n_emb += 1
+            keep_warnings()
             ctx.scan_nested(f"{blob.display}!{name}", data=data, depth=depth + 1, name_hint=name)
 
         parts = [f"{doc.page_count}ページの本文"]
@@ -143,6 +175,49 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             raise Uncheckable(
                 f"画像だけのページ（{_pages_str(ocr_missing)}）を OCR できず検査できていない（要目視）: {ocr_reason}"
             )
+        keep_warnings()
+        damage = _damage_warning("\n".join(warnings))
+        if damage:
+            item.notes.append(f"PDF の読み込みの警告（MuPDF）: {damage}")
+        repaired = repaired or doc.is_repaired  # パスワードで開いた後に修復が要ると分かることもある
+        if repaired and damage and not n_chars and not ocr_pages:
+            # 修復しても中身のストリームを1つも読めなかった（半分で切れて暗号化の辞書ごと消えた暗号化 PDF 等）
+            raise Uncheckable(
+                f"PDF が壊れていて（途中で切れている・暗号化の情報が消えた等）、中身を読めなかった。{ACTION}"
+            )
+        if repaired:
+            item.status = Status.PARTIAL
+            item.reason = (
+                "PDF が壊れていて（途中で切れている等）、読める部分だけを修復して検査した。"
+                f"失われた部分は検査していないので、{ACTION}"
+            )
+        elif damage:
+            item.status = Status.PARTIAL
+            item.reason = (
+                "PDF の一部（中身の圧縮・ページの内容など）が壊れていて、読めなかった部分があるかもしれない。"
+                f"読めた部分だけを検査したので、{ACTION}"
+            )
+
+
+def _has_encrypt_mark(blob: Blob) -> bool:
+    """ファイルの中に暗号化の辞書の印（ENCRYPT_MARK）があるか。修復した PDF だけで呼ぶ（全体を少しずつ読む）。"""
+    if blob.data is not None:
+        return ENCRYPT_MARK.search(blob.data) is not None
+    tail = b""
+    with blob.open() as f:
+        while chunk := f.read(1 << 20):
+            if ENCRYPT_MARK.search(tail + chunk):
+                return True
+            tail = chunk[-ENCRYPT_MARK_TAIL:]
+    return False
+
+
+def _damage_warning(warnings: str) -> str:
+    """MuPDF の警告から、中身を読めなかったことを示す行を1つ返す（無ければ空）。"""
+    for line in (warnings or "").splitlines():
+        if any(k in line for k in DAMAGE_WARNINGS):
+            return line.strip()[:120]
+    return ""
 
 
 def _garbled_ratio(text: str) -> float:

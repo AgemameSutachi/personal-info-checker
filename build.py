@@ -65,7 +65,8 @@ from PyInstaller.utils.hooks import collect_all
 datas = [(r'{root}/pii_checker/web/static', 'pii_checker/web/static')]
 binaries = []
 hiddenimports = ['pii_checker.formats.archive', 'pii_checker.formats.database', 'pii_checker.formats.dbdump',
-                 'pii_checker.formats.misc', 'pii_checker.formats.office', 'pii_checker.formats.pdf',
+                 'pii_checker.formats.misc', 'pii_checker.formats.office', 'pii_checker.formats.parquet',
+                 'pii_checker.formats.pdf', 'pyarrow.parquet',
                  'pii_checker.formats.pst', 'pii_checker.desktop', 'pii_checker.web.server',
                  'winrt._winrt_windows_foundation', 'winrt._winrt_windows_foundation_collections',
                  'pii_rs_detect', 'pii_checker._rust_guard',

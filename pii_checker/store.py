@@ -1031,9 +1031,9 @@ class Store:
         )[0][0]
         allowed = q("SELECT COALESCE(SUM(allowed), 0) FROM items WHERE job_id=?", (job_id,))[0][0]
         # 撮影場所（GPS）が記録された写真の数。検出には数えず、補足に書いた写真を数える（判定は変えない）
-        gps_photos = q(
-            "SELECT COUNT(*) FROM items WHERE job_id=? AND notes LIKE ?", (job_id, f"%{GPS_NOTE_MARK}%")
-        )[0][0]
+        gps_photos = q("SELECT COUNT(*) FROM items WHERE job_id=? AND notes LIKE ?", (job_id, f"%{GPS_NOTE_MARK}%"))[0][
+            0
+        ]
         job_opts = q("SELECT options FROM jobs WHERE id=?", (job_id,))
         try:
             opts = json.loads(job_opts[0][0]) if job_opts else {}

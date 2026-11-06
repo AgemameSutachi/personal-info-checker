@@ -21,7 +21,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..engine import Blob, Collector, ItemResult, NeedPassword, PartialScan, ScanContext, Uncheckable, long_path
+from ..engine import (
+    Blob,
+    Collector,
+    ItemResult,
+    NeedPassword,
+    PartialScan,
+    ScanContext,
+    Uncheckable,
+    _ColumnDigits,
+    long_path,
+)
 from ..models import Status
 from ..textdecode import iter_strings_chunked
 
@@ -332,6 +342,7 @@ def _read_access_helper32(
     except OSError:
         pass
     columns_by_table: dict[str, list[str]] = {}
+    digits_by_table: dict[str, _ColumnDigits] = {}
     opened = None
     error = None
     done = False
@@ -355,17 +366,23 @@ def _read_access_helper32(
                 values = msg["values"]
                 r = msg["row"]
                 col.pos_sheet = table
+                # 番号の列（手がかり語の無い12桁の数が並ぶ列）の判定は表ごとに数える（ほかの読み方の add_records と同じ）
+                digits = digits_by_table.get(table)
+                if digits is None:
+                    digits = digits_by_table[table] = _ColumnDigits()
                 for ci, v in enumerate(values):
                     if v in (None, ""):
                         continue
+                    s = str(v)
                     header = cols[ci] if ci < len(cols) else None
                     col.cell_pos = (r, ci)  # 対処のための位置（行は補助が数えた通し番号）
                     try:
                         col.add_text(
-                            str(v),
+                            s,
                             f"表「{table}」{r}行目 列「{header}」",
                             header=header,
                             method="表のレコード（32bit）",
+                            id_column=digits.cell(ci, s),
                         )
                     finally:
                         col.cell_pos = None

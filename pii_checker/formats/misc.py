@@ -285,6 +285,65 @@ def markup_to_text(src: str) -> str:
     return html.unescape(s)
 
 
+# 文書の XML（Word 2003 の XML・Office・OpenDocument・XHTML）の印。1つの文が小さな要素（w:t など）に分かれるので、
+# 要素ごとに区切る読み方は足さない。接頭辞だけでは見ず、文の部品の名前で見る（a:Phone のようなデータの XML を外さないため）。
+# a: はデータの XML でもよく使う接頭辞なので（<a:r xmlns:a="urn:x"> の形）、部品の名前ではなく DrawingML の名前空間で見る
+_DOCUMENT_XML = re.compile(
+    r"<(?:w:(?:p|r|t)|text:(?:p|h|span))[\s>]|<html\b|urn:schemas-microsoft-com:office:word|"
+    r"schemas\.openxmlformats\.org/drawingml/|www\.w3\.org/1999/xhtml",
+    re.I,
+)
+# 葉の要素（中に要素を持たない）: <名前 属性>値</名前>
+_XML_LEAF = re.compile(r"<([^\s<>/!?]{1,100})(?:\s[^<>]{0,2000})?>([^<>]{1,10000})</\1\s*>")
+
+
+def is_document_xml(src: str) -> bool:
+    # 先頭 64KB だけ見る（名前空間の宣言がその後ろにある文書はデータ扱いになり、項目名の行が余計に足されるだけ）
+    return bool(_DOCUMENT_XML.search(src[:65536]))
+
+
+def _unwrap_cdata(src: str) -> str:
+    """CDATA の中身を文字として戻す（< > & は参照にして、後のタグの処理で壊さない）。
+
+    正規表現の <!\\[CDATA\\[(.*?)\\]\\]> は、閉じていない開始が多いと開始ごとに末尾まで探して二乗の時間になるので、
+    前から1回だけなめる。閉じの無い開始より後ろはそのまま残す。
+    """
+    out = []
+    pos = 0
+    while True:
+        start = src.find("<![CDATA[", pos)
+        if start < 0:
+            break
+        end = src.find("]]>", start + 9)
+        if end < 0:
+            break
+        out.append(src[pos:start])
+        out.append(html.escape(src[start + 9 : end], quote=False))
+        pos = end + 3
+    out.append(src[pos:])
+    return "".join(out)
+
+
+def data_xml_to_text(src: str) -> str:
+    """データの XML（要素名が項目名の形。<電話番号>03-…</電話番号>）から本文を取り出す。
+
+    タグをただ外すと、値どうしが区切りなくつながり（「山田太郎03-1234-5678…」）、項目名も手がかりの語として
+    使えない。葉の要素は「項目名：値」の1行にし、ほかのタグは改行にする。CDATA の中身は文字として読む。
+    値の途中に要素が入る形（<電話番号>090-<b>1234</b>…）は切れるので、呼ぶ側は今までの読み方（markup_to_text）と併せて使う。
+    """
+    s = _unwrap_cdata(src)
+    s = RE_SCRIPT.sub(" ", s)
+
+    def leaf(m: re.Match) -> str:
+        name = m.group(1).rsplit(":", 1)[-1]  # 名前空間の接頭辞は外す
+        value = m.group(2).strip()
+        return f"\n{name}：{value}\n" if value else "\n"
+
+    s = _XML_LEAF.sub(leaf, s)
+    s = RE_TAG.sub("\n", s)
+    return html.unescape(s)
+
+
 def attribute_texts(src: str) -> list[str]:
     """属性値のうち個人情報を含みうるもの（mailto: や長い数字・日本語）を拾う。"""
     out = []
@@ -297,8 +356,15 @@ def attribute_texts(src: str) -> list[str]:
 
 def handle_markup(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     src, enc = decode_text(blob.read_all())
+    from ..sniff import KIND_LABELS
+
     item.method = f"タグを除いた本文と属性値（{enc}）"
     col.add_lines(markup_to_text(src), method="本文")
+    if item.kind == KIND_LABELS["xml"] and not is_document_xml(src):
+        # データの XML は、要素名を項目名にした読み方も足す（今までの読み方で拾った値は数え直さない）。
+        # 今までの読み方は、値の途中に要素が入る文（DocBook・SVG の tspan など）のために残す
+        item.method = f"タグを除いた本文と、要素名を項目名にした本文、属性値（{enc}）"
+        col.add_lines(data_xml_to_text(src), method="本文", skip_seen=True)
     scan_embedded_base64(ctx, blob, item, src, depth)  # Word 2003 XML の w:binData など
     for v in attribute_texts(src):
         col.add_text(v, "属性値", method="属性値")

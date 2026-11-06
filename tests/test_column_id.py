@@ -133,13 +133,62 @@ def test_new_table_resets_the_judgement():
     assert item.conf_counts.get("my_number:low", 0) - before == 30
 
 
-def test_track_limit_freezes_decision():
-    """異なる値が上限に届いたら判定を固め、覚えた値を手放す。"""
+def test_track_limit_freezes_decision_until_valid_streak():
+    """異なる値が上限に届いたら判定を固めて覚えた値を手放す。検査数字の合う値が続いたら判定を解いて数え直す。"""
     cd = engine._ColumnDigits()
     for v in _id_column(engine.COLUMN_ID_TRACK + 50, 10):
         cd.observe(0, v)
     assert cd._decided == {0} and cd.verdict == {0: True}
     assert 0 not in cd._values
-    # 固めた後は、検査数字の合う値が続いても判定を変えない
-    for v in _valid_numbers(300, 8):
-        assert cd.observe(0, v) is True
+    nums = _valid_numbers(300, 8)
+    got = [cd.observe(0, v) for v in nums]
+    k = engine.COLUMN_ID_RELEASE_STREAK
+    assert got[: k - 1] == [True] * (k - 1)  # 解くまでの数個は捨てる
+    assert not any(got[k - 1 :])  # 合う値の続く列は、その後ずっと拾う
+    assert cd.verdict[0] is False  # 数え直して、番号の列ではないと固まる
+
+
+def test_id_values_repeated_do_not_build_streak():
+    """番号の列で、検査数字の合う同じ番号が何行続いても（レースごとの行）判定は解かない。"""
+    cd = engine._ColumnDigits()
+    for v in _id_column(engine.COLUMN_ID_TRACK + 50, 10, repeat=16):
+        cd.observe(0, v)
+    assert cd.verdict == {0: True}
+    assert all(cd.observe(0, v) for v in _id_column(100, 10, repeat=16))
+
+
+def test_column_switching_to_real_numbers_keeps_most():
+    """列の途中から本物のマイナンバーに変わる表: 番号の列の判定が固まった後でも、切り替わりの数個しか捨てない。"""
+    ids = _invalid_numbers(150, 9)
+    nums = _valid_numbers(3000, 10)
+    alone = _low_my_number([["code", "x"]] + [[v, "a"] for v in nums])  # ほかの規則で落ちる分を除いた数
+    got = _low_my_number([["code", "x"]] + [[v, "a"] for v in ids + nums])
+    assert alone - got == engine.COLUMN_ID_RELEASE_STREAK - 1, (alone, got)
+
+
+def test_judgement_boundaries():
+    """判定は異なる値が 20 個そろってから。合う値がちょうど半分なら番号の列とはみなさない。"""
+    cd = engine._ColumnDigits()
+    bad = _invalid_numbers(engine.COLUMN_ID_MIN_DISTINCT, 11)
+    for v in bad[:-1]:
+        assert cd.observe(0, v) is False  # 19 個までは判定しない
+    assert cd.observe(0, bad[-1]) is True  # 20 個目で番号の列
+    # 合う値と合わない値を交互に 10 個ずつ（続けては合わないので判定を解く仕組みは働かない）
+    good = _valid_numbers(10, 12)
+    bad = _invalid_numbers(10, 13)
+    cd = engine._ColumnDigits()
+    for g, b in zip(good, bad):
+        cd.observe(1, g)
+        last = cd.observe(1, b)
+    assert last is False  # 10/20 はちょうど半分: 番号の列とはみなさない
+    cd.observe(1, _invalid_numbers(1, 14)[0])
+    assert cd.verdict[1] is True  # 10/21 は半分未満
+
+
+def test_fullwidth_digits_are_counted():
+    """全角の12桁も同じく数える。"""
+    table = str.maketrans("0123456789", "０１２３４５６７８９")
+    cd = engine._ColumnDigits()
+    for v in _invalid_numbers(engine.COLUMN_ID_MIN_DISTINCT, 15):
+        last = cd.observe(0, v.translate(table))
+    assert last is True

@@ -1253,6 +1253,10 @@ _RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[1
 _RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
 _NUMERIC_CHARS = frozenset("0123456789.+-:/,")
 _RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
+# 番号（電話・カード・マイナンバー）にならない長さ（20桁以上）の数字の連続が、空白と英字の欄（「A」「A1」の
+# ASCII の英字＋数字1つまで）だけをはさんで後ろ・前にあるもの（_beside_long_digit_run。前のほうは窓の終わり＝検出の直前で終わる形）
+_RE_LONG_RUN_AFTER = re.compile(r"(?:[ \t　]|[A-Za-z][0-9]?)*[0-9]{20}")
+_RE_LONG_RUN_BEFORE = re.compile(r"[0-9]{20}(?:[ \t　]|[A-Za-z][0-9]?)*\Z")
 # 16進のダンプの行。od・hexdump の「0000030  36 32 34 4B …」（番地7〜8桁＋2桁の組が8つ以上）・
 # od -Ax の「000030 36 32 34 4b …」（番地6桁＋2桁の組が12以上）と、
 # xxd の「00000030: 3632 344b …」（番地8桁＋コロン＋4桁の組が4つ以上）・xxd -g1 の「00000030: 36 32 …」
@@ -1362,6 +1366,20 @@ def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
     return len(chunks) >= 3
 
 
+def _beside_long_digit_run(text: str, start: int, end: int, width: int = 40) -> bool:
+    """検出のすぐ前か後ろ（同じ行の前後 width 文字。間は空白と英字の欄だけ）に、20桁以上の数字の連続があるか。
+
+    固定長のレコード（JRA-VAN のレース情報「…    180000002400    00039000000160000000980000…」・
+    「120000001800A   0012000000048…」）では、0詰めの数値の欄が空白なしにつながって数十〜数百桁の数字の連続になる。
+    その隣の12桁は欄の一部で、_in_numeric_run の「塊が3つ以上」に届かない（窓の中が空白と長い塊1つだけ・英字の欄が混じる）。
+    電話・カード・マイナンバーの番号はどれも19桁以下なので、20桁以上の連続は番号の一覧ではない。
+    間に日本語などがあるもの（「123456789018 様 0012…」）は見ない。
+    """
+    if _RE_LONG_RUN_AFTER.match(text, end, min(len(text), end + width)):
+        return True
+    return bool(_RE_LONG_RUN_BEFORE.search(text, max(0, start - width), start))
+
+
 def _across_number_lines(text: str, start: int, end: int) -> bool:
     """検出が改行をまたいでいて、検出の始まる行の1つ前の行か、終わる行の1つ後ろの行が数だけの行か
     （1行に数が1つずつ並ぶ一覧の一部）。
@@ -1440,7 +1458,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
     2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
-    16進のダンプの行と OBJ の要素の行の中のもの
+    16進のダンプの行と OBJ の要素の行の中のもの・すぐ隣が20桁以上の数字の連続のもの（固定長のレコードの0詰めの欄）
     """
     out = []
     for h in hits:
@@ -1452,6 +1470,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             and h.confidence != Confidence.HIGH
             and (
                 _in_numeric_run(text, h.start, h.end)
+                or _beside_long_digit_run(text, h.start, h.end)
                 or _across_number_lines(text, h.start, h.end)
                 or _in_dump_or_mesh_line(text, h.start)
             )

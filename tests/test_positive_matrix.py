@@ -347,9 +347,16 @@ def matrix(tmp_path_factory):
     for name, (data, expect) in _builders(tmp).items():
         p = tmp / name
         p.write_bytes(data)
-        res = scan_file(str(p), ScanOptions(temp_dir=str(tmp)))
+        # 画像の検体は無い。python-docx・python-pptx の雛形が付けるサムネイル（docProps/thumbnail.jpeg）は、
+        # 日本語の OCR がある所では「検査済み」、無い所（CI の Windows）では「検査不能」になり、環境で結果が変わる。
+        # OCR を切って結果を揃え、サムネイルは判定から外す（画像の中の文字は test_ocr.py が受け持つ）
+        res = scan_file(str(p), ScanOptions(temp_dir=str(tmp), ocr=False))
         found = {k for it in res.items for k, n in it.finding_counts.items() if n}
-        bad = [(it.path.rsplit("\\", 1)[-1], it.status, it.reason) for it in res.items if it.status != Status.SCANNED]
+        bad = [
+            (it.path.rsplit("\\", 1)[-1], it.status, it.reason)
+            for it in res.items
+            if it.status != Status.SCANNED and not it.path.endswith("!docProps/thumbnail.jpeg")
+        ]
         out[name] = (found, expect, bad)
     return out
 

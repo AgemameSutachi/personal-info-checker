@@ -366,7 +366,7 @@ def _read_access_helper32(
                 values = msg["values"]
                 r = msg["row"]
                 col.pos_sheet = table
-                # 番号の列（手がかり語の無い12桁の数が並ぶ列）の判定は表ごとに数える（ほかの読み方の add_records と同じ）
+                # 番号の列（手がかり語の無い12桁の数が並ぶ列）の判定は表ごとに数える（この判定はほかの読み方の add_records と同じ。横持ちの見出しの補いはこの経路に無い）
                 digits = digits_by_table.get(table)
                 if digits is None:
                     digits = digits_by_table[table] = _ColumnDigits()

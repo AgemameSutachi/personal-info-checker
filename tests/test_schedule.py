@@ -169,4 +169,4 @@ def test_runner_wakes_when_a_task_finishes(tmp_path, monkeypatch):
     assert len(saved) == n
     # 0.2 秒ごとに入れ替える作りでは 400 件 ÷ 同時 8 件 × 0.2 秒 ≒ 10 秒かかる。1 件ずつ起きれば 1 秒ほどで終わる
     # （遅い CI でも誤って落ちないよう、閾値は間を広く取る）
-    assert took < 5.0,f"{took:.2f} 秒かかった（終わった仕事を待つ間、決まった時間眠っている）"
+    assert took < 5.0, f"{took:.2f} 秒かかった（終わった仕事を待つ間、決まった時間眠っている）"

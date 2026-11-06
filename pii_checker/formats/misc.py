@@ -460,6 +460,112 @@ def handle_eml(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         col.add_lines(text, location_prefix="本文 ", method="本文")
 
 
+# 写真に人が書き込む文字の EXIF の項目（番号 → 明細の場所に出す名前）。カメラの機種・日時などの数は読まない
+_EXIF_TEXT_TAGS = {
+    0x010E: "説明",
+    0x013B: "撮影者",
+    0x8298: "著作権者",
+    0x9C9B: "題名",
+    0x9C9C: "コメント",
+    0x9C9D: "作成者",
+    0x9C9E: "キーワード",
+    0x9C9F: "件名",
+}
+_EXIF_SUB_TEXT_TAGS = {0x9286: "ユーザーコメント", 0xA430: "カメラの持ち主"}  # Exif の下の段（0x8769）
+_EXIF_XP_TAGS = {0x9C9B, 0x9C9C, 0x9C9D, 0x9C9E, 0x9C9F}  # Windows のプロパティ（UTF-16LE）
+_EXIF_IFD = 0x8769
+_GPS_IFD = 0x8825
+GPS_NOTE = (
+    "写真に撮影場所（GPS の緯度・経度）が記録されている。自宅などの場所が分かることがあるので、外へ出すときは"
+    "位置情報を消す（個人情報の検出には数えていない）"
+)
+
+
+def _readable_chars(text: str) -> int:
+    """英数字・記号・かな・漢字の数（UTF-16 のバイト順を取り違えると、ほとんどがほかの文字になる）。"""
+    return sum(1 for c in text if " " <= c <= "~" or "　" <= c <= "ヿ" or "一" <= c <= "鿿")
+
+
+def _exif_text(tag: int, value, little_endian: bool = True) -> str:
+    """EXIF の文字の値を str にする（XP の UTF-16LE・ユーザーコメントの文字コードの印に合わせる）。"""
+    if isinstance(value, tuple) and all(isinstance(v, int) for v in value):
+        value = bytes(v & 0xFF for v in value)
+    if isinstance(value, str):
+        return value.replace("\x00", " ").strip()
+    if not isinstance(value, (bytes, bytearray)):
+        return ""
+    value = bytes(value)
+    if tag in _EXIF_XP_TAGS:
+        return value.decode("utf-16-le", "replace").replace("\x00", " ").strip()
+    if tag == 0x9286:  # 先頭8バイトが文字コードの印
+        code, body = value[:8], value[8:]
+        if code == b"UNICODE\x00":
+            # 決まりでは TIFF のバイト順だが、書く道具によって逆のことが多い。両方で読んで、読める字の多いほうを採る
+            first = "utf-16-le" if little_endian else "utf-16-be"
+            second = "utf-16-be" if little_endian else "utf-16-le"
+            text = max((body.decode(first, "replace"), body.decode(second, "replace")), key=_readable_chars)
+        elif code.startswith(b"JIS"):
+            text = body.decode("shift_jis", "replace")
+        else:  # ASCII・印なし（多くは UTF-8 で書かれる）
+            text = body.decode("utf-8", "replace")
+        return text.replace("\x00", " ").strip()
+    return value.decode("utf-8", "replace").replace("\x00", " ").strip()
+
+
+def scan_exif(exif, item: ItemResult, col: Collector) -> None:
+    """写真の EXIF のうち人が書き込む文字（撮影者・著作権者・説明・コメントなど）を検査し、GPS の位置があれば補足に書く。
+
+    exif は PIL の Image.Exif。撮影場所（GPS）は、ほとんどの携帯電話の写真に入っているので検出には数えず、
+    補足に残すだけにする（数えると写真のフォルダが全部「要確認」になる）。座標そのものは明細・補足に載せない。
+    """
+    if not exif:
+        return
+    little = getattr(exif, "endian", "<") == "<"
+    fields = [(tag, label, exif.get(tag)) for tag, label in _EXIF_TEXT_TAGS.items()]
+    try:
+        sub = exif.get_ifd(_EXIF_IFD)
+    except Exception:  # 壊れた下の段は読まない（画像の検査は続ける）
+        sub = {}
+    fields += [(tag, label, sub.get(tag)) for tag, label in _EXIF_SUB_TEXT_TAGS.items()]
+    read = 0
+    for tag, label, value in fields:
+        if value is None:
+            continue
+        text = _exif_text(tag, value, little)
+        if text:
+            read += 1
+            col.add_text(text[:10000], f"EXIF {label}", method="EXIF")
+    if read:
+        item.notes.append(f"写真の情報（EXIF）の文字 {read} 項目（撮影者・説明など）も検査した")
+    try:
+        gps = exif.get_ifd(_GPS_IFD)
+    except Exception:
+        gps = {}
+    if gps and gps.get(2) and gps.get(4):  # 2 = 緯度・4 = 経度
+        item.notes.append(GPS_NOTE)
+
+
+def exif_from_raw(data: bytes):
+    """PIL で開けない画像（HEIC・AVIF）の中の EXIF の塊を探して読む。見つからない・読めなければ None。
+
+    HEIF は EXIF を「Exif\\0\\0」に続く TIFF の形で持つ。箱の作りを全部たどらず、その印を先頭 4MB から探す。
+    """
+    from PIL import Image
+
+    head = bytes(data[: 4 * 1024 * 1024])
+    for mark in (b"Exif\x00\x00MM\x00*", b"Exif\x00\x00II*\x00"):
+        pos = head.find(mark)
+        if pos < 0:
+            continue
+        exif = Image.Exif()
+        try:
+            exif.load(head[pos : pos + 1024 * 1024])
+        except Exception:
+            return None
+        return exif
+    return None
+
+
 def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     from PIL import Image
 
@@ -475,8 +581,13 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
         with Image.open(io.BytesIO(data)) as im:
             w, h = im.size
             frames = getattr(im, "n_frames", 1)
+            try:
+                exif = im.getexif()
+            except Exception:  # 壊れた EXIF は読まない（画像の文字の検査は続ける）
+                exif = None
     except Exception as e:
         raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式）: {e}")
+    scan_exif(exif, item, col)  # 写真の情報は、OCR を使わない・小さな画像でも読む
     if max(w, h) < ctx.options.min_image_px:
         item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
         return
@@ -555,6 +666,7 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
 
     from .. import ocr
 
+    scan_exif(exif_from_raw(blob.read_all()), item, col)  # 写真の情報は、OCR を使わなくても読む
     if not ctx.options.ocr:
         raise Uncheckable("OCR を無効にして実行したため画像（HEIC/AVIF）の中の文字を検査していない（要目視）")
     if not ocr.is_available():

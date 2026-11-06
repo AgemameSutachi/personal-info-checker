@@ -13,7 +13,9 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import TimeoutError as FutureTimeout
+from concurrent.futures import wait as wait_futures
 from dataclasses import fields
 
 from .engine import checkpoint_path, read_checkpoint, scan_file, split_siblings
@@ -72,6 +74,14 @@ BIG_FILE_BYTES = 1024**3
 # 大きなファイルを同時に配る本数の上限（一時領域・メモリを大きなファイルばかりで食わないように）。
 # 実物の検査時間での模擬では、上限2で全部を大きい順にしたときとほぼ同じ速さ（ワーカー6本で 18,821→15,071 秒）
 BIG_FILE_CONCURRENCY = 2
+# ワーカーを作り直すまでの件数（形式ごとの読み込みが溜め込むメモリを手放すため）。作り直すたびにプロセスの起動と
+# 1件目の準備（正規表現・形式の読み込み）で1〜2秒かかり、50件ごとでは小さなファイルばかりのフォルダで検査の
+# 半分近くがこれに消えていた（ドライブ全体の検査で実測・2026-11-06）。溜まるメモリは、形式を混ぜた実物 476 件を
+# 1プロセスで続けて検査して 50 件で +58MB・400〜476 件で +122〜140MB（私用 200MB 前後で頭打ち）。
+# 1プロセスのメモリ上限（1.5GB 以上）に比べて小さく、上限に当たるかは1件ごとの重さで決まる
+WORKER_MAX_TASKS = 500
+# 配った仕事が終わるのを待つ最長の時間（どれか1件が終われば、すぐ起きて次を配る）
+DONE_WAIT_SECONDS = 0.5
 
 
 class PendingQueue:
@@ -390,7 +400,7 @@ class JobRunner:
         ctx = multiprocessing.get_context("spawn")
         with ProcessPool(
             max_workers=self.workers,
-            max_tasks=50,
+            max_tasks=WORKER_MAX_TASKS,
             context=ctx,
             initializer=worker_init,
             initargs=(self.memory_limit,),
@@ -423,9 +433,12 @@ class JobRunner:
                         f = pool.schedule(_scan_task, args=(path, self.options, book), timeout=self._timeout_for(path))
                         futures[f] = (path, time.time(), self.password_version)
                         self.current.add(path)
-                    done = [f for f in futures if f.done()]
+                    if not futures:
+                        continue  # 全部を使い回した・空きの確かめで止めた（次の周で終わる）
+                    # 決まった時間だけ眠ると、短い仕事ばかりのときにワーカーが空いたまま待たされる（同時に32件・
+                    # 0.2 秒ごとでは毎秒約160件が上限だった・実測）。どれか1件が終わったらすぐ起きる
+                    done, _ = wait_futures(futures, timeout=DONE_WAIT_SECONDS, return_when=FIRST_COMPLETED)
                     if not done:
-                        time.sleep(0.2)
                         continue
                     for f in done:
                         path, started, version = futures.pop(f)

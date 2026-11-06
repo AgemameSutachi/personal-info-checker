@@ -62,6 +62,7 @@ KIND_LABELS = {
     "git_loose": "git のオブジェクト",
     "git_index": "git の索引（index）",
     "git_meta": "git の索引ファイル",
+    "npy": "数値の配列（numpy .npy）",
     "unknown": "形式不明",
 }
 
@@ -285,6 +286,8 @@ def sniff(blob: Blob) -> str:
         return "tar"
     if head.startswith(b"MSCF"):
         return "cab"
+    if head.startswith(b"\x93NUMPY") and len(head) > 10:
+        return "npy"
     if len(head) > 7 and head[2:4] == b"-l" and head[6:7] == b"-":
         return "lzh"
     if head.startswith(b"\x60\xea"):
@@ -487,6 +490,7 @@ def handler_for(kind: str):
         "git_loose": git.handle_git_loose,
         "git_index": git.handle_git_index,
         "git_meta": git.handle_git_meta,
+        "npy": misc.handle_npy,
         "unknown": misc.handle_unknown,
     }
     return table[kind]

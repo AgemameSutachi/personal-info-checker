@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import reportflags
-from .models import FileResult, ItemResult, ScanOptions, Status
+from .models import GPS_NOTE_MARK, FileResult, ItemResult, ScanOptions, Status
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -1030,6 +1030,10 @@ class Store:
             (job_id, Status.NEEDS_PASSWORD.value),
         )[0][0]
         allowed = q("SELECT COALESCE(SUM(allowed), 0) FROM items WHERE job_id=?", (job_id,))[0][0]
+        # 撮影場所（GPS）が記録された写真の数。検出には数えず、補足に書いた写真を数える（判定は変えない）
+        gps_photos = q("SELECT COUNT(*) FROM items WHERE job_id=? AND notes LIKE ?", (job_id, f"%{GPS_NOTE_MARK}%"))[0][
+            0
+        ]
         job_opts = q("SELECT options FROM jobs WHERE id=?", (job_id,))
         try:
             opts = json.loads(job_opts[0][0]) if job_opts else {}
@@ -1079,6 +1083,7 @@ class Store:
             "reused": reused,
             # 許可リストで外した検出の件数と、許可リスト・利用者の規則の数（判定の文・レポートに出す）
             "allowed": allowed,
+            "gps_photos": gps_photos,
             "allow_list": len(opts.get("allow_values") or []),
             "custom_rules": len(opts.get("custom_rules") or []),
         }

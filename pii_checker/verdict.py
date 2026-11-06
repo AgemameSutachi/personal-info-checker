@@ -78,6 +78,14 @@ def _decide(summary: dict, job_state: str) -> Verdict:
             f"拾わない値（許可リスト）で外した検出 {allowed:,} 件（拾わない値と一致したため、件数・判定に数えていない）"
         )
 
+    gps = summary.get("gps_photos", 0)
+    if gps:
+        # 検出には数えない（携帯電話の写真のほとんどに入っている）が、外へ出すときに気づけるよう枚数を出す
+        detail.append(
+            f"撮影場所（GPS）が記録された写真 {gps:,} 件（自宅などの場所が分かることがある。個人情報の検出には数えていない。"
+            "外へ出すときは位置情報を消す）"
+        )
+
     # 報告の目安の印・広く読めるフォルダにあるファイル（どちらも目安。判定の段階は変えない）
     detail += reportflags.verdict_lines(summary)
 

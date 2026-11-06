@@ -174,8 +174,38 @@ def test_run_starts_scanning_before_cleanup_finishes(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "_scan_pending", fake_scan)
     r.start()
     r.wait(20)
+    assert not r.running  # 片付けの終わりを待たずにジョブは終わる（再開・パスワードでの再検査を受け付ける）
+    r._cleanup.wait(20)
     assert events == ["cleanup-start", "scan", "cleanup-end"], events
     assert store.job(job)["state"] == "done"
+
+
+def test_job_end_does_not_wait_for_cleanup(tmp_path, monkeypatch):
+    """片付けが長引いても、ジョブが終われば running は False になり、すぐ次の開始（再開）を受け付ける（評価の指摘）。"""
+    import threading
+
+    release = threading.Event()
+    runs = []
+
+    def slow_cleanup(dirs, no_mark_grace=600.0):
+        release.wait(10)
+        return 0
+
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    store.set_job(job, enum_done=1)
+    r = runner.JobRunner(store, job, workers=1)
+    monkeypatch.setattr(runner, "cleanup_stale_temp", slow_cleanup)
+    monkeypatch.setattr(r, "_low_space", lambda: False)
+    monkeypatch.setattr(r, "_scan_pending", lambda: runs.append("scan"))
+    r.start()
+    r.wait(5)
+    assert not r.running
+    r.start()  # 片付けはまだ終わっていない
+    r.wait(5)
+    assert runs == ["scan", "scan"]
+    release.set()
+    r._cleanup.wait(10)
 
 
 def test_run_waits_for_cleanup_when_space_is_low(tmp_path, monkeypatch):

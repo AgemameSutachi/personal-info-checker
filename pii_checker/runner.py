@@ -333,8 +333,10 @@ class JobRunner:
         finally:
             if "beating" in locals():
                 beating.set()
+            # 片付けはここで待たない（待つ間このスレッドが生きていて running が True のままになり、中止の後の再開や
+            # パスワードでの再検査が黙って無視された・評価の指摘）。途中でプロセスが終わって消しかけで残っても、
+            # 目印の無い古いフォルダとして次の片付けで消える
             self._close_ftp_pool()
-            self._cleanup.wait()  # 片付けの途中でプロセスが終わって、消しかけの一時フォルダを残さない
             self.phase = "待機"
             self.rechecking = False
             self.current.clear()

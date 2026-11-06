@@ -596,6 +596,9 @@ def handle_npy(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     if kind in NPY_NUMERIC_KINDS:
         if blob.size != body + count * size:
             return handle_unknown(ctx, blob, item, col, depth)  # 頭の記述と合わない（壊れている・別の中身がある）
+        if kind in "iu" and size == 1:
+            # 1バイトの整数の配列には文字のバイト列をそのまま詰められる（評価の指摘）。言い切らずに文字として読む
+            return handle_unknown(ctx, blob, item, col, depth)
         item.method = f"numpy の配列の頭を読んだ（型 {descr}・形 {shape}）"
         raise OutOfScope(f"数だけの配列（numpy の .npy・{NPY_NUMERIC_KINDS[kind]}・{shape_text} 個）で、文字を含まない")
     if kind not in "SU":

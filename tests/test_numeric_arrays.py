@@ -170,3 +170,13 @@ def test_new_torch_layout_with_dot_data_version(tmp_path):
     res = _scan(tmp_path, p)
     by = {it.path.rsplit("!", 1)[-1]: it for it in res.items}
     assert by["m/data/0"].status == Status.OUT_OF_SCOPE
+
+
+def test_byte_array_is_read_as_text(tmp_path):
+    """1バイトの整数の配列（文字のバイト列を詰められる）は対象外と言い切らず、文字として読む（評価の指摘）。"""
+    body = "電話 090-1234-5678 氏名 山田太郎\n".encode("utf-8") * 10
+    p = tmp_path / "u1.npy"
+    p.write_bytes(_npy("|u1", (len(body),), body))
+    res = _scan(tmp_path, p)
+    assert res.items[0].status != Status.OUT_OF_SCOPE
+    assert "phone" in _types(res)

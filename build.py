@@ -80,7 +80,8 @@ for pkg in ('winrt', 'pymupdf', 'webview', 'extract_msg', 'msoffcrypto', 'py7zr'
 
 def make(script, name, console, options=(), **kw):
     a = Analysis([script], pathex=[r'{root}'], binaries=binaries, datas=datas, hiddenimports=hiddenimports,
-                 excludes=['tkinter'], noarchive=False)
+                 # pillow-heif は任意の追加。組み立ての環境に入っていても配布版には入れない（wheel が GPLv2 の x265 を含む）
+                 excludes=['tkinter', 'pillow_heif'], noarchive=False)
     pyz = PYZ(a.pure)
     exe = EXE(pyz, a.scripts, list(options), exclude_binaries=True, name=name, console=console, upx=False, **kw)
     return a, exe

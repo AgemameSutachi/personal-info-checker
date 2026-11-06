@@ -514,7 +514,10 @@ def is_jpeg_xr(data: bytes) -> bool:
 
 
 def open_with_wic(data: bytes) -> Image.Image:
-    """PIL で開けない画像（JPEG XR）を、Windows の画像の部品（WIC）で開いてグレースケールの PIL 画像にする。
+    """PIL で開けない画像（JPEG XR・HEIC・AVIF）を、Windows の画像の部品（WIC）で開いてグレースケールの PIL 画像にする。
+
+    EXIF の向きの情報があれば正しい向きに直して取り出す。HEIC・AVIF は Windows の拡張（HEIF 画像拡張機能・
+    HEVC／AV1 ビデオ拡張機能）が入っていないと開けない（ValueError）。
 
     Raises:
         OcrUnavailable: OCR（WinRT）が使えない環境のとき
@@ -548,9 +551,14 @@ def _open_with_wic_here(data: bytes) -> Image.Image:
     w, h = decoder.pixel_width, decoder.pixel_height
     if w * h > (Image.MAX_IMAGE_PIXELS or 1 << 62):
         raise ValueError(f"画像の画素数が大きすぎるため読み込みを中止しました（{w}×{h}）")
-    # WIC は GRAY8 へ直接は変換できないので、BGRA8 で取り出して PIL でグレースケールにする
-    bitmap = decoder.get_software_bitmap_converted_async(
-        imaging.BitmapPixelFormat.BGRA8, imaging.BitmapAlphaMode.IGNORE
+    # WIC は GRAY8 へ直接は変換できないので、BGRA8 で取り出して PIL でグレースケールにする。
+    # 横向きに撮った写真の文字を読めるよう、EXIF の向きを守る形で取り出す
+    bitmap = decoder.get_software_bitmap_transformed_async(
+        imaging.BitmapPixelFormat.BGRA8,
+        imaging.BitmapAlphaMode.IGNORE,
+        imaging.BitmapTransform(),
+        imaging.ExifOrientationMode.RESPECT_EXIF_ORIENTATION,
+        imaging.ColorManagementMode.DO_NOT_COLOR_MANAGE,
     ).get()
     try:
         w, h = bitmap.pixel_width, bitmap.pixel_height

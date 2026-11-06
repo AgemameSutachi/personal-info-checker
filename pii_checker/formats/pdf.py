@@ -6,15 +6,23 @@
 
 from __future__ import annotations
 
+import re
+
 from ..engine import Blob, Collector, ItemResult, NeedPassword, ScanContext, Uncheckable
 from ..models import Status
 
 OCR_DPI = 200
 
 # 中身を読めなかったことを示す MuPDF の警告（壊れた圧縮・読めない内容のストリーム・壊れた辞書）。
-# 実物の PDF 1,500 件ではどれも出ず、出たのは文字の位置の警告（ActualText…）1件だけだった
+# 実物の PDF 1,500 件ではどれも出ず、出たのは文字の位置の警告（ActualText…）1件だけだった。
+# 警告は MuPDF のプロセス全体で1つの溜まりなので、1つのプロセスで PDF を同時に2つ読むと混ざる
+# （検査は1ファイルずつ別のプロセスで読むので混ざらない）
 DAMAGE_WARNINGS = ("zlib error", "cannot load content stream", "syntax error", "cannot find object", "aes padding")
-ENCRYPT_MARK = b"/Encrypt"
+# 暗号化の辞書を指す印（trailer の「/Encrypt <<…」「/Encrypt 5 0 R」と、辞書そのものの「/Filter/Standard」）。
+# 本文や文書情報に「/Encrypt」という字が書いてあるだけでは当たらないように、後ろに続く形まで見る
+ENCRYPT_MARK = re.compile(rb"/Encrypt\s*(?:<<|\d+\s+\d+\s+R)|/Filter\s*/Standard\b")
+ENCRYPT_MARK_TAIL = 64  # 読む塊の境目をまたぐ印を拾うため、前の塊の末尾をこれだけ残す
+ACTION = "元のファイルを取り直すか、元のアプリで開いて目で確かめる"
 
 
 def page_sheet(no: int, ocr: bool) -> str:
@@ -54,7 +62,7 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             # 途中で切れた等で暗号化の情報（末尾の trailer）が失われ、MuPDF が暗号化されていない PDF として組み直した。
             # 中身は暗号のままなので、読んでも文字は出ない（「検査済み・0件」と黙らないようにする）
             raise Uncheckable(
-                "暗号化された PDF が壊れていて（途中で切れている等）、復号できないため中身を検査できていない。元のファイルを確かめる"
+                f"暗号化された PDF が壊れていて（途中で切れている等）、復号できないため中身を検査できていない。{ACTION}"
             )
         if doc.needs_pass:
             opened = False
@@ -169,31 +177,38 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             )
         keep_warnings()
         damage = _damage_warning("\n".join(warnings))
+        if damage:
+            item.notes.append(f"PDF の読み込みの警告（MuPDF）: {damage}")
+        repaired = repaired or doc.is_repaired  # パスワードで開いた後に修復が要ると分かることもある
         if repaired and damage and not n_chars and not ocr_pages:
             # 修復しても中身のストリームを1つも読めなかった（半分で切れて暗号化の辞書ごと消えた暗号化 PDF 等）
             raise Uncheckable(
-                f"PDF が壊れていて（途中で切れている・暗号化の情報が消えた等）、中身を読めなかった（{damage}）。元のファイルを確かめる"
+                f"PDF が壊れていて（途中で切れている・暗号化の情報が消えた等）、中身を読めなかった。{ACTION}"
             )
         if repaired:
             item.status = Status.PARTIAL
             item.reason = (
-                "PDF が壊れていて（途中で切れている等）、読める部分だけを修復して検査した。失われた部分は検査していない"
+                "PDF が壊れていて（途中で切れている等）、読める部分だけを修復して検査した。"
+                f"失われた部分は検査していないので、{ACTION}"
             )
         elif damage:
             item.status = Status.PARTIAL
-            item.reason = f"PDF の一部が壊れていて読めなかった（{damage}）。読めた部分だけを検査した"
+            item.reason = (
+                "PDF の一部（中身の圧縮・ページの内容など）が壊れていて、読めなかった部分があるかもしれない。"
+                f"読めた部分だけを検査したので、{ACTION}"
+            )
 
 
 def _has_encrypt_mark(blob: Blob) -> bool:
-    """ファイルの中に暗号化の辞書の印（/Encrypt）があるか。修復した PDF だけで呼ぶ（全体を少しずつ読む）。"""
+    """ファイルの中に暗号化の辞書の印（ENCRYPT_MARK）があるか。修復した PDF だけで呼ぶ（全体を少しずつ読む）。"""
     if blob.data is not None:
-        return ENCRYPT_MARK in blob.data
+        return ENCRYPT_MARK.search(blob.data) is not None
     tail = b""
     with blob.open() as f:
         while chunk := f.read(1 << 20):
-            if ENCRYPT_MARK in tail + chunk:
+            if ENCRYPT_MARK.search(tail + chunk):
                 return True
-            tail = chunk[-len(ENCRYPT_MARK) :]
+            tail = chunk[-ENCRYPT_MARK_TAIL:]
     return False
 
 

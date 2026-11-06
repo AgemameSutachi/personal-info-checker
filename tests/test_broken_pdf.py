@@ -66,4 +66,45 @@ def test_corrupt_content_stream_is_partial(tmp_path):
         data[i] ^= 0x5A
     it = _scan(tmp_path, "zlib.pdf", bytes(data))
     assert it.status == Status.PARTIAL
-    assert "壊れていて読めなかった" in it.reason
+    assert "読めなかった部分" in it.reason
+    assert any("zlib" in n for n in it.notes)  # MuPDF の生の警告は理由ではなく補足に出す
+
+
+def test_plain_encrypt_word_does_not_make_uncheckable(tmp_path):
+    # 本文・文書情報に「/Encrypt」という字が書いてあるだけの、暗号化していない PDF を途中で切った
+    doc = fitz.open()
+    doc.new_page().insert_text((60, 80), TEXT, fontname="japan", fontsize=11)
+    doc.set_metadata({"title": "about /Encrypt dictionary"})
+    data = doc.tobytes()
+    doc.close()
+    cut = data[: data.rfind(b"\nxref")]
+    it = _scan(tmp_path, "cut_with_word.pdf", cut)
+    assert it.status == Status.PARTIAL
+    assert it.finding_counts
+
+
+def test_encrypt_mark_across_chunk_boundary(tmp_path):
+    from pii_checker.formats import pdf as pdf_mod
+
+    p = tmp_path / "mark.bin"
+    mark = b"/Encrypt 12 0 R"
+    p.write_bytes(b"x" * ((1 << 20) - 5) + mark + b"y" * 10)  # 1MB の塊の境目をまたぐ
+    assert pdf_mod._has_encrypt_mark(engine.Blob(display=str(p), path=str(p)))
+    assert pdf_mod._has_encrypt_mark(engine.Blob(display="m", data=b"1 0 obj<</Filter /Standard /V 5>>"))
+    assert not pdf_mod._has_encrypt_mark(engine.Blob(display="m", data=b"(about /Encrypt dictionary)"))
+
+
+def test_broken_pdf_attached_to_intact_pdf(tmp_path):
+    inner = _pdf()
+    inner = inner[: inner.rfind(b"\nxref")]
+    doc = fitz.open()
+    doc.new_page().insert_text((60, 80), "attachment test")
+    doc.embfile_add("broken.pdf", inner)
+    outer = doc.tobytes()
+    doc.close()
+    p = tmp_path / "outer.pdf"
+    p.write_bytes(outer)
+    res = engine.scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), reuse=False))
+    by_path = {it.path.rsplit("!", 1)[-1] if "!" in it.path else ".": it for it in res.items}
+    assert by_path["."].status == Status.SCANNED  # 外側は壊れていない（添付の警告が漏れない）
+    assert by_path["broken.pdf"].status == Status.PARTIAL

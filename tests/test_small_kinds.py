@@ -364,3 +364,30 @@ def test_region_too_many_elements_is_partial(tmp_path, monkeypatch):
     top = _scan(tmp_path, p).items[0]
     assert top.status == Status.PARTIAL, (top.status, top.reason)
     assert "要素が多すぎて" in top.reason
+
+
+def test_region_too_many_texts_is_partial(tmp_path, monkeypatch):
+    import zlib
+
+    from pii_checker.formats import misc
+
+    monkeypatch.setattr(misc, "NBT_MAX_TEXTS_FILE", 2)  # 1つ目の塊の文字 2 つで使い切る
+    p = tmp_path / "r.6.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("ok"))), 1: (2, zlib.compress(_nbt_chunk("x")))}))
+    top = _scan(tmp_path, p).items[0]
+    assert top.status == Status.PARTIAL, (top.status, top.reason)
+    assert "要素が多すぎて読み切れなかった塊 1 個" in top.reason
+
+
+def test_region_too_many_texts_in_one_chunk(tmp_path, monkeypatch):
+    import zlib
+
+    from pii_checker.formats import misc
+
+    monkeypatch.setattr(misc, "NBT_MAX_TEXTS_CHUNK", 1)  # 塊の中の文字が 2 つ目で打ち切り（どちらの塊も文字が 2 つ）
+    p = tmp_path / "r.7.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("ok"))), 1: (2, zlib.compress(_nbt_chunk("x")))}))
+    res = _scan(tmp_path, p)
+    top = res.items[0]
+    assert top.status == Status.UNCHECKABLE, (top.status, top.reason)
+    assert "要素が多すぎて読み切れなかった塊 2 個" in top.reason

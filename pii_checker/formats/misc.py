@@ -725,6 +725,9 @@ NBT_ARRAYS = {7: 1, 11: 4, 12: 8}  # 数の配列の型の1要素の大きさ（
 # 細工した塊（空の複合・空の文字が何百万も並ぶもの）で1ファイルの検査が何時間も止まらないようにする
 NBT_MAX_STEPS_CHUNK = 1_000_000
 NBT_MAX_STEPS_FILE = 20_000_000
+# 検査に回す文字の数の上限（1つずつ検出の処理を通すので、要素よりずっと重い）。実物は1ファイル最大 約2.7万・1塊 最大 117
+NBT_MAX_TEXTS_CHUNK = 20_000
+NBT_MAX_TEXTS_FILE = 500_000
 
 
 class NbtTooLarge(ValueError):
@@ -826,6 +829,7 @@ def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     done = 0
     skipped: dict[str, int] = {}
     budget = [NBT_MAX_STEPS_FILE]
+    texts_left = [NBT_MAX_TEXTS_FILE]
     too_many = "要素が多すぎて読み切れなかった塊"
     with blob.open() as f:
         for index, offset, count in used:
@@ -861,9 +865,14 @@ def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             try:
                 for s in nbt_strings(raw, budget):
                     if s not in seen:
+                        if len(seen) >= NBT_MAX_TEXTS_CHUNK or texts_left[0] <= 0:
+                            raise NbtTooLarge("文字の値が多すぎる")
                         seen.add(s)
+                        texts_left[0] -= 1
                         col.add_text(s, where, method="region の塊の文字")
             except NbtTooLarge:
+                if texts_left[0] <= 0:
+                    budget[0] = 0  # 文字の残りが尽きたら、後の塊は読まずに数える
                 skipped[too_many] = skipped.get(too_many, 0) + 1
                 continue
             except ValueError:

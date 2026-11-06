@@ -1,5 +1,9 @@
 """未検査のファイルを配る順（大きなファイルを先に・同時の本数の上限つき）の試験。"""
 
+import threading
+import time
+from concurrent.futures import Future
+
 from pii_checker import runner
 from pii_checker.runner import BIG_FILE_BYTES, PendingQueue
 from pii_checker.models import ScanOptions
@@ -61,12 +65,13 @@ def test_runner_uses_queue_order(tmp_path, monkeypatch):
     r = runner.JobRunner(store, job, workers=4)
     order = []
 
-    class FakeFuture:
-        def __init__(self, path):
-            self.path = path
+    class FakeFuture(Future):
+        """すぐ終わった仕事（runner は concurrent.futures.wait で待つので本物の Future を使う）。"""
 
-        def done(self):
-            return True
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+            self.set_result(None)
 
     class FakePool:
         def __init__(self, *a, **k):
@@ -94,3 +99,74 @@ def test_runner_uses_queue_order(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "_save", fake_save)
     r._scan_pending()
     assert order == ["big.zip", "a.txt", "c.txt"]
+
+
+def test_runner_wakes_when_a_task_finishes(tmp_path, monkeypatch):
+    """短い仕事ばかりのとき、決まった時間眠らず、どれか1件が終わったらすぐ次を配ること。
+
+    以前は終わった仕事が無いと 0.2 秒眠ったため、同時に配る数（ワーカー×4）を 0.2 秒ごとにしか入れ替えられず、
+    小さなファイルばかりのドライブでワーカーが空いていた（2026-11-06 の実測）。
+    """
+    n = 400
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path), reuse=False))
+    store.add_files(job, [(f"f{i:04d}.txt", 10, 0.0) for i in range(n)])
+    r = runner.JobRunner(store, job, workers=2)
+    saved = []
+
+    class FakePool:
+        """配った仕事を、別のスレッドが 1 件ずつ少し遅れて終わらせる（ワーカーの代わり）。"""
+
+        def __init__(self, *a, **k):
+            self.pending = []
+            self.cv = threading.Condition()
+            self.closed = False
+            self.thread = threading.Thread(target=self._work, daemon=True)
+            self.thread.start()
+
+        def _work(self):
+            while True:
+                with self.cv:
+                    while not self.pending and not self.closed:
+                        self.cv.wait()
+                    if not self.pending:
+                        return
+                    f = self.pending.pop(0)
+                time.sleep(0.001)
+                f.set_result(None)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            with self.cv:
+                self.closed = True
+                self.cv.notify()
+            self.thread.join(5)
+            return False
+
+        def schedule(self, fn, args, timeout):
+            f = Future()
+            with self.cv:
+                self.pending.append(f)
+                self.cv.notify()
+            return f
+
+        def stop(self):
+            pass
+
+    def fake_save(future, path, started, expired, version=0):
+        saved.append(path)
+        store.save_failure(job, path, "試験")
+
+    import pebble
+
+    monkeypatch.setattr(pebble, "ProcessPool", FakePool)
+    monkeypatch.setattr(r, "_save", fake_save)
+    t = time.perf_counter()
+    r._scan_pending()
+    took = time.perf_counter() - t
+    assert len(saved) == n
+    # 0.2 秒ごとに入れ替える作りでは 400 件 ÷ 同時 8 件 × 0.2 秒 ≒ 10 秒かかる。1 件ずつ起きれば 1 秒ほどで終わる
+    # （遅い CI でも誤って落ちないよう、閾値は間を広く取る）
+    assert took < 5.0,f"{took:.2f} 秒かかった（終わった仕事を待つ間、決まった時間眠っている）"

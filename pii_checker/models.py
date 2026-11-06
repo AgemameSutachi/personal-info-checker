@@ -10,6 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+# 写真に撮影場所（GPS）があったときの補足の書き出し。集計（Store.summary の gps_photos）はこの文字で数える
+GPS_NOTE_MARK = "写真に撮影場所（GPS の緯度・経度）が記録されている"
+
 
 class Status(str, Enum):
     """1つの検査対象（ファイル・アーカイブ内のファイル・フォルダ）の状態。"""

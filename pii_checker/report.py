@@ -164,6 +164,7 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
         ("読めなかったフォルダ", summary["folder_errors"]),
         ("辿らなかったリンク", summary["links"]),
         ("個人情報の可能性があるファイル", summary["files_with_findings"]),
+        ("撮影場所（GPS）が記録された写真（検出には数えない）", summary.get("gps_photos", 0)),
     ]
     for k, label in PII_TYPES.items():
         if summary["types"].get(k):

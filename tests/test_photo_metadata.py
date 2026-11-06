@@ -126,3 +126,27 @@ def test_japanese_artist_in_jpeg_is_found(tmp_path):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     assert dict(item.finding_counts).get("name"), (item.finding_counts, item.method)
     assert item.method.startswith("写真の情報（EXIF）") and "検査不要" in item.method
+
+
+def test_gps_photos_are_counted_in_summary(tmp_path):
+    """撮影場所のある写真の枚数を集計と判定の文に出す（検出には数えないので、判定は「検出なし」のまま）。"""
+    from pii_checker import runner, verdict
+    from pii_checker.models import GPS_NOTE_MARK
+    from pii_checker.store import Store
+
+    assert misc.GPS_NOTE.startswith(GPS_NOTE_MARK)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(_jpeg(_exif()))
+    (folder / "b.jpg").write_bytes(_jpeg(_exif()))
+    (folder / "c.jpg").write_bytes(_jpeg(_exif(gps=False)))
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(folder)], ScanOptions(temp_dir=str(tmp_path), ocr=False))
+    r = runner.JobRunner(store, job, workers=1)
+    r.start()
+    r.wait(180)
+    summary = store.summary(job)
+    assert summary["gps_photos"] == 2
+    v = verdict.decide(summary, store.job(job)["state"])
+    assert any("撮影場所（GPS）が記録された写真 2 件" in line for line in v.detail), v.detail
+    assert summary["files_with_findings"] == 0

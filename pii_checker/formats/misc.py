@@ -9,6 +9,7 @@ import io
 import re
 
 from ..engine import Blob, Collector, ItemResult, OutOfScope, PartialScan, ScanContext, Uncheckable
+from ..models import GPS_NOTE_MARK
 from ..textdecode import decode_text, entropy, iter_strings_chunked
 
 TEXT_MAX_BYTES = 2 * 1024**3  # これより大きいテキストは少しずつ読む
@@ -476,7 +477,7 @@ _EXIF_XP_TAGS = {0x9C9B, 0x9C9C, 0x9C9D, 0x9C9E, 0x9C9F}  # Windows のプロパ
 _EXIF_IFD = 0x8769
 _GPS_IFD = 0x8825
 GPS_NOTE = (
-    "写真に撮影場所（GPS の緯度・経度）が記録されている。自宅などの場所が分かることがあるので、外へ出すときは"
+    f"{GPS_NOTE_MARK}。自宅などの場所が分かることがあるので、外へ出すときは"
     "位置情報を消す（この道具では消せない。Windows ならファイルを右クリック →「プロパティ」→「詳細」→"
     "「プロパティや個人情報を削除」で消せる。個人情報の検出には数えていない）"
 )

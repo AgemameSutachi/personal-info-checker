@@ -223,6 +223,11 @@ class Store:
         # 検査中の画面更新用の summary の使い回し（ジョブID → (時刻, 集計にかかった秒, 結果)）。上限つき
         self._summary_lock = threading.Lock()
         self._summary_cache: dict[str, tuple[float, float, dict]] = {}
+        # 検査中の集計（進み具合）だけに使う読み取りの接続。初めて使うときに開く（_reader_query）
+        self._reader_lock = threading.Lock()
+        self._reader: sqlite3.Connection | None = None
+        self._reader_failed = False
+        self._progress_cache: dict[str, tuple[float, float, dict]] = {}
         self.recovered = ""  # 壊れていた DB を別名で残して作り直したときの知らせ
         if path:
             # --db で新しいフォルダを指したときも使えるように、置き場のフォルダを作っておく（作れなければ下で知らせる）
@@ -342,6 +347,30 @@ class Store:
     def query(self, sql: str, args=()) -> list[sqlite3.Row]:
         with self._lock:
             return self._conn.execute(sql, args).fetchall()
+
+    def _reader_query(self, sql: str, args=()) -> list[sqlite3.Row]:
+        """検査中の集計を、書き込みと別の接続で読む（保存の鍵を奪わない）。
+
+        query と同じ鍵で数えると、ファイルが多いジョブでは1回の集計の間（実物の 86 万ファイルで約 1.3 秒）
+        結果の保存が待たされ、配る側が止まってワーカーが空いた（F ドライブ全体の検査で、本体の時間の半分以上が
+        毎秒の進み具合の集計だった・py-spy の実測）。WAL なので読み手は書き手を止めない。
+        読み取りの接続を開けなければ query に戻す。
+        """
+        with self._reader_lock:
+            if self._reader is None and not self._reader_failed:
+                try:
+                    conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA query_only=1")
+                    self._reader = conn
+                except sqlite3.Error:
+                    self._reader_failed = True
+            if self._reader is not None:
+                try:
+                    return self._reader.execute(sql, args).fetchall()
+                except sqlite3.OperationalError:
+                    pass  # 使用中・読み取りの失敗: 一度だけ書き込みの接続で読み直す（表示のために検査を止めない）
+        return self.query(sql, args)
 
     def iter_query(self, sql: str, args=(), batch: int = 2000):
         """行を少しずつ返す（レポートの書き出し用。全行をメモリに載せない）。
@@ -871,9 +900,9 @@ class Store:
         """進捗の表示（コマンドの1行表示）に要る分だけの軽い集計。summary の同名の項目と同じ値を返す。
 
         summary は全項目の JSON を読み直すので件数に比例して重く、検査中に毎秒呼ぶと保存の邪魔になる。
-        こちらは SQL の集計だけで済み、JSON を読まない。
+        こちらは SQL の集計だけで済み、JSON を読まない。保存とは別の接続で読む（_reader_query）。
         """
-        q = self.query
+        q = self._reader_query
         files_total = q("SELECT COUNT(*) FROM files WHERE job_id=?", (job_id,))[0][0]
         files_done = q("SELECT COUNT(*) FROM files WHERE job_id=? AND state='done'", (job_id,))[0][0]
         status_counts = {
@@ -887,6 +916,22 @@ class Store:
             "files_with_findings": files_with_findings,
         }
 
+    def progress_cached(self, job_id: str, min_age: float = 1.0) -> dict:
+        """検査中のコマンドの1行表示用の progress。使い回す長さは summary_cached と同じ考え（集計の時間の4倍・上限 30 秒）。
+
+        ファイルが多いと集計そのものが1秒を超え、毎秒数えると1コアを集計だけで使い続けた（実物の 86 万ファイル）。
+        """
+        now = time.monotonic()
+        hit = self._progress_cache.get(job_id)
+        if hit and now - hit[0] < min(30.0, max(min_age, 4 * hit[1])):
+            return copy.deepcopy(hit[2])
+        started = time.monotonic()
+        value = self.progress(job_id)
+        cost = time.monotonic() - started
+        self._progress_cache.clear()  # コマンドが表示するのは1つのジョブだけ
+        self._progress_cache[job_id] = (time.monotonic(), cost, value)
+        return copy.deepcopy(value)
+
     def summary_cached(self, job_id: str, min_age: float = 1.5) -> dict:
         """検査中の画面の更新用の summary。直前の結果が新しければそれを返す（検査中だけ使う）。
 
@@ -899,7 +944,7 @@ class Store:
             if hit and now - hit[0] < min(30.0, max(min_age, 4 * hit[1])):
                 return copy.deepcopy(hit[2])
         started = time.monotonic()
-        value = self.summary(job_id)
+        value = self.summary(job_id, reader=True)
         cost = time.monotonic() - started
         with self._summary_lock:
             self._summary_cache.pop(job_id, None)
@@ -908,9 +953,9 @@ class Store:
                 self._summary_cache.pop(next(iter(self._summary_cache)))
         return copy.deepcopy(value)
 
-    def summary(self, job_id: str) -> dict:
-        """進捗と総合判定の材料。"""
-        q = self.query
+    def summary(self, job_id: str, reader: bool = False) -> dict:
+        """進捗と総合判定の材料。reader=True なら保存とは別の接続で読む（検査中の画面の更新・summary_cached）。"""
+        q = self._reader_query if reader else self.query
         # ファイルの数と大きさ（大きさの進み具合は、1つで何十分もかかる大きなファイルがあると数では止まって見えるため）
         files_total, files_done, bytes_total, bytes_done = q(
             "SELECT COUNT(*), COALESCE(SUM(state='done'), 0), COALESCE(SUM(size), 0),"
@@ -965,7 +1010,10 @@ class Store:
         )[
             0
         ][0]
-        password_files = len(self.files_with_status(job_id, [Status.NEEDS_PASSWORD.value]))
+        password_files = q(
+            "SELECT COUNT(DISTINCT top_path) FROM items WHERE job_id=? AND status=?",
+            (job_id, Status.NEEDS_PASSWORD.value),
+        )[0][0]
         allowed = q("SELECT COALESCE(SUM(allowed), 0) FROM items WHERE job_id=?", (job_id,))[0][0]
         job_opts = q("SELECT options FROM jobs WHERE id=?", (job_id,))
         try:

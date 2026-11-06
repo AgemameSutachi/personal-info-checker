@@ -44,9 +44,9 @@ def test_summary_cached_reuses_and_expires(done_job, monkeypatch):
     calls = []
     real = store.summary
 
-    def counting(job_id):
+    def counting(job_id, **kw):
         calls.append(job_id)
-        return real(job_id)
+        return real(job_id, **kw)
 
     monkeypatch.setattr(store, "summary", counting)
     a = store.summary_cached(job, min_age=60)
@@ -60,6 +60,76 @@ def test_summary_cached_reuses_and_expires(done_job, monkeypatch):
     time.sleep(0.01)
     store._summary_cache[job] = (time.monotonic() - 100, 0.0, store._summary_cache[job][2])
     store.summary_cached(job, min_age=0)
+    assert len(calls) == 2
+
+
+def test_progress_does_not_wait_for_save_lock(done_job):
+    """検査中の集計は保存の鍵を握られていても待たない（別の接続で読む）。summary_cached も同じ。"""
+    import threading
+
+    store, job = done_job
+    got = {}
+
+    def count():
+        got["progress"] = store.progress(job)
+        got["summary"] = store.summary_cached(job)
+
+    with store._lock:  # 保存が長く鍵を握っている間
+        th = threading.Thread(target=count, daemon=True)
+        th.start()
+        th.join(timeout=10)
+        assert not th.is_alive(), "集計が保存の鍵を待った"
+    assert got["progress"]["files_done"] == 5
+    assert got["summary"]["files_with_findings"] == 4
+    # 読み取りの接続では書けない（集計の取り違えで DB を変えない）
+    import sqlite3
+
+    with pytest.raises(sqlite3.OperationalError):
+        store._reader.execute("DELETE FROM files")
+
+
+def test_reader_failure_falls_back_to_query(done_job):
+    """読み取りの接続で失敗しても、書き込みの接続で読み直して表示を続ける（開けないときも同じ）。"""
+    import sqlite3
+
+    store, job = done_job
+
+    class Broken:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    store._reader = Broken()
+    assert store.progress(job)["files_done"] == 5
+    store._reader, store._reader_failed = None, True
+    assert store.progress(job)["files_done"] == 5
+
+
+def test_progress_sees_new_commits(done_job):
+    """読み取りの接続でも、保存した直後の値が見える（古いスナップショットのまま止まらない）。"""
+    store, job = done_job
+    assert store.progress(job)["files_done"] == 5
+    with store.tx() as c:
+        c.execute("UPDATE files SET state='pending' WHERE job_id=? AND top_path LIKE '%f0.txt'", (job,))
+    assert store.progress(job)["files_done"] == 4
+
+
+def test_progress_cached_reuses_and_expires(done_job, monkeypatch):
+    store, job = done_job
+    calls = []
+    real = store.progress
+
+    def counting(job_id):
+        calls.append(job_id)
+        return real(job_id)
+
+    monkeypatch.setattr(store, "progress", counting)
+    a = store.progress_cached(job, min_age=60)
+    store.progress_cached(job, min_age=60)
+    assert len(calls) == 1
+    a["files_done"] = -1  # 返した値を書き換えても覚えている値は変わらない
+    assert store.progress_cached(job, min_age=60)["files_done"] == 5
+    store._progress_cache[job] = (time.monotonic() - 100, 0.0, store._progress_cache[job][2])
+    store.progress_cached(job, min_age=0)
     assert len(calls) == 2
 
 

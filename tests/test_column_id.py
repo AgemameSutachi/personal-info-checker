@@ -242,3 +242,52 @@ def test_fullwidth_digits_are_counted():
     for v in _invalid_numbers(engine.COLUMN_ID_MIN_DISTINCT, 15):
         last = cd.observe(0, v.translate(table))
     assert last is True
+
+
+def test_space_padded_cells_are_counted():
+    """データベースの固定長の文字の列（後ろを空白で詰めた「000000008370␣␣␣…」）も、空白を外して番号の列と分かる。"""
+    ids = _id_column(300, 10)
+    rows = [["TXT_LABEL", "rank"]] + [[v + " " * 24, "1"] for v in ids]
+    assert _low_my_number(rows) == 2
+
+
+def _scan_xlsx(tmp_path, rows) -> ItemResult:
+    import openpyxl
+
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions
+
+    path = tmp_path / "ids.xlsx"
+    wb = openpyxl.Workbook()
+    for r in rows:
+        wb.active.append(r)
+    wb.save(path)
+    return scan_file(str(path), ScanOptions(temp_dir=str(tmp_path))).items[0]
+
+
+def test_xlsx_sheet_xml_reread_keeps_column_verdict(tmp_path):
+    """xlsx はセルを表で読んだ後にシートの XML も読み直す。表の番号の列で外した値を、XML の読み直しで拾い直さない。"""
+    ids = _id_column(300, 10)
+    item = _scan_xlsx(tmp_path, [["CD", "rank"]] + [[v, "1"] for v in ids])
+    assert item.finding_counts.get("my_number", 0) == 2, item.finding_counts
+
+
+def test_xlsx_values_are_not_counted_twice(tmp_path):
+    """表で数えた値を、シートの XML の読み直しでもう一度数えない（1つの電話番号が2件になっていた）。"""
+    item = _scan_xlsx(tmp_path, [["名前", "電話"], ["架空太郎", "090-1234-5678"]])
+    assert item.finding_counts.get("phone", 0) == 1, item.finding_counts
+
+
+def test_docx_values_are_not_counted_twice(tmp_path):
+    """docx も、本文として読んだ値を document.xml の読み直しでもう一度数えない。"""
+    import docx
+
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions
+
+    path = tmp_path / "one.docx"
+    d = docx.Document()
+    d.add_paragraph("連絡先 電話 090-1234-5678")
+    d.save(path)
+    item = scan_file(str(path), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.finding_counts.get("phone", 0) == 1, item.finding_counts

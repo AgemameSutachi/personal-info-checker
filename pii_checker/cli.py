@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import shutil
 import sys
 import time
 
@@ -57,30 +58,166 @@ EPILOG = r"""使用例:
 """
 
 
-def _progress_line(store: Store, runner: JobRunner, final: bool = False) -> str:
-    # 1行表示に要る分だけ（summary は件数に比例して重い）。検査中は集計の重さに合わせて間引く
-    s = store.progress(runner.job_id) if final else store.progress_cached(runner.job_id)
+STALL_SECONDS = 60  # 済んだ数がこれだけ進まなければ、検査中の一番大きなファイルを添える
+LOG_INTERVAL = 60.0  # 出力が端末でない（ログのファイル・パイプ）とき、1行を足す間隔
+
+
+def _progress_line(s: dict, phase: str) -> str:
+    """Store.progress の値を1行にする。"""
     st = s["item_status"]
-    phase = ("中断" if runner.error else "完了") if final else runner.phase
     return (
-        f"\r[{phase}] {s['files_done']:,}/{s['files_total']:,} ファイル"
+        f"[{phase}] {s['files_done']:,}/{s['files_total']:,} ファイル"
         f"  検出あり {s['files_with_findings']:,}  要パスワード {st.get('needs_password', 0):,}"
-        f"  検査不能 {st.get('uncheckable', 0):,}  簡易 {st.get('partial', 0):,}   "
+        f"  検査不能 {st.get('uncheckable', 0):,}  簡易 {st.get('partial', 0):,}"
     )
 
 
+def _size_text(n: int) -> str:
+    for unit, scale in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} B"
+
+
+def _short_name(path: str, limit: int = 40) -> str:
+    """ファイル名だけを、長ければ前後を残して縮める（端末の1行に収めるため）。"""
+    if limit <= 0:
+        return ""
+    name = os.path.basename(path.rstrip("/\\")) or path
+    if len(name) <= limit:
+        return name
+    if limit < 3:
+        return name[:limit]
+    head = (limit - 1) // 2
+    tail = limit - 1 - head
+    return name[:head] + "…" + name[len(name) - tail :]
+
+
+def _char_width(ch: str) -> int:
+    return 1 if ord(ch) < 0x1100 else 2
+
+
+def _display_width(text: str) -> int:
+    """端末での幅のおおよそ（全角は2）。書き換える行の消し残しを埋めるのに使う。"""
+    return sum(_char_width(ch) for ch in text)
+
+
+def _fit(text: str, columns: int) -> str:
+    """端末の幅に収まるよう後ろを切る（折り返すと、行頭へ戻る書き換えが効かず毎秒新しい行が増える）。"""
+    out, width = [], 0
+    for ch in text:
+        width += _char_width(ch)
+        if width > columns:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+class _ProgressPrinter:
+    """検査中の進み具合の表示。
+
+    端末なら毎秒同じ行を書き換え、ログのファイル・パイプなら LOG_INTERVAL 秒ごとに1行を足す（毎秒の書き換えを
+    ファイルへ流すと、改行の無い1行が何 MB にもなって読めない・F ドライブ全体の検査で 2.9MB）。
+    済んだ数が STALL_SECONDS 秒進まないときは、検査中の一番大きなファイルを添える（数 GB の zip 1つを読む間は
+    数が何十分も進まず、止まったように見えるため）。
+    """
+
+    def __init__(self, store: Store, runner: JobRunner, out=None):
+        self.store, self.runner = store, runner
+        self.out = out or sys.stdout
+        try:
+            self.tty = bool(self.out.isatty())
+        except (AttributeError, ValueError):
+            self.tty = False
+        self.last_done: int | None = None
+        self.moved_at = time.monotonic()
+        self.hint: tuple[str, int] | None = None  # 検査中の一番大きなファイル（パス・大きさ）
+        self.hint_at = 0.0
+        self.logged_at: float | None = None
+        self.width = 0  # 端末で直前に書いた行の幅
+
+    def _stall_hint(self) -> tuple[str, int] | None:
+        for _ in range(3):
+            try:
+                paths = list(self.runner.current)
+                break
+            except RuntimeError:  # 検査のスレッドが書き換えている最中
+                continue
+        else:
+            return None
+        try:
+            return self.store.biggest_of(self.runner.job_id, paths)
+        except Exception:  # 表示のための読み取り。失敗しても検査は止めない
+            return None
+
+    def _hint_text(self, name_limit: int = 40) -> str:
+        if not self.hint:
+            return ""
+        return f"  大きなファイルを検査中: {_short_name(self.hint[0], name_limit)}（{_size_text(self.hint[1])}）"
+
+    def _columns(self) -> int:
+        return max(20, shutil.get_terminal_size((120, 24)).columns - 1)
+
+    def _terminal_line(self, s: dict, phase: str) -> str:
+        """端末の1行。添え書きは残りの幅に合わせて名前を縮め、それでも入らなければ件数の側を短くする。"""
+        line = _progress_line(s, phase)
+        if not self.hint:
+            return line
+        columns = self._columns()
+        for main in (line, f"[{phase}] {s['files_done']:,}/{s['files_total']:,} ファイル"):
+            room = columns - _display_width(main + self._hint_text(0))
+            if room >= 12:  # 名前の幅（全角は2）。これより狭いと名前が読めない
+                return main + self._hint_text(room // 2)
+        return line
+
+    def _rewrite(self, line: str, end: str = "") -> None:
+        """端末の同じ行を書き換える。前の行より短ければ空白で消し残しを埋める。"""
+        columns = self._columns()
+        line = _fit(line, columns)
+        width = _display_width(line)
+        pad = min(max(0, self.width - width), columns - width)
+        self.out.write("\r" + line + " " * pad + end)
+        self.width = width
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        # 1行表示に要る分だけ（summary は件数に比例して重い）。検査中は集計の重さに合わせて間引く
+        s = self.store.progress_cached(self.runner.job_id)
+        if s["files_done"] != self.last_done:
+            self.last_done, self.moved_at, self.hint = s["files_done"], now, None
+        elif now - self.moved_at >= STALL_SECONDS and now - self.hint_at >= 30:
+            self.hint_at = now
+            self.hint = self._stall_hint()
+        phase = self.runner.phase
+        if self.tty:
+            self._rewrite(self._terminal_line(s, phase))
+        elif self.logged_at is None or now - self.logged_at >= LOG_INTERVAL:
+            self.logged_at = now
+            self.out.write(_progress_line(s, phase) + self._hint_text() + "\n")
+        self.out.flush()
+
+    def final(self) -> None:
+        phase = "中断" if self.runner.error else "完了"
+        line = _progress_line(self.store.progress(self.runner.job_id), phase)
+        if self.tty:
+            self._rewrite(line, "\n")
+        else:
+            self.out.write(line + "\n")
+        self.out.flush()
+
+
 def _run_until_done(store: Store, runner: JobRunner) -> None:
+    printer = _ProgressPrinter(store, runner)
     runner.start()
     try:
         while runner.running:
-            sys.stdout.write(_progress_line(store, runner))
-            sys.stdout.flush()
+            printer.tick()
             runner.wait(1.0)
     except KeyboardInterrupt:
         print("\n中止します（ここまでの結果は保存済み。同じジョブを再開できます）…")
         runner.cancel()
         runner.wait()
-    sys.stdout.write(_progress_line(store, runner, final=True) + "\n")
+    printer.final()
     # 前の検査の残りの片付けは裏で走る。コマンドはこの後すぐ終わるので、終わるまで待つ（待たないと、短い検査を
     # 繰り返したときに毎回途中で止まって片付かない・評価の指摘）
     runner.wait_cleanup()

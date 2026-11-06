@@ -381,6 +381,7 @@ def test_document_xml_keeps_split_runs_together(tmp_path):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     assert {"name", "phone"} <= set(item.finding_counts), item.finding_counts
     assert "タグを除いた" in item.method
+    assert "項目名" not in item.method, item.method  # 文書の XML には要素名を項目名にした読み方を足さない
 
 
 def test_data_xml_uses_element_names_as_headers():
@@ -416,7 +417,38 @@ def test_xml_shapes(tmp_path, src, kinds):
     p = tmp_path / "x.xml"
     p.write_text('<?xml version="1.0" encoding="UTF-8"?>' + src, encoding="utf-8")
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
-    assert kinds <= set(item.finding_counts), (src, item.finding_counts)
+    assert set(dict(item.finding_counts)) == kinds, (src, item.finding_counts)
+
+
+@pytest.mark.parametrize(
+    "src, counts",
+    [
+        # 今までの読み方と項目名の読み方の両方で同じ値が出ても1件（skip_seen）
+        ("<r><電話番号>090-1234-5678</電話番号></r>", {"phone": 1}),
+        ("<r><電話番号><![CDATA[090-1234-5678]]></電話番号><携帯>090-1234-5678</携帯></r>", {"phone": 1}),
+        # 要素名が手がかりの語にならない数字だけの 12 桁は拾わない（誤検出を増やさない）。
+        # 検査数字の合う 12 桁（345678901234 など）は単独の値と同じく今までも拾う＝本文の語の無い 12 桁の扱いは別の課題
+        ("<r><ID>123456789012</ID><ID>234567890123</ID></r>", {}),
+    ],
+)
+def test_data_xml_counts(tmp_path, src, counts):
+    p = tmp_path / "x.xml"
+    p.write_text('<?xml version="1.0" encoding="UTF-8"?>' + src, encoding="utf-8")
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert dict(item.finding_counts) == counts, (src, item.finding_counts)
+
+
+def test_unclosed_cdata_is_linear():
+    """閉じていない CDATA の開始が多くても二乗の時間にならない（壊れた XML・XML と名の付いたバイナリ）。"""
+    import time
+
+    from pii_checker.formats import misc
+
+    t = time.perf_counter()
+    misc.data_xml_to_text("<![CDATA[" * 100000)
+    assert time.perf_counter() - t < 2.0  # 正規表現の (.*?) では 8000 個で 3 秒以上かかった
+    src = "<r><a><![CDATA[x<y]]></a><b><![CDATA[open"
+    assert [s for s in misc.data_xml_to_text(src).splitlines() if s.strip()] == ["a：x<y", "<![CDATA[open"]
 
 
 def test_document_xml_marks():

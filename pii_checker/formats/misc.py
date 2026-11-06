@@ -292,13 +292,35 @@ _DOCUMENT_XML = re.compile(
     r"schemas\.openxmlformats\.org/drawingml/|www\.w3\.org/1999/xhtml",
     re.I,
 )
-_CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
 # 葉の要素（中に要素を持たない）: <名前 属性>値</名前>
 _XML_LEAF = re.compile(r"<([^\s<>/!?]{1,100})(?:\s[^<>]{0,2000})?>([^<>]{1,10000})</\1\s*>")
 
 
 def is_document_xml(src: str) -> bool:
+    # 先頭 64KB だけ見る（名前空間の宣言がその後ろにある文書はデータ扱いになり、項目名の行が余計に足されるだけ）
     return bool(_DOCUMENT_XML.search(src[:65536]))
+
+
+def _unwrap_cdata(src: str) -> str:
+    """CDATA の中身を文字として戻す（< > & は参照にして、後のタグの処理で壊さない）。
+
+    正規表現の <!\\[CDATA\\[(.*?)\\]\\]> は、閉じていない開始が多いと開始ごとに末尾まで探して二乗の時間になるので、
+    前から1回だけなめる。閉じの無い開始より後ろはそのまま残す。
+    """
+    out = []
+    pos = 0
+    while True:
+        start = src.find("<![CDATA[", pos)
+        if start < 0:
+            break
+        end = src.find("]]>", start + 9)
+        if end < 0:
+            break
+        out.append(src[pos:start])
+        out.append(html.escape(src[start + 9 : end], quote=False))
+        pos = end + 3
+    out.append(src[pos:])
+    return "".join(out)
 
 
 def data_xml_to_text(src: str) -> str:
@@ -308,7 +330,7 @@ def data_xml_to_text(src: str) -> str:
     使えない。葉の要素は「項目名：値」の1行にし、ほかのタグは改行にする。CDATA の中身は文字として読む。
     値の途中に要素が入る形（<電話番号>090-<b>1234</b>…）は切れるので、呼ぶ側は今までの読み方（markup_to_text）と併せて使う。
     """
-    s = _CDATA.sub(lambda m: html.escape(m.group(1), quote=False), src)
+    s = _unwrap_cdata(src)
     s = RE_SCRIPT.sub(" ", s)
 
     def leaf(m: re.Match) -> str:
@@ -340,7 +362,7 @@ def handle_markup(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     if item.kind == KIND_LABELS["xml"] and not is_document_xml(src):
         # データの XML は、要素名を項目名にした読み方も足す（今までの読み方で拾った値は数え直さない）。
         # 今までの読み方は、値の途中に要素が入る文（DocBook・SVG の tspan など）のために残す
-        item.method = f"タグを除いた本文・要素名を項目名にした本文と属性値（{enc}）"
+        item.method = f"タグを除いた本文と、要素名を項目名にした本文、属性値（{enc}）"
         col.add_lines(data_xml_to_text(src), method="本文", skip_seen=True)
     scan_embedded_base64(ctx, blob, item, src, depth)  # Word 2003 XML の w:binData など
     for v in attribute_texts(src):

@@ -155,9 +155,13 @@ def test_runner_wakes_when_a_task_finishes(tmp_path, monkeypatch):
         def stop(self):
             pass
 
+    save_time = [0.0]
+
     def fake_save(future, path, started, expired, version=0):
+        s = time.perf_counter()
         saved.append(path)
         store.save_failure(job, path, "試験")
+        save_time[0] += time.perf_counter() - s
 
     import pebble
 
@@ -167,6 +171,11 @@ def test_runner_wakes_when_a_task_finishes(tmp_path, monkeypatch):
     r._scan_pending()
     took = time.perf_counter() - t
     assert len(saved) == n
-    # 0.2 秒ごとに入れ替える作りでは 400 件 ÷ 同時 8 件 × 0.2 秒 ≒ 10 秒かかる。1 件ずつ起きれば 1 秒ほどで終わる
-    # （遅い CI でも誤って落ちないよう、閾値は間を広く取る）
-    assert took < 5.0, f"{took:.2f} 秒かかった（終わった仕事を待つ間、決まった時間眠っている）"
+    # 0.2 秒ごとに入れ替える作りでは 400 件 ÷ 同時 8 件 × 0.2 秒 ≒ 10 秒かかる。1 件ずつ起きれば 1 秒ほどで終わる。
+    # 保存（SQLite へ 400 回の書き込み）の時間は配り方と関係なく、遅い CI のディスクでは数秒かかる
+    # （保存を含めて 6.18 秒で落ちたことがある）ので、引いてから測る。閾値は間を広く取る
+    waited = took - save_time[0]
+    assert waited < 5.0, (
+        f"保存を除いて {waited:.2f} 秒かかった（終わった仕事を待つ間、決まった時間眠っている）・"
+        f"保存 {save_time[0]:.2f} 秒"
+    )

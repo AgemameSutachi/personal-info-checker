@@ -1268,6 +1268,9 @@ _RE_DUMP_LINE = re.compile(
     r"|[0-9A-Fa-f]{7}0:(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
 )
 _DUMP_LINE_MAX = 200
+# URL のパスの中の検出（_in_url_path）。手前の「scheme://」を探す幅と、URL の終わり・クエリ（?）・断片（#）の印
+_URL_PATH_MAX = 300
+_URL_PATH_STOP = frozenset(" \t\r\n\f\v\"'`<>()[]{}|\\^?#　")
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
@@ -1383,6 +1386,21 @@ def _beside_long_digit_run(text: str, start: int, end: int, width: int = 40) -> 
     return bool(_RE_LONG_RUN_BEFORE.search(text, max(0, start - width), start))
 
 
+def _in_url_path(text: str, start: int, end: int) -> bool:
+    """検出が URL のパス（「scheme://」の後ろ・「?」より前）の中にあるか。
+
+    手前 _URL_PATH_MAX 文字の中の最後の「://」の直前が ASCII の英字で、そこから検出の終わりまでに
+    空白・引用符・かっこ・「?」「#」が無いものだけを見る。
+    実物の検査（2026-11-07・.db の生データ）では、手がかり語の無い12桁 55,675 個がすべて
+    「https://…/public/<12桁>_<16進>」のような配信の URL のパスの一部だった。
+    クエリの値（「?id=123456789018」）は申込みの画面などから番号が漏れる経路なので残す。
+    """
+    i = text.rfind("://", max(0, start - _URL_PATH_MAX), start)
+    if i <= 0 or not (text[i - 1].isascii() and text[i - 1].isalpha()):
+        return False
+    return not any(c in _URL_PATH_STOP for c in text[i + 3 : end])
+
+
 def _across_number_lines(text: str, start: int, end: int) -> bool:
     """検出が改行をまたいでいて、検出の始まる行の1つ前の行か、終わる行の1つ後ろの行が数だけの行か
     （1行に数が1つずつ並ぶ一覧の一部）。
@@ -1462,7 +1480,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
     2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
     16進のダンプの行と OBJ の要素の行の中のもの。マイナンバー（手がかり語なし）のすぐ隣が20桁以上の数字の連続のもの
-    （固定長のレコードの0詰めの欄）
+    （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）
     """
     out = []
     for h in hits:
@@ -1484,6 +1502,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 _decimal_adjacent(text, h.start, h.end)
                 or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value))
                 or _beside_long_digit_run(text, h.start, h.end)
+                or _in_url_path(text, h.start, h.end)
             ):
                 continue
         elif h.rule == "和暦の日付（生年月日の可能性）":

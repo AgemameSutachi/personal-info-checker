@@ -202,6 +202,10 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("ヒヤシ0000E 12A002000999000000999" + " " * 30 + "123456789018A1  0012000000048000000300000001", "my_number"),
         ("123456789018" + " " * 20 + "0" * 20, "my_number"),  # 20桁が窓（40字）にちょうど入る
         ("123456789018　　" + "0" * 20, "my_number"),  # 全角空白
+        # URL のパスの中の語の無い12桁（配信の URL の「/public/<12桁>_<16進>」）
+        ("https://cdn.example.com/public/123456789018_3fa9c2.jpg", "my_number"),
+        ('src="http://192.0.2.10/a/b/123456789018"', "my_number"),
+        ("見本 https://example.jp/日本語/123456789018/x", "my_number"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -221,6 +225,13 @@ def test_numeric_data_false_positive(text, pii_type):
         ("123456789018 A12 " + "0" * 22, "my_number"),  # 英字の欄は数字1つまで
         ("123456789018 order number " + "0" * 22, "my_number"),  # 語をはさむ
         ("123456789018\n" + "0" * 22, "my_number"),  # 行をまたがない
+        # URL のクエリ・断片の値・URL の後ろの空白の先・「://」の手前が英字でないものは残す
+        ("https://example.com/form?id=123456789018", "my_number"),
+        ("https://example.com/p#123456789018", "my_number"),
+        ("https://example.com/p 123456789018", "my_number"),
+        ('"https://example.com/p" 123456789018', "my_number"),
+        ("://example.com/123456789018", "my_number"),
+        ("個人番号 https://a.jp/123456789018", "my_number"),  # 語があれば（語の届く近さなら）確度 高 で残る
         # 電話・カードの形は、隣に長い連続があっても今までどおり（語があっても同じ規則名で出るため）
         ("TEL 09012345678 ID 1234567890123456789012", "phone"),
         ("090-1234-5678 1234567890123456789012", "phone"),

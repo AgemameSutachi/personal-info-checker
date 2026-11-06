@@ -158,7 +158,7 @@ def test_wide_int_column_without_header_word_is_noted_not_read(tmp_path):
     top = res.items[0]
     assert top.status == Status.SCANNED and not _found(res), (top.method, _found(res))
     assert "読んだ列 1 列" in top.method and "全 4 列" in top.method, top.method
-    assert any("9 桁以上の整数が入った列 2 列" in n for n in top.notes), top.notes
+    assert any("整数の列 2 列" in n for n in top.notes), top.notes
     assert any("そのほかの文字以外の列 1 列" in n for n in top.notes), top.notes
     # 見出し語の列なら、数で持つ番号も読む
     table = pa.table({"マイナンバー": pa.array([123456789018, 0], pa.int64())})
@@ -253,3 +253,9 @@ def test_row_limit_is_partial(tmp_path):
     # 上限ちょうどの行数なら一部だけにしない
     res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), max_rows_per_table=N))
     assert res.items[0].status == Status.SCANNED
+
+
+def test_null_only_int_column_is_not_called_wide(tmp_path):
+    table = pa.table({"c": pa.array([None, None], pa.int64()), "x": pa.array(["a", "b"])})
+    notes = _scan_table(tmp_path, table).items[0].notes
+    assert not any("9 桁以上" in n for n in notes) and any("そのほかの文字以外の列 1 列" in n for n in notes), notes

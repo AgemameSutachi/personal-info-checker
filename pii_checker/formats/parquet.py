@@ -111,6 +111,13 @@ def _wide_int_columns(pf) -> set[str]:
     for name, j in leaf_of.items():
         for g in range(md.num_row_groups):
             stats = md.row_group(g).column(j).statistics
+            if (
+                stats is not None
+                and not stats.has_min_max
+                and stats.has_null_count
+                and stats.null_count >= stats.num_values
+            ):
+                continue  # この行のまとまりは空（null だけ）
             if stats is None or not stats.has_min_max:
                 wide.add(name)
                 break
@@ -190,7 +197,8 @@ def handle_parquet(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
         notes = []
         if wide:
             notes.append(
-                f"9 桁以上の整数が入った列 {len(wide)} 列は、見出しが個人情報の見出し語に当たらないので読んでいない"
+                f"9 桁以上の整数が入った（または統計が無く桁を確かめられない）整数の列 {len(wide)} 列は、"
+                "見出しが個人情報の見出し語に当たらないので読んでいない"
                 "（ID・時刻などの列とみなした。番号を数で持つ列なら、見出しを「マイナンバー」などにすると読む）"
             )
         if skipped:

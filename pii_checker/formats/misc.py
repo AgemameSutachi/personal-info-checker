@@ -519,19 +519,21 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
     col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)
 
 
+# 名前は Microsoft Store の日本語の表示（2026-11 に確かめた）。HEVC は有料のことがある
 HEIF_HELP = (
-    "Windows に「HEIF 画像拡張機能」（HEIC は「HEVC ビデオ拡張機能」、AVIF は「AV1 Video Extension」も）を"
-    "入れるか、JPEG に変換すれば検査できる"
+    "Microsoft Store から「HEIF 画像表示オプション」（HEIC は「HEVC ビデオ拡張機能」（有料のことがある）、"
+    "AVIF は「AV1 ビデオ拡張機能」も）を入れるか、JPEG に変換すれば検査できる"
 )
 # WIC が「その形式を開く部品が無い」ときの値（WINCODEC_ERR_COMPONENTNOTFOUND = 0x88982F50 を符号つきで表したもの）
 _WIC_COMPONENT_NOT_FOUND = "-2003292336"
+_WIN_ERROR = re.compile(r"\[WinError -?\d+\][^\n]*")
 
 
 def _open_heif_with_pillow(data: bytes):
     """pillow-heif（任意の追加。入れると Windows の拡張が無い PC でも HEIC を読める）で開く。入っていなければ None。"""
     try:
         import pillow_heif
-    except ImportError:
+    except (ImportError, OSError):  # 入っていない・中の DLL を読み込めない
         return None
     from PIL import Image
 
@@ -547,15 +549,17 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
     PIL では開けないので、まず Windows の画像の部品（WIC・Windows の HEIF の拡張）で開き、開けなければ
     pillow-heif（入っていれば）で開く。どちらも開けなければ、入れ方を添えて検査できない項目にする。
     pillow-heif は必須の依存にしない（配布の wheel が GPLv2 の x265 を含むため、配布版の exe には入れていない）。
+    連写・深度などの補助の画像は読まず、主の画像だけを検査する。
     """
+    from PIL import Image
+
     from .. import ocr
 
     if not ctx.options.ocr:
         raise Uncheckable("OCR を無効にして実行したため画像（HEIC/AVIF）の中の文字を検査していない（要目視）")
     if not ocr.is_available():
         raise Uncheckable(
-            "OCR が使えないため画像（HEIC/AVIF）の中の文字を検査できない（要目視。HEIC/AVIF は Windows の部品で開くため、"
-            f"OCR が使えないと開けない）: {ocr.unavailable_reason()}"
+            f"OCR が使えないため画像（HEIC/AVIF）の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}"
         )
     data = blob.read_all()
     how = "Windows の部品"
@@ -563,19 +567,27 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
         img = ocr.open_with_wic(data)
     except ValueError as e:
         wic_error = str(e)
+        if "画素数が大きすぎる" in wic_error:  # 拡張を入れても直らないので、入れ方を案内しない
+            raise Uncheckable(f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（要目視）: {wic_error}")
+        no_codec = _WIC_COMPONENT_NOT_FOUND in wic_error
+        detail = _WIN_ERROR.search(wic_error)
+        detail = f"（詳細: {detail.group(0)}）" if detail else ""
         try:
             img = _open_heif_with_pillow(data)
+        except Image.DecompressionBombError as pe:
+            raise Uncheckable(f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（要目視）: {pe}")
         except Exception as pe:  # pillow-heif の中の失敗（壊れている・未対応の符号化）
-            raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）: {pe}")
+            help_text = f"。{HEIF_HELP}" if no_codec else ""
+            raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）{help_text}: {pe}")
         how = "pillow-heif"
         if img is None:
-            if _WIC_COMPONENT_NOT_FOUND in wic_error:
+            if no_codec:
                 raise Uncheckable(
                     f"この PC の Windows では画像（HEIC/AVIF）を開けないため検査できない（要目視）。{HEIF_HELP}"
                 )
             raise Uncheckable(
-                f"画像（HEIC/AVIF）を開けなかった（壊れているか、この PC の Windows では開けない符号化。要目視）。"
-                f"壊れていなければ、{HEIF_HELP}: {wic_error}"
+                "画像（HEIC/AVIF）を開けなかった（壊れているか、この PC の Windows では開けない符号化。要目視）。"
+                f"壊れていなければ、{HEIF_HELP}{detail}"
             )
     w, h = img.size
     if max(w, h) < ctx.options.min_image_px:

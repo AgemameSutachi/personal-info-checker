@@ -473,7 +473,8 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ocr, "open_with_wic", missing)
     reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
-    assert "この PC の Windows では" in reason and "HEIF 画像拡張機能" in reason, reason
+    assert "この PC の Windows では" in reason and "Microsoft Store" in reason, reason
+    assert "HEIF 画像表示オプション" in reason and "HEVC ビデオ拡張機能" in reason and "AV1 ビデオ拡張機能" in reason
 
     def broken(data):
         raise ValueError(
@@ -482,7 +483,8 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ocr, "open_with_wic", broken)
     reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
-    assert "壊れているか" in reason and "-1072875842" in reason, reason
+    assert "壊れているか" in reason and "（詳細: [WinError -1072875842] 準拠していません）" in reason, reason
+    assert "壊れている可能性" not in reason  # 中の誤りの「（壊れている可能性があります）」は重ねない
 
     def pillow_fails(data):
         raise OSError("Invalid input: Unspecified: Bitstream not supported by this decoder")
@@ -490,6 +492,42 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
     monkeypatch.setattr(misc, "_open_heif_with_pillow", pillow_fails)
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     assert item.status == Status.UNCHECKABLE and "壊れている可能性" in item.reason and "Bitstream" in item.reason
+    assert "Microsoft Store" not in item.reason  # WIC の部品はあった（壊れている見込み）ので入れ方は出さない
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert "壊れている可能性" in item.reason and "Microsoft Store" in item.reason  # 部品も無かったので入れ方も出す
+
+
+def test_heic_too_many_pixels_is_not_blamed_on_codec(tmp_path, monkeypatch):
+    """画素数が大きすぎて開かなかったものは、拡張の入れ方ではなく大きすぎたことを理由に出す。"""
+    from PIL import Image as PILImage
+
+    from pii_checker.engine import scan_file
+    from pii_checker.formats import misc
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "huge.heic"
+    p.write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+    monkeypatch.setattr(ocr, "is_available", lambda: True)
+
+    def huge(data):
+        raise ValueError("画像の画素数が大きすぎるため読み込みを中止しました（20000×20000）")
+
+    monkeypatch.setattr(ocr, "open_with_wic", huge)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE and "画素数が大きすぎる" in item.reason
+    assert "Microsoft Store" not in item.reason
+
+    def missing(data):
+        raise ValueError("[WinError -2003292336]")
+
+    def bomb(data):
+        raise PILImage.DecompressionBombError("Image size (400000000 pixels) exceeds limit")
+
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    monkeypatch.setattr(misc, "_open_heif_with_pillow", bomb)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert "画素数が大きすぎる" in item.reason and "Microsoft Store" not in item.reason
 
 
 def test_heic_falls_back_to_pillow_heif(tmp_path, monkeypatch):

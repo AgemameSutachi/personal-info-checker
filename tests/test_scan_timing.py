@@ -50,23 +50,43 @@ def test_summary_counts_work_save_and_wait(tmp_path):
     assert [r["top_path"] for r in got] == ["a", "big", "b", "c"]
     s = scan_timing.summarize(got, workers=2, top=2, after=1)
     assert s["files"] == 4
-    assert s["span"] == pytest.approx(10.0)
+    # 手元を離れていた区間 [97.5,100]・[100,101]・[98,102]・[108.5,110] を重ねると 4.5＋1.5 秒（6.5 秒の空きは短いので数えない）
+    assert s["whole"] == pytest.approx(12.5)
+    assert s["span"] == pytest.approx(6.0)
+    assert s["pauses"] == 0
     assert s["work"] == pytest.approx(5.0)
     assert s["save"] == pytest.approx(5.3)
     assert s["wait"] == pytest.approx(0.5 + 0 + 3.0 + 0.5)
-    assert s["busy"] == pytest.approx(5.0 / 20.0)
+    assert s["busy"] == pytest.approx(5.0 / 12.0)
     assert s["long_save_count"] == 1
     assert s["wait_after_long_save"] == pytest.approx(3.0)
     assert [r["path"] for r in s["long_saves"]] == ["big", "a"]
     text = scan_timing.report(s, after=1)
-    assert "稼働 25%" in text and "big" in text
-    assert "空いた" not in text
+    assert "稼働 42%" in text and "big" in text
+    assert "配られていない" not in text
 
-    # 102→110 の 8 秒の空きを、止めていた時間として除く
-    s = scan_timing.summarize(got, workers=2, gap=5.0)
-    assert (s["whole"], s["span"], s["pauses"]) == (pytest.approx(10.0), pytest.approx(2.0), 1)
-    assert s["busy"] == pytest.approx(5.0 / 4.0)
+
+def test_pause_is_excluded_but_long_file_is_not(tmp_path):
+    """どのファイルも配られていない区間は除き、大きなファイルだけが走っていた区間は除かない。"""
+    rows = [("a", 1.0, 0.0, 1.0, 100.0), ("b", 1.0, 0.0, 1.0, 300.0)]
+    db = _make_db(tmp_path, rows)
+    with scan_timing.open_readonly(str(db)) as con:
+        got = scan_timing.load_rows(con, "J")
+    s = scan_timing.summarize(got, workers=1)
+    assert (s["whole"], s["span"], s["pauses"], s["paused"]) == (
+        pytest.approx(201.0),
+        pytest.approx(2.0),
+        1,
+        pytest.approx(199.0),
+    )
     assert "1 区間" in scan_timing.report(s, after=20)
+
+    db2 = _make_db(tmp_path / "x", rows + [("huge", 250.0, 0.0, 250.0, 350.0)])
+    with scan_timing.open_readonly(str(db2)) as con:
+        got = scan_timing.load_rows(con, "J")
+    s = scan_timing.summarize(got, workers=1)
+    assert s["pauses"] == 0
+    assert s["span"] == pytest.approx(251.0)  # [99,350] は huge が走っていた
 
 
 def test_empty_job_and_old_db(tmp_path):

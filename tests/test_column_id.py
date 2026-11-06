@@ -1,0 +1,145 @@
+"""手がかり語の無い12桁のマイナンバーを、表の列の文脈で落とす（engine._ColumnDigits）の試験。
+
+12桁の数はすべて試験のために作った値で、実在の番号ではない。
+"""
+
+from __future__ import annotations
+
+import random
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pii_checker import engine  # noqa: E402
+from pii_checker.detectors import my_number_is_valid  # noqa: E402
+from pii_checker.engine import Collector  # noqa: E402
+from pii_checker.models import ItemResult, Status  # noqa: E402
+
+
+def _valid_numbers(n: int, seed: int) -> list[str]:
+    """検査数字が合う12桁を n 個（試験用に作る）。"""
+    rnd = random.Random(seed)
+    out: list[str] = []
+    while len(out) < n:
+        body = f"{rnd.randrange(10**10, 10**11):011d}"
+        for d in "0123456789":
+            if my_number_is_valid(body + d):
+                out.append(body + d)
+                break
+    return out
+
+
+def _invalid_numbers(n: int, seed: int) -> list[str]:
+    rnd = random.Random(seed)
+    out: list[str] = []
+    while len(out) < n:
+        v = f"{rnd.randrange(10**11, 10**12):012d}"
+        if not my_number_is_valid(v):
+            out.append(v)
+    return out
+
+
+def _low_my_number(rows, records: bool = False) -> int:
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    if records:
+        col.add_records(rows[0], rows[1:], lambda r, c: f"R{r}C{c + 1}")
+    else:
+        col.add_table(rows, lambda r, c: f"R{r}C{c + 1}")
+    return item.conf_counts.get("my_number:low", 0)
+
+
+def _id_column(n: int, valid_every: int, repeat: int = 1) -> list[str]:
+    """番号の列: valid_every 個に1個だけ検査数字が合う（でたらめな番号の偶然の一致の代わり）。"""
+    valid = iter(_valid_numbers(n, 1))
+    invalid = iter(_invalid_numbers(n, 2))
+    col = []
+    for i in range(n):
+        v = next(valid) if i % valid_every == 0 else next(invalid)
+        col += [v] * repeat
+    return col
+
+
+def test_id_column_drops_bare_my_number_after_enough_values():
+    """検査数字の合う値が1割の番号の列: 判定が付くまでの分だけ残り、その後は拾わない。"""
+    ids = _id_column(300, 10)
+    rows = [["race_id", "rank"]] + [[v, "1"] for v in ids]
+    got = _low_my_number(rows)
+    # 判定が付くのは異なる値が 20 個そろった時点（そこまでに合うのは 2 個）
+    assert got == 2, got
+
+
+def test_repeated_values_are_counted_as_distinct():
+    """同じ番号が何行も続く列（レースごとの行）でも、異なる値で数える（最初の番号が合っても番号の列と分かる）。"""
+    ids = _id_column(100, 10, repeat=16)  # 最初の値は検査数字が合う
+    rows = [["race_id", "horse"]] + [[v, "テスト号"] for v in ids]
+    got = _low_my_number(rows)
+    assert got == 2 * 16, got  # 判定までの合う値 2 個 × 16 行
+
+
+def test_real_my_number_column_is_kept():
+    """全部の値の検査数字が合う列（見出しが「番号」でも）は今までどおり拾う。"""
+    nums = _valid_numbers(250, 3)
+    rows = [["番号", "備考"]] + [[v, ""] for v in nums]
+    assert _low_my_number(rows) == 250
+
+
+def test_mixed_column_majority_valid_is_kept():
+    """合う値が半分以上なら番号の列とはみなさない。"""
+    valid = _valid_numbers(60, 4)
+    invalid = _invalid_numbers(40, 5)
+    col = []
+    for i in range(100):
+        col.append(valid.pop() if i % 5 != 0 and valid else invalid.pop())
+    col += valid + invalid
+    rows = [["code", "x"]] + [[v, "a"] for v in col]
+    assert _low_my_number(rows) == 60
+
+
+def test_other_columns_are_not_affected():
+    """番号の列と判定されても、ほかの列の12桁は今までどおり拾う。"""
+    ids = _id_column(100, 10)
+    nums = _valid_numbers(100, 6)
+    rows = [["race_id", "num"]] + [[a, b] for a, b in zip(ids, nums)]
+    assert _low_my_number(rows) == 2 + 100
+
+
+def test_header_my_number_column_is_not_dropped():
+    """見出しがマイナンバーの列は、検査数字の合わない値が多くても見出しの規則で拾う（この判定で落とさない）。"""
+    ids = _id_column(100, 10)
+    rows = [["マイナンバー", "氏名"]] + [[v, "架空 太郎"] for v in ids]
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_table(rows, lambda r, c: f"R{r}C{c + 1}")
+    assert item.conf_counts.get("my_number:high", 0) == 10, item.conf_counts
+
+
+def test_records_path_also_drops():
+    """データベースの表（add_records）でも同じ。"""
+    ids = _id_column(300, 10)
+    rows = [["race_id", "rank"]] + [[v, 1] for v in ids]
+    assert _low_my_number(rows, records=True) == 2
+
+
+def test_new_table_resets_the_judgement():
+    """表が変われば判定をやり直す（前の表の番号の列の判定を持ち越さない）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_records(["race_id"], [[v] for v in _id_column(300, 10)], lambda r, c: f"R{r}C{c + 1}")
+    before = item.conf_counts.get("my_number:low", 0)
+    nums = _valid_numbers(30, 7)
+    col.add_records(["x"], [[v] for v in nums], lambda r, c: f"R{r}C{c + 1}")
+    assert item.conf_counts.get("my_number:low", 0) - before == 30
+
+
+def test_track_limit_freezes_decision():
+    """異なる値が上限に届いたら判定を固め、覚えた値を手放す。"""
+    cd = engine._ColumnDigits()
+    for v in _id_column(engine.COLUMN_ID_TRACK + 50, 10):
+        cd.observe(0, v)
+    assert cd._decided == {0} and cd.verdict == {0: True}
+    assert 0 not in cd._values
+    # 固めた後は、検査数字の合う値が続いても判定を変えない
+    for v in _valid_numbers(300, 8):
+        assert cd.observe(0, v) is True

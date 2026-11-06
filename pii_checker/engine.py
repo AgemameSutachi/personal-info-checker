@@ -50,6 +50,14 @@ DEFER_LIMIT = 200_000
 SEEN_LIMIT = 3_000_000
 # 対処のために集める検出の位置の上限（超えたら「多すぎる」として、位置を使う対処はしない。1件 32 バイトで 64MB）
 POSITIONS_LIMIT = 2_000_000
+# 手がかり語の無い12桁のマイナンバー（確度 低）を、表の列の文脈で落とす。列のセルに12桁の数だけが並び、その異なる値のうち
+# 検査数字が合うものが半分に満たなければ、レースの ID のような番号の列とみなす（でたらめな12桁は約1割が偶然合う。
+# 本物のマイナンバーの列はほぼ全部合う）。異なる値が COLUMN_ID_MIN_DISTINCT 個そろうまでは判定しない（それまでの分は今までどおり）
+BARE_MY_NUMBER_RULE = "12桁・検査数字一致（手がかり語なし"
+COLUMN_ID_MIN_DISTINCT = 20
+COLUMN_ID_MAX_VALID_RATIO = 0.5
+COLUMN_ID_TRACK = 200  # 1列で数える異なる値の上限（ここで判定を固める。メモリを食わないため）
+RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:
@@ -262,6 +270,7 @@ class Collector:
         location_fn: Callable[[int], str] | None = None,
         skip_seen: bool = False,
         weak_header: bool = False,
+        id_column: bool = False,
     ) -> None:
         """文字列を検査して結果に加える。
 
@@ -269,6 +278,7 @@ class Collector:
         skip_seen=True は既に見つけた値を数えないだけ（同じ本文を別の読み方でもう一度読むとき）。
         どちらでも、既に見た値をより高い確度で見直したときは明細の確度を引き上げる。
         weak_header=True は見出しが確かでない（左隣が「見出し語＋値」のセル）とき。見出しのおかげで拾えた分は確度を低にする。
+        id_column=True は番号の列のセル（_ColumnDigits）。手がかり語の無い12桁のマイナンバーを拾わない。
         """
         if text is None:
             return
@@ -294,6 +304,8 @@ class Collector:
                 self.person_cue = True
                 self.cue_title = title.group(0)
         hits = detectors.detect(norm, header)
+        if id_column:
+            hits = [h for h in hits if not (h.pii_type == "my_number" and h.rule.startswith(BARE_MY_NUMBER_RULE))]
         if self.matcher is not None:
             hits += self.matcher.find(norm)  # 利用者の規則（見出しに関係なく本文に当てる）
         # 見出しが確かでないときは、見出しなしで読んだときの確度に留める（見出しなしでは拾えない分は低）
@@ -702,6 +714,7 @@ class Collector:
         戻り値は処理した行数。
         """
         self._skip_seen = skip_seen
+        self._col_digits = _ColumnDigits()
         headers: list[str | None] = []
         cur_score = 0
         cur_cells = 0
@@ -723,6 +736,7 @@ class Collector:
             )
             if switch:
                 headers = [v or None for v in values]
+                self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
                 cur_score = score
                 cur_cells = cells
                 self._table_row(values, r_idx, [], location_fn, method)  # 見出し行自体も検査（見出しなしで）
@@ -734,6 +748,7 @@ class Collector:
     def add_records(self, columns: list[str], rows, location_fn: Callable[[int, int], str], method: str = "") -> int:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""
         self._skip_seen = False
+        self._col_digits = _ColumnDigits()
         headers = list(columns)
         # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
         sure = [bool(h and detectors.header_category(h)) for h in headers]
@@ -751,10 +766,18 @@ class Collector:
         ずっと少ない）。呼び出し側の location_fn は行・列だけで場所が決まること（後から呼んでも同じ文字列になること）。
         """
         skip_seen = getattr(self, "_skip_seen", False)
+        col_digits = getattr(self, "_col_digits", None)
         n_headers = len(headers)
         for c_idx, v in enumerate(values):
             if not v:
                 continue
+            # 12桁でないセル（表の大半）は今の判定を引くだけにする（1セルごとの呼び出しが重い）
+            if col_digits is None:
+                id_column = False
+            elif len(v) == 12:
+                id_column = col_digits.observe(c_idx, v)
+            else:
+                id_column = col_digits.verdict.get(c_idx, False)
             if c_idx < n_headers:
                 header = headers[c_idx]
                 has_category = sure[c_idx] if sure is not None else bool(header and detectors.header_category(header))
@@ -781,9 +804,44 @@ class Collector:
                     location_fn=lambda _start, r=r_idx, c=c_idx: location_fn(r, c),
                     skip_seen=skip_seen,
                     weak_header=weak,
+                    id_column=id_column,
                 )
             finally:
                 self.cell_pos = None
+
+
+class _ColumnDigits:
+    """表の列ごとに、12桁の数だけのセルの異なる値と、そのうち検査数字が合う数を数え、番号の列かを決める。
+
+    表（add_table・add_records の1回の呼び出し）ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで。
+    """
+
+    __slots__ = ("_values", "_valid", "_decided", "verdict")
+
+    def __init__(self) -> None:
+        self._values: dict[int, set[str]] = {}
+        self._valid: dict[int, int] = {}
+        self._decided: set[int] = set()  # 判定を固めた列（異なる値が上限に届いた）
+        self.verdict: dict[int, bool] = {}  # 列ごとの今の判定（番号の列なら True）。12桁でないセルはこれを引くだけ
+
+    def observe(self, c_idx: int, v: str) -> bool:
+        """セルを1つ見て、この列が今のところ番号の列か（手がかり語の無い12桁のマイナンバーを落とすか）を返す。"""
+        if c_idx in self._decided:
+            return self.verdict[c_idx]
+        values = self._values.get(c_idx)
+        if len(v) == 12 and RE_TWELVE_DIGITS.fullmatch(v):
+            if values is None:
+                values = self._values[c_idx] = set()
+            if v not in values:
+                values.add(v)
+                if detectors.my_number_is_valid(v):
+                    self._valid[c_idx] = self._valid.get(c_idx, 0) + 1
+                if len(values) >= COLUMN_ID_MIN_DISTINCT:
+                    self.verdict[c_idx] = self._valid.get(c_idx, 0) < len(values) * COLUMN_ID_MAX_VALID_RATIO
+                    if len(values) >= COLUMN_ID_TRACK:
+                        self._decided.add(c_idx)
+                        del self._values[c_idx]
+        return self.verdict.get(c_idx, False)
 
 
 RE_ANNOTATION = re.compile(r"[（(【\[〔<＜][^）)】\]〕>＞]{0,20}[）)】\]〕>＞]")

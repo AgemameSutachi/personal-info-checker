@@ -285,10 +285,11 @@ def markup_to_text(src: str) -> str:
 
 
 # 文書の XML（Word 2003 の XML・Office・OpenDocument・XHTML）の印。1つの文が小さな要素（w:t など）に分かれるので、
-# 要素ごとに区切る読み方は足さない。接頭辞だけでは見ず、文の部品の名前で見る（a:Phone のようなデータの XML を外さないため）
+# 要素ごとに区切る読み方は足さない。接頭辞だけでは見ず、文の部品の名前で見る（a:Phone のようなデータの XML を外さないため）。
+# a: はデータの XML でもよく使う接頭辞なので（<a:r xmlns:a="urn:x"> の形）、部品の名前ではなく DrawingML の名前空間で見る
 _DOCUMENT_XML = re.compile(
-    r"<(?:w:(?:p|r|t)|a:(?:p|r|t)|text:(?:p|h|span))[\s>]|<html\b|urn:schemas-microsoft-com:office:word|"
-    r"www\.w3\.org/1999/xhtml",
+    r"<(?:w:(?:p|r|t)|text:(?:p|h|span))[\s>]|<html\b|urn:schemas-microsoft-com:office:word|"
+    r"schemas\.openxmlformats\.org/drawingml/|www\.w3\.org/1999/xhtml",
     re.I,
 )
 _CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)

@@ -287,6 +287,7 @@ def _builders(tmp_path: Path) -> dict[str, tuple[bytes, set[str]]]:
     # どれも requirements.txt の依存。黙って飛ばすと全部の形式の試験が消えるので、無ければ落とす
     import lz4.frame as lz4f
     import zstandard as zstd
+
     samples = {
         "本文_utf8.txt": (TEXT_U8, TEXT_TYPES),
         "本文_utf8bom.txt": (b"\xef\xbb\xbf" + TEXT_U8, TEXT_TYPES),
@@ -401,8 +402,14 @@ def test_data_xml_uses_element_names_as_headers():
         ("<r><電話番号>090-<b>1234</b>-5678</電話番号></r>", {"phone"}),
         ("<TEI><p>氏名 <persName>山田太郎</persName> 電話 090-1234-5678</p></TEI>", {"name", "phone"}),
         # CDATA の中・名前空間の接頭辞つきの要素名（文書の部品ではない）
-        ("<r><電話番号><![CDATA[090-1234-5678]]></電話番号><生年月日><![CDATA[1985年4月1日]]></生年月日></r>", {"phone", "birthdate"}),
-        ('<a:r xmlns:a="urn:x"><a:電話番号>090-1234-5678</a:電話番号><a:生年月日>1985年4月1日</a:生年月日></a:r>', {"phone", "birthdate"}),
+        (
+            "<r><電話番号><![CDATA[090-1234-5678]]></電話番号><生年月日><![CDATA[1985年4月1日]]></生年月日></r>",
+            {"phone", "birthdate"},
+        ),
+        (
+            '<a:r xmlns:a="urn:x"><a:電話番号>090-1234-5678</a:電話番号><a:生年月日>1985年4月1日</a:生年月日></a:r>',
+            {"phone", "birthdate"},
+        ),
     ],
 )
 def test_xml_shapes(tmp_path, src, kinds):
@@ -415,5 +422,11 @@ def test_xml_shapes(tmp_path, src, kinds):
 def test_document_xml_marks():
     from pii_checker.formats import misc
 
-    assert misc.is_document_xml('<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>a</w:t></w:r></w:p></w:body></w:document>')
+    assert misc.is_document_xml(
+        '<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>a</w:t></w:r></w:p></w:body></w:document>'
+    )
     assert not misc.is_document_xml('<a:Customer xmlns:a="urn:x"><a:Phone>090-1234-5678</a:Phone></a:Customer>')
+    # a: の部品の名前（a:r・a:p・a:t）でも、DrawingML の名前空間でなければデータの XML
+    assert not misc.is_document_xml('<a:r xmlns:a="urn:x"><a:t>090-1234-5678</a:t></a:r>')
+    drawing = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    assert misc.is_document_xml(f"<a:graphic {drawing}><a:p><a:r><a:t>a</a:t></a:r></a:p></a:graphic>")

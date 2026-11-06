@@ -521,8 +521,8 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
 
 # 名前は Microsoft Store の日本語の表示（2026-11 に確かめた）。HEVC は有料のことがある
 HEIF_HELP = (
-    "Microsoft Store から「HEIF 画像表示オプション」（HEIC は「HEVC ビデオ拡張機能」（有料のことがある）、"
-    "AVIF は「AV1 ビデオ拡張機能」も）を入れるか、JPEG に変換すれば検査できる"
+    "Microsoft Store から「HEIF 画像表示オプション」を入れるか、JPEG に変換すれば検査できる。"
+    "HEIC は「HEVC ビデオ拡張機能」（有料のことがある）、AVIF は「AV1 ビデオ拡張機能」も要る"
 )
 # WIC が「その形式を開く部品が無い」ときの値（WINCODEC_ERR_COMPONENTNOTFOUND = 0x88982F50 を符号つきで表したもの）
 _WIC_COMPONENT_NOT_FOUND = "-2003292336"

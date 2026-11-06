@@ -120,7 +120,9 @@ def test_japanese_exif_text_is_decoded():
 def test_japanese_artist_in_jpeg_is_found(tmp_path):
     """撮影者に UTF-8 で書いた「氏名 山田太郎」を、JPEG に入れて読んでも拾う。小さな画像の説明も EXIF を読んだと書く。"""
     exif = Image.Exif()
-    exif[0x013B] = "氏名 山田太郎".encode("utf-8")  # PIL は str の日本語を「?」にして書くので、道具と同じくバイト列で書く
+    exif[0x013B] = "氏名 山田太郎".encode(
+        "utf-8"
+    )  # PIL は str の日本語を「?」にして書くので、道具と同じくバイト列で書く
     p = tmp_path / "small.jpg"
     p.write_bytes(_jpeg(exif, size=(16, 16)))
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
@@ -150,3 +152,11 @@ def test_gps_photos_are_counted_in_summary(tmp_path):
     v = verdict.decide(summary, store.job(job)["state"])
     assert any("撮影場所（GPS）が記録された写真 2 件" in line for line in v.detail), v.detail
     assert summary["files_with_findings"] == 0
+    from pii_checker import report
+
+    rows = dict(report.overview_rows(store.job(job), summary))
+    assert rows["撮影場所（GPS）が記録された写真（検出には数えない）"] == 2
+    # 0 枚なら判定の文には出さない（集計の行は 0 で出る）。判定の段階は GPS の有無で変えない
+    v0 = verdict.decide({**summary, "gps_photos": 0}, store.job(job)["state"])
+    assert not any("撮影場所" in line for line in v0.detail), v0.detail
+    assert v.level == v0.level and v.level != "found", (v.level, v0.level)

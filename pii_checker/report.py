@@ -164,11 +164,12 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
         ("読めなかったフォルダ", summary["folder_errors"]),
         ("辿らなかったリンク", summary["links"]),
         ("個人情報の可能性があるファイル", summary["files_with_findings"]),
-        ("撮影場所（GPS）が記録された写真（検出には数えない）", summary.get("gps_photos", 0)),
     ]
     for k, label in PII_TYPES.items():
         if summary["types"].get(k):
             rows.append((f"検出件数: {label}", summary["types"][k]))
+    # 検出の内訳を分けないよう、検出に数えない補足は種類別の件数の後に置く
+    rows.append(("撮影場所（GPS）が記録された写真（検出には数えない）", summary.get("gps_photos", 0)))
     # 漏えい時の報告の目安（印ごとのファイル数。目安であり法的な判断ではない＝読み方に出典と一緒に書く）
     flags = summary.get("flags") or {}
     for f in reportflags.FLAG_ORDER:

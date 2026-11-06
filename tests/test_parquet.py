@@ -143,25 +143,56 @@ def _scan_table(tmp_path, table, **kw):
     return scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
 
 
-def test_wide_int_column_without_header_word_is_read(tmp_path):
-    """見出し語に当たらない名前でも、番号になりうる桁の整数の列は読む（小さな整数の列は読まない）。"""
-    n = 100
+def test_wide_int_column_without_header_word_is_noted_not_read(tmp_path):
+    """見出しの無い桁の大きい整数の列（ID・時刻）は読まず、読まなかったことを列の数で注記する（誤検出を出さない）。"""
+    n = 2000
     table = pa.table(
         {
-            "c1": pa.array([123456789018 if i == 4 else 1000 + i for i in range(n)], pa.int64()),
+            "c_a": pa.array([1_700_000_000_000 + i * 997 for i in range(n)], pa.int64()),  # エポックミリ秒
+            "c_b": pa.array([100_000_000_000 + i for i in range(n)], pa.int64()),  # 12 桁の連番 ID
             "c2": pa.array(range(n), pa.int32()),
+            "x": pa.array(["a"] * n),
         }
     )
     res = _scan_table(tmp_path, table)
     top = res.items[0]
-    assert top.status == Status.SCANNED and _found(res).get("my_number") == 1, (top.method, _found(res))
-    assert "1 列）" in top.method and any("1 列" in n for n in top.notes), (top.method, top.notes)
+    assert top.status == Status.SCANNED and not _found(res), (top.method, _found(res))
+    assert "読んだ列 1 列" in top.method and "全 4 列" in top.method, top.method
+    assert any("9 桁以上の整数が入った列 2 列" in n for n in top.notes), top.notes
+    assert any("そのほかの文字以外の列 1 列" in n for n in top.notes), top.notes
+    # 見出し語の列なら、数で持つ番号も読む
+    table = pa.table({"マイナンバー": pa.array([123456789018, 0], pa.int64())})
+    assert _found(_scan_table(tmp_path, table)).get("my_number") == 1
+
+
+def test_random_binary_is_not_read_as_japanese(tmp_path):
+    """でたらめなバイト列を cp932 などとして化けた文字で検査しない（誤検出を出さない）。"""
+    import random
+
+    rnd = random.Random(1)
+    values = [bytes(rnd.randrange(256) for _ in range(32)) for _ in range(2000)]
+    res = _scan_table(tmp_path, pa.table({"b": pa.array(values, pa.binary())}))
+    assert sum(_found(res).values()) <= 2, _found(res)
+
+
+def test_all_row_groups_broken_is_uncheckable(tmp_path):
+    p = tmp_path / "t.parquet"
+    pq.write_table(_table(), str(p), compression="none")
+    data = bytearray(p.read_bytes())
+    md = pq.ParquetFile(str(p)).metadata
+    for j in range(md.num_columns):
+        start = md.row_group(0).column(j).data_page_offset
+        data[start : start + 32] = b"\xff" * 32
+    p.write_bytes(bytes(data))
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
+    top = res.items[0]
+    assert top.status == Status.UNCHECKABLE and "1行も読めなかった" in top.reason, (top.status, top.reason)
 
 
 def test_cp932_bytes_are_read(tmp_path):
     table = pa.table({"b": pa.array(["山田太郎 090-1234-5678".encode("cp932"), b"\xff\xfe\x00"], pa.binary())})
     res = _scan_table(tmp_path, table)
-    assert _found(res).get("phone") == 1
+    assert _found(res).get("phone", 0) >= 1  # 拾い出しは符号ごとに拾うので、同じ値を2回数えることがある
     # 文字として読めなかった値は、黙って捨てずに注記に数を出す
     table = pa.table({"b": pa.array([bytes([0x80, 0x81, 0xFF, 0x00])], pa.binary())})
     res = _scan_table(tmp_path, table)
@@ -193,7 +224,7 @@ def test_fixed_size_binary_number_is_read_but_hash_is_not(tmp_path):
         }
     )
     res = _scan_table(tmp_path, table)
-    assert "1 列）" in res.items[0].method, res.items[0].method
+    assert "読んだ列 1 列" in res.items[0].method, res.items[0].method
 
 
 def test_broken_row_group_is_partial(tmp_path):

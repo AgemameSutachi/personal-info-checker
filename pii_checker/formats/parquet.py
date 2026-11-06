@@ -143,14 +143,15 @@ class _Cells:
         return str(v)
 
     def _bytes(self, v: bytes):
-        for enc in ("utf-8", "cp932", "euc_jp"):
-            try:
-                return v.decode(enc)
-            except UnicodeDecodeError:
-                continue
-        parts = list(iter_strings(v))  # 文字の符号が混ざった値・バイナリの中の文字だけ拾う
+        try:
+            return v.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        # cp932・EUC-JP はでたらめなバイト列もほとんど通してしまうので、厳密に読めるかでは決めない。
+        # 文字の拾い出し（UTF-16・cp932・UTF-8 の、人が読める文字が続く所だけ）に任せる
+        parts = list(iter_strings(v))
         if parts:
-            return " ".join(parts)
+            return " ".join(dict.fromkeys(parts))  # 同じ文字を別の符号で二重に拾った分は1つに
         self.unreadable += 1
         return None
 
@@ -170,26 +171,35 @@ def handle_parquet(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
             )
         # 表の定義に付いた説明（pandas の列の情報など）にも文字が入りうる
         meta = pf.metadata.metadata or {}
+        meta_cell = _Cells()  # 付記の読めなかった数は、列の値の数に混ぜない
         for k, v in meta.items():
-            text = cell(v)
+            text = meta_cell(v)
             if text:
-                col.add_text(text, f"表の付記「{cell(k) or ''}」", method="parquet の付記")
-        wide = _wide_int_columns(pf)
-        fields = [x for x in schema if _leaf_has_text(x.type) or x.name in wide or _has_header_word(x.name, x.type)]
+                col.add_text(text, f"表の付記「{meta_cell(k) or ''}」", method="parquet の付記")
+        fields = [x for x in schema if _leaf_has_text(x.type) or _has_header_word(x.name, x.type)]
         names = [x.name for x in fields]
+        read = set(names)
+        # 見出しの無い桁の大きい整数の列は読まない（ID・時刻の列が多く、読むとマイナンバーの誤検出が大量に出る。
+        # 数で持つと電話番号は先頭の 0 も落ちている）。読まなかったことは列の数で注記する
+        wide = [n for n in _wide_int_columns(pf) if n not in read]
         total_rows = pf.metadata.num_rows
-        skipped = len(schema) - len(fields)
+        skipped = len(schema) - len(fields) - len(wide)
         item.method = (
-            f"parquet の表（{total_rows} 行・{len(schema)} 列のうち、文字の列・見出し語の列・"
-            f"番号になりうる桁の整数の列 {len(fields)} 列）"
+            f"parquet の表（{total_rows} 行・読んだ列 {len(fields)} 列（文字の列と見出し語の列）／全 {len(schema)} 列）"
         )
-        skip_note = (
-            f"文字以外の列 {skipped} 列（小さな整数・小数・日付・真偽・ハッシュの長さの値など）は、"
-            "見出しが個人情報の見出し語に当たらないので読んでいない"
-        )
+        notes = []
+        if wide:
+            notes.append(
+                f"9 桁以上の整数が入った列 {len(wide)} 列は、見出しが個人情報の見出し語に当たらないので読んでいない"
+                "（ID・時刻などの列とみなした。番号を数で持つ列なら、見出しを「マイナンバー」などにすると読む）"
+            )
+        if skipped:
+            notes.append(
+                f"そのほかの文字以外の列 {skipped} 列（小さな整数・小数・日付・真偽・ハッシュの長さの値など）は、"
+                "見出しが個人情報の見出し語に当たらないので読んでいない"
+            )
         if not fields:
-            if skipped:
-                item.notes.append(skip_note)
+            item.notes.extend(notes)
             return
         limit = ctx.options.max_rows_per_table or 0
         seen = [0]
@@ -226,15 +236,16 @@ def handle_parquet(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
             lambda r, c: f"{file_row(r)}行目 列「{names[c] if c < len(names) else c + 1}」",
             method="parquet の表",
         )
-    if skipped:
-        item.notes.append(skip_note)
+    item.notes.extend(notes)
     if cell.unreadable:
         item.notes.append(f"文字として読めなかったバイト列の値が {cell.unreadable} 件あった（中身は検査していない）")
     if broken:
         lost = sum(n for _, n, _ in broken)
+        why = f"（壊れている・暗号化されている・未対応の圧縮の可能性）: {broken[0][2]}"
+        if lost >= total_rows:
+            raise Uncheckable(f"parquet の表の行を1行も読めなかった{why}")
         raise PartialScan(
-            f"parquet の {total_rows} 行のうち {lost} 行（行のまとまり {len(broken)} 個）を読めず、残りの行だけを検査した"
-            f"（壊れている・暗号化されている・未対応の圧縮の可能性）: {broken[0][2]}"
+            f"parquet の {total_rows} 行のうち {lost} 行（行のまとまり {len(broken)} 個）を読めず、残りの行だけを検査した{why}"
         )
     if truncated[0]:
         raise PartialScan(f"表の行数の上限（{limit} 行）までを検査した（全 {total_rows} 行）")

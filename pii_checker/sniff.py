@@ -422,9 +422,9 @@ def _looks_like_icon(head: bytes, size: int | None) -> bool:
     length = int.from_bytes(head[14:18], "little")
     if offset < 6 + 16 * count or length <= 0 or (size is not None and offset + length > size):
         return False
-    # 1つ目の画像の中身が PNG か BMP の情報の頭（大きさ 40）で始まるか（外れたものを画像として開けずに検査不能にしない）
+    # 1つ目の画像の中身が PNG か BMP の情報の頭（大きさ 40・108・124）で始まるか（外れたものを画像として開けずに検査不能にしない）
     first = head[offset : offset + 8]
-    return first == b"\x89PNG\r\n\x1a\n" or first[:4] == b"\x28\x00\x00\x00"
+    return first == b"\x89PNG\r\n\x1a\n" or first[:4] in (b"\x28\x00\x00\x00", b"\x6c\x00\x00\x00", b"\x7c\x00\x00\x00")
 
 
 def _der_fills_file(head: bytes, size: int | None) -> bool:

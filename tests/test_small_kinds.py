@@ -308,7 +308,7 @@ def test_region_with_no_readable_chunk_is_uncheckable(tmp_path):
     p.write_bytes(_region({0: (4, os.urandom(300)), 1: (4, os.urandom(300))}))
     top = _scan(tmp_path, p).items[0]
     assert top.status == Status.UNCHECKABLE, (top.status, top.reason)
-    assert "1つも読めなかった" in top.reason
+    assert "1つも最後まで読めなかった" in top.reason
 
 
 def test_broken_nbt_chunk_still_checks_text_before_break(tmp_path):
@@ -332,3 +332,35 @@ def test_nbt_number_list_is_skipped_at_once():
     start = time.perf_counter()
     assert list(nbt_strings(data)) == []
     assert time.perf_counter() - start < 1.0
+
+
+def test_nbt_with_too_many_elements_is_cut_off():
+    import time
+
+    import pytest
+
+    from pii_checker.formats.misc import NBT_MAX_STEPS_CHUNK, NbtTooLarge, nbt_strings
+
+    count = NBT_MAX_STEPS_CHUNK + 10  # 空の複合が並ぶ細工した一覧（1つずつ歩くしかない）
+    data = b"\x0a\x00\x00\x09\x00\x01L\x0a" + count.to_bytes(4, "big") + b"\x00" * count + b"\x00"
+    start = time.perf_counter()
+    with pytest.raises(NbtTooLarge):
+        list(nbt_strings(data))
+    assert time.perf_counter() - start < 5.0
+    budget = [100]
+    with pytest.raises(NbtTooLarge):
+        list(nbt_strings(data, budget))  # ファイル全体の残りが尽きても止まる
+    assert budget[0] < 0
+
+
+def test_region_too_many_elements_is_partial(tmp_path, monkeypatch):
+    import zlib
+
+    from pii_checker.formats import misc
+
+    monkeypatch.setattr(misc, "NBT_MAX_STEPS_FILE", 12)  # 1つ目の塊で使い切る
+    p = tmp_path / "r.5.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("ok"))), 1: (2, zlib.compress(_nbt_chunk("x")))}))
+    top = _scan(tmp_path, p).items[0]
+    assert top.status == Status.PARTIAL, (top.status, top.reason)
+    assert "要素が多すぎて" in top.reason

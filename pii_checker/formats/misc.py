@@ -721,16 +721,26 @@ REGION_MAX_CHUNK = 16 * 1024 * 1024  # 塊1つの展開後の上限（ふつう�
 NBT_MAX_DEPTH = 512  # Minecraft 自身の入れ子の上限
 NBT_FIXED = {1: 1, 2: 2, 3: 4, 4: 8, 5: 4, 6: 8}  # 数の型の大きさ（byte・short・int・long・float・double）
 NBT_ARRAYS = {7: 1, 11: 4, 12: 8}  # 数の配列の型の1要素の大きさ（byte・int・long の配列）
+# 1つずつ歩く要素の数の上限。実物の塊は展開後でも最大 約 170KB（要素は多くて数万）なので、十分に余裕がある。
+# 細工した塊（空の複合・空の文字が何百万も並ぶもの）で1ファイルの検査が何時間も止まらないようにする
+NBT_MAX_STEPS_CHUNK = 1_000_000
+NBT_MAX_STEPS_FILE = 20_000_000
 
 
-def nbt_strings(data: bytes):
+class NbtTooLarge(ValueError):
+    """NBT の要素が多すぎて、決めた手間の内に読み終えられない。"""
+
+
+def nbt_strings(data: bytes, budget: list[int] | None = None):
     """NBT（Minecraft のデータの形・大きい順の数）の中の文字の値（TAG_String）だけを順に返す。
 
     ブロックの並びなどの数の配列を文字として読むと「333333333333」のような並びがマイナンバーの形に当たるので、
     数の部分は読み飛ばす。項目の名前（キー）は決まった英語なので返さない。形が壊れていれば ValueError。
+    budget（[残り]）を渡すと、ファイル全体で歩ける要素の数をそこから引き、尽きたら NbtTooLarge。
     """
     pos = 0
     end = len(data)
+    steps = NBT_MAX_STEPS_CHUNK
 
     def take(n: int) -> bytes:
         nonlocal pos
@@ -753,6 +763,13 @@ def nbt_strings(data: bytes):
     while stack:
         if len(stack) > NBT_MAX_DEPTH:
             raise ValueError("NBT の入れ子が深すぎる")
+        steps -= 1
+        if budget is not None:
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise NbtTooLarge("ファイル全体の要素が多すぎる")
+        if steps < 0:
+            raise NbtTooLarge("塊の要素が多すぎる")
         frame = stack[-1]
         if frame[0] == 10:
             tag = take(1)[0]
@@ -808,8 +825,13 @@ def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
         return handle_unknown(ctx, blob, item, col, depth)
     done = 0
     skipped: dict[str, int] = {}
+    budget = [NBT_MAX_STEPS_FILE]
+    too_many = "要素が多すぎて読み切れなかった塊"
     with blob.open() as f:
         for index, offset, count in used:
+            if budget[0] <= 0:
+                skipped[too_many] = skipped.get(too_many, 0) + 1
+                continue
             f.seek(offset * REGION_SECTOR)
             top = f.read(5)
             length = int.from_bytes(top[:4], "big") if len(top) == 5 else 0
@@ -837,10 +859,13 @@ def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             where = f"塊（チャンク） ({index % 32}, {index // 32})"
             seen: set[str] = set()
             try:
-                for s in nbt_strings(raw):
+                for s in nbt_strings(raw, budget):
                     if s not in seen:
                         seen.add(s)
                         col.add_text(s, where, method="region の塊の文字")
+            except NbtTooLarge:
+                skipped[too_many] = skipped.get(too_many, 0) + 1
+                continue
             except ValueError:
                 # 途中で壊れていても、そこまでに読めた文字は検査した（読めた塊には数えない）
                 skipped["壊れた塊"] = skipped.get("壊れた塊", 0) + 1
@@ -852,7 +877,7 @@ def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
         detail = "・".join(f"{k} {n} 個" for k, n in skipped.items())
         remedy = "ワールドをゲームで開いて保存し直すか、看板・本などを目で確かめる"
         if done == 0:
-            raise Uncheckable(f"region の塊（チャンク）を1つも読めなかった（{detail}）。{remedy}")
+            raise Uncheckable(f"region の塊（チャンク）を1つも最後まで読めなかった（{detail}）。{remedy}")
         raise PartialScan(
             f"region の塊（チャンク）のうち読めないものがあった（{detail}）。読めた塊は検査した。{remedy}"
         )

@@ -231,6 +231,9 @@ class Collector:
     # 許可リストと利用者の規則（userrules.Matcher。どちらも無ければ None）
     matcher: object | None = None
     allowed_seen: set = field(default_factory=set)  # 許可リストで外した (種類, 値) の hash（読み直しで二重に数えない）
+    # 番号の列（_ColumnDigits）で外した、手がかり語の無い12桁の値の hash。同じ本文の読み直し（xlsx のシートの XML・
+    # 生データ走査）では列が分からないので、表で外した値をここで見て拾い直さない
+    id_column_seen: set = field(default_factory=set)
     # ファイル全体の異なる値を集める先（種類 → {正規化した値の hash → 見た最も高い確度の順位}）。ScanContext が渡す
     distinct_sink: dict | None = None
     # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
@@ -281,7 +284,8 @@ class Collector:
         skip_seen=True は既に見つけた値を数えないだけ（同じ本文を別の読み方でもう一度読むとき）。
         どちらでも、既に見た値をより高い確度で見直したときは明細の確度を引き上げる。
         weak_header=True は見出しが確かでない（左隣が「見出し語＋値」のセル）とき。見出しのおかげで拾えた分は確度を低にする。
-        id_column=True は番号の列のセル（_ColumnDigits）。手がかり語の無い12桁のマイナンバーを拾わない。
+        id_column=True は番号の列のセル（_ColumnDigits）。手がかり語の無い12桁のマイナンバーを拾わない
+        （外した値は覚えておき、raw・skip_seen の読み直しでも拾わない）。
         """
         if text is None:
             return
@@ -308,7 +312,24 @@ class Collector:
                 self.cue_title = title.group(0)
         hits = detectors.detect(norm, header)
         if id_column:
-            hits = [h for h in hits if not (h.pii_type == "my_number" and h.rule.startswith(BARE_MY_NUMBER_RULE))]
+            kept = []
+            for h in hits:
+                if h.pii_type == "my_number" and h.rule.startswith(BARE_MY_NUMBER_RULE):
+                    if len(self.id_column_seen) < SEEN_LIMIT:
+                        self.id_column_seen.add(hash(h.value))
+                else:
+                    kept.append(h)
+            hits = kept
+        elif (raw or skip_seen) and self.id_column_seen:
+            hits = [
+                h
+                for h in hits
+                if not (
+                    h.pii_type == "my_number"
+                    and h.rule.startswith(BARE_MY_NUMBER_RULE)
+                    and hash(h.value) in self.id_column_seen
+                )
+            ]
         if self.matcher is not None:
             hits += self.matcher.find(norm)  # 利用者の規則（見出しに関係なく本文に当てる）
         # 見出しが確かでないときは、見出しなしで読んだときの確度に留める（見出しなしでは拾えない分は低）
@@ -836,7 +857,11 @@ class _ColumnDigits:
         """表のセルを1つ見て、番号の列か（id_column に渡す値）を返す。
 
         12桁でないセル（表の大半）は今の判定を引くだけにする（1セルごとに observe を呼ぶと重い）。
+        前後の空白は外して見る（データベースの固定長の文字の列「000000008370␣␣␣…」を書き出した表で、
+        長さが12にならず番号の列と決められなかった）。
         """
+        if len(v) > 12 and (v[-1] == " " or v[0] == " "):
+            v = v.strip(" ")
         if len(v) == 12:
             return self.observe(c_idx, v)
         return self.verdict.get(c_idx, False)

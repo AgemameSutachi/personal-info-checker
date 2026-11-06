@@ -93,9 +93,8 @@ def sweep_zip_parts(
         if lower.endswith((".xml", ".rels", ".vml")) or data[:5] == b"<?xml":
             text_src = data.decode("utf-8", errors="replace")
             raw = raw_parts(name)
-            col.add_lines(
-                markup_to_text(text_src), location_prefix=f"{name} ", method="XML部品" if not raw else "XML部品"
-            )
+            # 表・本文として読み終えた部品の読み直しでは、既に数えた値を数えない（xlsx のセル・docx の本文の値が2件になっていた）
+            col.add_lines(markup_to_text(text_src), location_prefix=f"{name} ", method="XML部品", skip_seen=raw)
             for v in attribute_texts(text_src):
                 col.add_text(v, f"{name}（属性値）", method="属性値", raw=raw)
             continue

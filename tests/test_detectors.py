@@ -177,6 +177,13 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("備考 H 15.3-99", "birthdate"),
         # 馬の歩き方の寸評
         ("両前バンテージ、交差歩様。右前蹄欠け。", "name"),
+        # 1行に数が1つずつ並ぶ一覧（Perl の unicore の表・Excel のシートの XML を文にしたもの）で、
+        # 4桁の行が3つ続いて改行をはさんだ12桁の形（2026-11-07 の見直し）
+        # （手前の行が4桁だと先にそちらと組まれるので、手前は4桁でない数にする）
+        ("V1678\n112\n1234\n5678\n9018\n1135\n", "my_number"),
+        ("5926\n608\n1234\n5678\n9018\n", "my_number"),
+        ("1234\n5678\n9018\n45379\n609\n", "my_number"),
+        ("610\n090\n1234\n5678\n0\n", "phone"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -209,6 +216,10 @@ def test_numeric_data_false_positive(text, pii_type):
         ("123456789018,123456789018,123456789018,123456789018", "my_number"),
         ("09012345678,09087654321,08011112222,07033334444,09055556666", "phone"),
         ("田中はS60.4.1", "birthdate"),  # 1文字の元号の前が日本語の文字
+        # 改行をまたぐ番号でも、前後の行が数だけの行でなければ残す（枠ごとに1行になった書類の写し）
+        ("氏名 山田太郎\n1234\n5678\n9018\n以上", "my_number"),
+        ("1234\n5678\n9018", "my_number"),
+        ("個人番号\n1234\n5678\n9018\n608\n", "my_number"),  # 語があれば確度 高 で残る
     ],
 )
 def test_numeric_data_filter_keeps_real_ones(text, expected):

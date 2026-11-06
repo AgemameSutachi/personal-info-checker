@@ -1349,6 +1349,28 @@ def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
     return len(chunks) >= 3
 
 
+def _across_number_lines(text: str, start: int, end: int) -> bool:
+    """検出が改行をまたいでいて、その前の行か後ろの行が数だけの行か（1行に数が1つずつ並ぶ一覧の一部）。
+
+    Perl の unicore の表（「1132↵1133↵1134」）・Excel のシートの XML を文にしたもの（セルの値が1行ずつ）では、
+    4桁の行が3つ続くと区切りの改行をはさんで12桁の番号の形になる。1行ずつ書いた番号（前後が数の行でない）は残す。
+    """
+    if "\n" not in text[start:end]:
+        return False
+    line_start = text.rfind("\n", 0, start)
+    if line_start > 0:
+        prev = text[text.rfind("\n", 0, line_start) + 1 : line_start].strip()
+        if prev and all(c in _NUMERIC_CHARS for c in prev):
+            return True
+    line_end = text.find("\n", end)
+    if line_end >= 0:
+        nxt_end = text.find("\n", line_end + 1)
+        nxt = text[line_end + 1 : nxt_end if nxt_end >= 0 else len(text)].strip()
+        if nxt and all(c in _NUMERIC_CHARS for c in nxt):
+            return True
+    return False
+
+
 def _era_date_is_broken(text: str, h: Hit) -> bool:
     """和暦の日付の形（確度 低）が、日付としてありえないか、数値の並びの一部か。
 
@@ -1377,13 +1399,18 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - マイナンバー（手がかり語なし）: 小数の並びの途中（「104.4447.1657.9170.6」）・年月日で始まる12桁
     - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
+    2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）
     """
     out = []
     for h in hits:
         if h.rule.startswith("列見出し"):
             out.append(h)  # 列の見出しで決めたものは値の形で落とさない
             continue
-        if h.rule in _BARE_NUMBER_RULES and h.confidence != Confidence.HIGH and _in_numeric_run(text, h.start, h.end):
+        if (
+            h.rule in _BARE_NUMBER_RULES
+            and h.confidence != Confidence.HIGH
+            and (_in_numeric_run(text, h.start, h.end) or _across_number_lines(text, h.start, h.end))
+        ):
             continue
         if h.pii_type == "my_number" and h.rule.startswith("12桁・検査数字一致（手がかり語なし"):
             if _decimal_adjacent(text, h.start, h.end) or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value)):

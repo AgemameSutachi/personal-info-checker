@@ -178,3 +178,157 @@ def test_truncated_parquet_says_so(tmp_path):
     top = res.items[0]
     assert top.status == Status.UNCHECKABLE
     assert "書きかけ" in top.reason
+
+
+def _stl(header: bytes, triangles: int) -> bytes:
+    import struct
+
+    body = b"".join(struct.pack("<12fH", *([0.5 + i] * 12), 0) for i in range(triangles))
+    return header.ljust(80, b"\x00") + triangles.to_bytes(4, "little") + body
+
+
+def test_binary_stl_header_is_scanned(tmp_path):
+    p = tmp_path / "city.stl"
+    p.write_bytes(_stl(b"exported by taro.yamada@example.com", 300))
+    assert _kind(p) == "stl"
+    res = _scan(tmp_path, p)
+    top = res.items[0]
+    assert top.status == Status.SCANNED, (top.status, top.reason)
+    assert "email" in _types(res)
+    assert "300" in top.method
+
+
+def test_stl_size_must_match_triangle_count(tmp_path):
+    p = tmp_path / "x.stl"
+    p.write_bytes(_stl(b"", 300) + b"\x00")  # 三角形の数と大きさが合わないものは STL としない
+    assert _kind(p) != "stl"
+
+
+def _region(chunks: dict[int, tuple[int, bytes]]) -> bytes:
+    """塊の番号 → (圧縮の種類, 圧縮済みの中身) から region を組み立てる。"""
+    table = bytearray(8192)
+    body = b""
+    sector = 2
+    for index, (kind, payload) in chunks.items():
+        data = (len(payload) + 1).to_bytes(4, "big") + bytes([kind]) + payload
+        count = -(-len(data) // 4096)
+        table[index * 4 : index * 4 + 4] = sector.to_bytes(3, "big") + bytes([count])
+        body += data.ljust(count * 4096, b"\x00")
+        sector += count
+    return bytes(table) + body
+
+
+def _nbt_name(s: str) -> bytes:
+    raw = s.encode("utf-8")
+    return len(raw).to_bytes(2, "big") + raw
+
+
+def _nbt_chunk(text: str) -> bytes:
+    """根の複合の中に、看板の文字（TAG_String）・数の配列（TAG_Long_Array）・文字の一覧（TAG_List）を持つ NBT。"""
+    longs = b"3333333333333333" * 64  # ブロックの並びの数（文字として読むと番号の形に見える）
+    return (
+        b"\x0a"
+        + _nbt_name("")
+        + b"\x08"
+        + _nbt_name("Text")
+        + _nbt_name(text)
+        + b"\x0c"
+        + _nbt_name("data")
+        + (len(longs) // 8).to_bytes(4, "big")
+        + longs
+        + b"\x09"
+        + _nbt_name("palette")
+        + b"\x0a"
+        + (2).to_bytes(4, "big")
+        + b"\x08"
+        + _nbt_name("Name")
+        + _nbt_name("minecraft:stone")
+        + b"\x00"
+        + b"\x03"
+        + _nbt_name("n")
+        + (7).to_bytes(4, "big")
+        + b"\x00"
+        + b"\x00"
+    )
+
+
+def test_region_chunks_are_read(tmp_path):
+    import gzip
+    import zlib
+
+    p = tmp_path / "r.0.0.mca"
+    chunks = {0: (2, zlib.compress(_nbt_chunk("taro.yamada@example.com"))), 33: (1, gzip.compress(_nbt_chunk("看板")))}
+    p.write_bytes(_region(chunks))
+    assert _kind(p) == "mca"
+    res = _scan(tmp_path, p)
+    top = res.items[0]
+    assert top.status == Status.SCANNED, (top.status, top.reason)
+    assert "2/2" in top.method
+    # 看板の文字は拾い、数の配列（3333…）からは番号を拾わない
+    assert _types(res) == {"email"}
+
+
+def test_nbt_strings_reads_only_text_values():
+    from pii_checker.formats.misc import nbt_strings
+
+    assert list(nbt_strings(_nbt_chunk("hello"))) == ["hello", "minecraft:stone"]
+
+
+def test_broken_nbt_chunk_is_partial(tmp_path):
+    import zlib
+
+    p = tmp_path / "r.2.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("ok"))), 1: (2, zlib.compress(_nbt_chunk("x")[:-9]))}))
+    top = _scan(tmp_path, p).items[0]
+    assert top.status == Status.PARTIAL, (top.status, top.reason)
+    assert "壊れた塊 1 個" in top.reason
+
+
+def test_region_with_unreadable_chunk_is_partial(tmp_path):
+    import zlib
+
+    p = tmp_path / "r.1.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("hello world text"))), 1: (4, os.urandom(300))}))
+    top = _scan(tmp_path, p).items[0]
+    assert top.status == Status.PARTIAL, (top.status, top.reason)
+    assert "LZ4" in top.reason
+
+
+def test_random_bytes_are_not_region(tmp_path):
+    p = tmp_path / "x.bin"
+    p.write_bytes(os.urandom(16384))
+    assert _kind(p) != "mca"
+    q = tmp_path / "y.bin"
+    q.write_bytes(b"\x00\x00\x02\x01" + b"\x00" * 8188 + os.urandom(4096))  # 表は正しいが塊の頭が壊れている
+    assert _kind(q) != "mca"
+
+
+def test_region_with_no_readable_chunk_is_uncheckable(tmp_path):
+    p = tmp_path / "r.3.0.mca"
+    p.write_bytes(_region({0: (4, os.urandom(300)), 1: (4, os.urandom(300))}))
+    top = _scan(tmp_path, p).items[0]
+    assert top.status == Status.UNCHECKABLE, (top.status, top.reason)
+    assert "1つも読めなかった" in top.reason
+
+
+def test_broken_nbt_chunk_still_checks_text_before_break(tmp_path):
+    import zlib
+
+    nbt = _nbt_chunk("taro.yamada@example.com")[:-9]  # 看板の文字の後ろで切れた塊
+    p = tmp_path / "r.4.0.mca"
+    p.write_bytes(_region({0: (2, zlib.compress(_nbt_chunk("ok"))), 1: (2, zlib.compress(nbt))}))
+    res = _scan(tmp_path, p)
+    assert res.items[0].status == Status.PARTIAL
+    assert "email" in _types(res)
+
+
+def test_nbt_number_list_is_skipped_at_once():
+    import time
+
+    from pii_checker.formats.misc import nbt_strings
+
+    count = 5_000_000  # 細工した大きな byte の一覧（1要素ずつ歩くと数秒かかる）
+    data = b"\x0a\x00\x00\x09\x00\x01L\x01" + count.to_bytes(4, "big") + b"\x00" * count + b"\x00"
+    start = time.perf_counter()
+    assert list(nbt_strings(data)) == []
+    assert time.perf_counter() - start < 1.0

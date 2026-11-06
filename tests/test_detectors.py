@@ -205,7 +205,7 @@ def test_shape_filter_keeps_real_ones(text, expected):
         # URL のパスの中の語の無い12桁（配信の URL の「/public/<12桁>_<16進>」）
         ("https://cdn.example.com/public/123456789018_3fa9c2.jpg", "my_number"),
         ('src="http://192.0.2.10/a/b/123456789018"', "my_number"),
-        ("見本 https://example.jp/日本語/123456789018/x", "my_number"),
+        ("見本 ftp://u:p@192.0.2.10:21/a-b_c~d/%E3%81%82/123456789018", "my_number"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -231,6 +231,16 @@ def test_numeric_data_false_positive(text, pii_type):
         ("https://example.com/p 123456789018", "my_number"),
         ('"https://example.com/p" 123456789018', "my_number"),
         ("://example.com/123456789018", "my_number"),
+        # URL の後ろに空白なしで続く文・CSV の欄・パスの引数・日本語を含むパス・URL でないパス
+        ("https://example.com/、123456789018", "my_number"),
+        ("詳細はhttps://example.com/です。123456789018", "my_number"),
+        ("https://a.jp/x,山田太郎,123456789018", "my_number"),
+        ("id,url,num\n1,https://a.jp/x,123456789018", "my_number"),
+        ("https://a.jp/a;jsessionid=123456789018", "my_number"),
+        ("https://a.jp/a&amp;x=123456789018", "my_number"),
+        ("https://example.jp/日本語/123456789018/x", "my_number"),
+        ("mailto:a@b.jp 123456789018", "my_number"),
+        ("C:\\Users\\123456789018\\a.txt", "my_number"),
         ("個人番号 https://a.jp/123456789018", "my_number"),  # 語があれば（語の届く近さなら）確度 高 で残る
         # 電話・カードの形は、隣に長い連続があっても今までどおり（語があっても同じ規則名で出るため）
         ("TEL 09012345678 ID 1234567890123456789012", "phone"),

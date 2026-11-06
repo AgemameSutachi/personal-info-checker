@@ -1268,9 +1268,10 @@ _RE_DUMP_LINE = re.compile(
     r"|[0-9A-Fa-f]{7}0:(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
 )
 _DUMP_LINE_MAX = 200
-# URL のパスの中の検出（_in_url_path）。手前の「scheme://」を探す幅と、URL の終わり・クエリ（?）・断片（#）の印
+# URL のパスの中の検出（_in_url_path）。手前の「scheme://」を探す幅と、パスとみなす文字
+# （ASCII の英数字と「-._~/%:@+=」だけ。「?」「#」「;」「&」「,」・空白・引用符・日本語の文字などが来たら URL の外とみなす）
 _URL_PATH_MAX = 300
-_URL_PATH_STOP = frozenset(" \t\r\n\f\v\"'`<>()[]{}|\\^?#　")
+_URL_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~/%:@+=")
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
@@ -1389,16 +1390,20 @@ def _beside_long_digit_run(text: str, start: int, end: int, width: int = 40) -> 
 def _in_url_path(text: str, start: int, end: int) -> bool:
     """検出が URL のパス（「scheme://」の後ろ・「?」より前）の中にあるか。
 
-    手前 _URL_PATH_MAX 文字の中の最後の「://」の直前が ASCII の英字で、そこから検出の終わりまでに
-    空白・引用符・かっこ・「?」「#」が無いものだけを見る。
+    次の3つがそろうものだけを見る:
+    - 検出の手前 _URL_PATH_MAX 文字の中に「://」がある（それより遠い「://」は見ない）
+    - その最後の「://」の直前が ASCII の英字（scheme の終わり）
+    - 「://」の後ろから検出の終わりまでが、パスの文字（_URL_PATH_CHARS）だけ
     実物の検査（2026-11-07・.db の生データ）では、手がかり語の無い12桁 55,675 個がすべて
     「https://…/public/<12桁>_<16進>」のような配信の URL のパスの一部だった。
-    クエリの値（「?id=123456789018」）は申込みの画面などから番号が漏れる経路なので残す。
+    クエリの値（「?id=123456789018」）・「;jsessionid=」の類は番号が漏れる経路なので残す。
+    URL の後ろに空白なしで続く文（「https://a.jp/、123456789018」「…/x,山田,123456789018」）も、
+    句読点・カンマで URL の外とみなして残す。日本語を含むパスも同じく外とみなす（見落とすより残す側）。
     """
     i = text.rfind("://", max(0, start - _URL_PATH_MAX), start)
     if i <= 0 or not (text[i - 1].isascii() and text[i - 1].isalpha()):
         return False
-    return not any(c in _URL_PATH_STOP for c in text[i + 3 : end])
+    return all(c in _URL_PATH_CHARS for c in text[i + 3 : end])
 
 
 def _across_number_lines(text: str, start: int, end: int) -> bool:

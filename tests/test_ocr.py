@@ -381,3 +381,179 @@ def test_broken_jpeg_xr_is_uncheckable_with_reason(tmp_path):
     res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
     item = res.items[0]
     assert item.status == Status.UNCHECKABLE and "JPEG XR" in item.reason, item.reason
+
+
+# ---------------------------------------------------------------------------
+# HEIC・AVIF（iPhone の写真など）
+# ---------------------------------------------------------------------------
+
+
+def _to_heic(img: Image.Image) -> bytes:
+    """PIL 画像を WinRT の HEIF の符号器で HEIC にする。Windows の HEIF・HEVC の拡張が無ければ試験を飛ばす。"""
+    import winrt.windows.graphics.imaging as wimaging
+    import winrt.windows.storage.streams as wstreams
+
+    rgba = img.convert("RGBA")
+    stream = wstreams.InMemoryRandomAccessStream()
+    try:
+        enc = wimaging.BitmapEncoder.create_async(wimaging.BitmapEncoder.heif_encoder_id, stream).get()
+        enc.set_pixel_data(
+            wimaging.BitmapPixelFormat.RGBA8,
+            wimaging.BitmapAlphaMode.IGNORE,
+            rgba.width,
+            rgba.height,
+            96,
+            96,
+            rgba.tobytes(),
+        )
+        enc.flush_async().get()
+    except OSError as e:
+        pytest.skip(f"この PC では HEIC を作れない（Windows の HEIF・HEVC の拡張が無い）: {e}")
+    reader = wstreams.DataReader(stream.get_input_stream_at(0))
+    n = reader.load_async(stream.size).get()
+    return bytes(memoryview(reader.read_buffer(n)))
+
+
+@needs_ocr
+def test_heic_is_read_by_ocr(tmp_path):
+    """HEIC の写真の文字を OCR で読んで検査する（今までは「検査できなかった項目」だった）。zip の中でも同じ。"""
+    import zipfile
+
+    from pii_checker import sniff
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions, Status
+
+    data = _to_heic(_render(SAMPLE_LINES, 32))
+    assert data[4:12] in (b"ftypheic", b"ftypmif1"), data[:16]
+    p = tmp_path / "IMG_0001.HEIC"
+    p.write_bytes(data)
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
+    item = res.items[0]
+    assert item.kind == sniff.KIND_LABELS["image_unsupported"]
+    assert item.status == Status.SCANNED, item.reason
+    assert "HEIC/AVIF" in item.method and "Windows の部品" in item.method, item.method
+    assert "phone" in item.finding_counts, item.finding_counts
+    z = tmp_path / "photos.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("DCIM/IMG_0001.HEIC", data)
+    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path)))
+    bad = [(it.path, it.status, it.reason) for it in res.items if it.status != Status.SCANNED]
+    assert bad == []
+    assert "phone" in {k for it in res.items for k in it.finding_counts}
+
+
+@needs_ocr
+def test_wic_respects_exif_orientation():
+    """Windows の部品で開くときは EXIF の向きを守る（横向きに撮った写真の文字を読めるように）。"""
+    img = Image.new("RGB", (300, 100), "white")
+    exif = Image.Exif()
+    exif[0x0112] = 6  # 右へ90度回して見る
+    data = _to_bytes(img, "JPEG", exif=exif.tobytes())
+    assert ocr.open_with_wic(data).size == (100, 300)
+
+
+def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
+    """開けない HEIC は、理由と入れ方つきで「検査できなかった項目」にする（拡張が無い・壊れている・OCR を切った）。"""
+    from pii_checker.engine import scan_file
+    from pii_checker.formats import misc
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "photo.heic"
+    p.write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False))
+    assert res.items[0].status == Status.UNCHECKABLE and "OCR を無効" in res.items[0].reason
+
+    monkeypatch.setattr(ocr, "is_available", lambda: True)
+    monkeypatch.setattr(misc, "_open_heif_with_pillow", lambda data: None)  # pillow-heif が入っていない
+
+    def missing(data):
+        raise ValueError(
+            "画像を読み込めませんでした（壊れている可能性があります）: [WinError -2003292336] 見つかりません"
+        )
+
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
+    assert "この PC の Windows では" in reason and "Microsoft Store" in reason, reason
+    assert "HEIF 画像表示オプション" in reason and "HEVC ビデオ拡張機能" in reason and "AV1 ビデオ拡張機能" in reason
+
+    def broken(data):
+        raise ValueError(
+            "画像を読み込めませんでした（壊れている可能性があります）: [WinError -1072875842] 準拠していません"
+        )
+
+    monkeypatch.setattr(ocr, "open_with_wic", broken)
+    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
+    assert "壊れているか" in reason and "（詳細: [WinError -1072875842] 準拠していません）" in reason, reason
+    assert "壊れている可能性" not in reason  # 中の誤りの「（壊れている可能性があります）」は重ねない
+
+    def pillow_fails(data):
+        raise OSError("Invalid input: Unspecified: Bitstream not supported by this decoder")
+
+    monkeypatch.setattr(misc, "_open_heif_with_pillow", pillow_fails)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE and "壊れている可能性" in item.reason and "Bitstream" in item.reason
+    assert "Microsoft Store" not in item.reason  # WIC の部品はあった（壊れている見込み）ので入れ方は出さない
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert "壊れている可能性" in item.reason and "Microsoft Store" in item.reason  # 部品も無かったので入れ方も出す
+
+
+def test_heic_too_many_pixels_is_not_blamed_on_codec(tmp_path, monkeypatch):
+    """画素数が大きすぎて開かなかったものは、拡張の入れ方ではなく大きすぎたことを理由に出す。"""
+    from PIL import Image as PILImage
+
+    from pii_checker.engine import scan_file
+    from pii_checker.formats import misc
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "huge.heic"
+    p.write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+    monkeypatch.setattr(ocr, "is_available", lambda: True)
+
+    def huge(data):
+        raise ValueError("画像の画素数が大きすぎるため読み込みを中止しました（20000×20000）")
+
+    monkeypatch.setattr(ocr, "open_with_wic", huge)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE and "画素数が大きすぎる" in item.reason
+    assert "Microsoft Store" not in item.reason
+
+    def missing(data):
+        raise ValueError("[WinError -2003292336]")
+
+    def bomb(data):
+        raise PILImage.DecompressionBombError("Image size (400000000 pixels) exceeds limit")
+
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    monkeypatch.setattr(misc, "_open_heif_with_pillow", bomb)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert "画素数が大きすぎる" in item.reason and "Microsoft Store" not in item.reason
+
+
+def test_heic_falls_back_to_pillow_heif(tmp_path, monkeypatch):
+    """Windows の部品で開けなくても、pillow-heif（任意の追加）が入っていればそれで開いて読む。"""
+    from pii_checker.engine import scan_file
+    from pii_checker.formats import misc
+    from pii_checker.models import ScanOptions, Status
+
+    p = tmp_path / "photo.heic"
+    p.write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64)
+    monkeypatch.setattr(ocr, "is_available", lambda: True)
+
+    def missing(data):
+        raise ValueError("[WinError -2003292336]")
+
+    monkeypatch.setattr(ocr, "open_with_wic", missing)
+    monkeypatch.setattr(misc, "_open_heif_with_pillow", lambda data: Image.new("L", (800, 600), "white"))
+    monkeypatch.setattr(ocr, "ocr_pil_image", lambda img: "電話 090-1234-5678")
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.SCANNED, item.reason
+    assert "pillow-heif" in item.method and "phone" in item.finding_counts
+
+
+def test_pillow_heif_is_not_bundled():
+    """pillow-heif は任意の追加。組み立ての環境に入っていても配布版（exe）には入れない（wheel が GPLv2 の x265 を含む）。"""
+    import build
+
+    excludes = re.search(r"excludes=\[([^\]]*)\]", build.SPEC)
+    assert excludes and "'pillow_heif'" in excludes.group(1)

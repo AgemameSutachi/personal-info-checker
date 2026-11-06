@@ -88,6 +88,22 @@ def test_progress_does_not_wait_for_save_lock(done_job):
         store._reader.execute("DELETE FROM files")
 
 
+def test_reader_failure_falls_back_to_query(done_job):
+    """読み取りの接続で失敗しても、書き込みの接続で読み直して表示を続ける（開けないときも同じ）。"""
+    import sqlite3
+
+    store, job = done_job
+
+    class Broken:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    store._reader = Broken()
+    assert store.progress(job)["files_done"] == 5
+    store._reader, store._reader_failed = None, True
+    assert store.progress(job)["files_done"] == 5
+
+
 def test_progress_sees_new_commits(done_job):
     """読み取りの接続でも、保存した直後の値が見える（古いスナップショットのまま止まらない）。"""
     store, job = done_job

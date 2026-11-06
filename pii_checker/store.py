@@ -366,7 +366,10 @@ class Store:
                 except sqlite3.Error:
                     self._reader_failed = True
             if self._reader is not None:
-                return self._reader.execute(sql, args).fetchall()
+                try:
+                    return self._reader.execute(sql, args).fetchall()
+                except sqlite3.OperationalError:
+                    pass  # 使用中・読み取りの失敗: 一度だけ書き込みの接続で読み直す（表示のために検査を止めない）
         return self.query(sql, args)
 
     def iter_query(self, sql: str, args=(), batch: int = 2000):

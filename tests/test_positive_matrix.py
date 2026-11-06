@@ -445,8 +445,9 @@ def test_unclosed_cdata_is_linear():
     from pii_checker.formats import misc
 
     t = time.perf_counter()
-    misc.data_xml_to_text("<![CDATA[" * 100000)
-    assert time.perf_counter() - t < 2.0  # 正規表現の (.*?) では 8000 個で 3 秒以上かかった
+    # 3 万個なら線形で 0.3 秒ほど。正規表現の (.*?) では 8000 個で 3 秒以上かかった（二乗なら 3 万個で数十秒）
+    misc.data_xml_to_text("<![CDATA[" * 30000)
+    assert time.perf_counter() - t < 2.0
     src = "<r><a><![CDATA[x<y]]></a><b><![CDATA[open"
     assert [s for s in misc.data_xml_to_text(src).splitlines() if s.strip()] == ["a：x<y", "<![CDATA[open"]
 

@@ -1253,10 +1253,10 @@ _RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[1
 _RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
 _NUMERIC_CHARS = frozenset("0123456789.+-:/,")
 _RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
-# 番号（電話・カード・マイナンバー）にならない長さ（20桁以上）の数字の連続が、空白と英字の欄（「A」「A1」の
-# ASCII の英字＋数字1つまで）だけをはさんで後ろ・前にあるもの（_beside_long_digit_run。前のほうは窓の終わり＝検出の直前で終わる形）
-_RE_LONG_RUN_AFTER = re.compile(r"(?:[ \t　]|[A-Za-z][0-9]?)*[0-9]{20}")
-_RE_LONG_RUN_BEFORE = re.compile(r"[0-9]{20}(?:[ \t　]|[A-Za-z][0-9]?)*\Z")
+# 番号（電話・カード・マイナンバー）にならない長さ（20桁以上）の数字の連続が、空白と、英字の欄1つ（「A」「A1」の
+# ASCII の英字1〜2字＋数字1つまで）だけをはさんで後ろ・前にあるもの（_beside_long_digit_run。前のほうは窓の終わり＝検出の直前で終わる形）
+_RE_LONG_RUN_AFTER = re.compile(r"[ \t　]*(?:[A-Za-z]{1,2}[0-9]?[ \t　]+)?[0-9]{20}")
+_RE_LONG_RUN_BEFORE = re.compile(r"[0-9]{20}[ \t　]*(?:[A-Za-z]{1,2}[0-9]?[ \t　]*)?\Z")
 # 16進のダンプの行。od・hexdump の「0000030  36 32 34 4B …」（番地7〜8桁＋2桁の組が8つ以上）・
 # od -Ax の「000030 36 32 34 4b …」（番地6桁＋2桁の組が12以上）と、
 # xxd の「00000030: 3632 344b …」（番地8桁＋コロン＋4桁の組が4つ以上）・xxd -g1 の「00000030: 36 32 …」
@@ -1367,7 +1367,10 @@ def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
 
 
 def _beside_long_digit_run(text: str, start: int, end: int, width: int = 40) -> bool:
-    """検出のすぐ前か後ろ（同じ行の前後 width 文字。間は空白と英字の欄だけ）に、20桁以上の数字の連続があるか。
+    """検出のすぐ前か後ろ（同じ行の前後 width 文字。間は空白と英字の欄1つだけ）に、20桁以上の数字の連続があるか。
+
+    連続は20桁が丸ごと窓に入るものだけを見る（空白が20個を超えて離れたもの・窓の途中から始まるものは見ない）。
+    使うのは手がかり語の無い12桁（マイナンバー）だけ。電話・カードの形は語があっても同じ規則名で出るので使わない。
 
     固定長のレコード（JRA-VAN のレース情報「…    180000002400    00039000000160000000980000…」・
     「120000001800A   0012000000048…」）では、0詰めの数値の欄が空白なしにつながって数十〜数百桁の数字の連続になる。
@@ -1458,7 +1461,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - 和暦の日付（低）: 月日がありえない・英数字の直後の1文字の元号・小数へ続く
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
     2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
-    16進のダンプの行と OBJ の要素の行の中のもの・すぐ隣が20桁以上の数字の連続のもの（固定長のレコードの0詰めの欄）
+    16進のダンプの行と OBJ の要素の行の中のもの。マイナンバー（手がかり語なし）のすぐ隣が20桁以上の数字の連続のもの
+    （固定長のレコードの0詰めの欄）
     """
     out = []
     for h in hits:
@@ -1470,14 +1474,17 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             and h.confidence != Confidence.HIGH
             and (
                 _in_numeric_run(text, h.start, h.end)
-                or _beside_long_digit_run(text, h.start, h.end)
                 or _across_number_lines(text, h.start, h.end)
                 or _in_dump_or_mesh_line(text, h.start)
             )
         ):
             continue
         if h.pii_type == "my_number" and h.rule.startswith("12桁・検査数字一致（手がかり語なし"):
-            if _decimal_adjacent(text, h.start, h.end) or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value)):
+            if (
+                _decimal_adjacent(text, h.start, h.end)
+                or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value))
+                or _beside_long_digit_run(text, h.start, h.end)
+            ):
                 continue
         elif h.rule == "和暦の日付（生年月日の可能性）":
             if _era_date_is_broken(text, h):

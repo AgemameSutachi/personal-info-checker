@@ -38,7 +38,35 @@ def test_float_array_is_out_of_scope(tmp_path):
     res = _scan(tmp_path, p)
     top = res.items[0]
     assert top.status == Status.OUT_OF_SCOPE, (top.status, top.reason)
-    assert "<f4" in top.reason and "(256, 64)" in top.reason
+    assert "小数" in top.reason and "256×64" in top.reason
+
+
+def test_numeric_header_with_extra_body_is_not_trusted(tmp_path):
+    """頭に「小数1個」と書いて後ろに文字を足したものは、頭を信じて対象外にせず中を読む（評価の指摘）。"""
+    p = tmp_path / "fake.npy"
+    p.write_bytes(_npy("<f4", (1,), b"\x00\x00\x80\x3f" + "電話 090-1234-5678 山田太郎\n".encode("utf-8") * 20))
+    res = _scan(tmp_path, p)
+    assert res.items[0].status != Status.OUT_OF_SCOPE
+    assert "phone" in _types(res)
+
+
+def test_truncated_string_array_is_partial(tmp_path):
+    """要素5件のはずが途中で切れている文字の配列は、読めた分を検査して簡易検査（切れていたことを出す）。"""
+    cells = ["090-1234-5678".ljust(16, "\x00").encode("utf-32-le"), "山田".ljust(16, "\x00").encode("utf-32-le")]
+    p = tmp_path / "cut.npy"
+    p.write_bytes(_npy("<U16", (5,), cells[0] + cells[1][:20]))
+    res = _scan(tmp_path, p)
+    top = res.items[0]
+    assert top.status == Status.PARTIAL and "途中で切れていた" in top.reason, (top.status, top.reason)
+    assert "phone" in _types(res)
+
+
+def test_short_header_falls_back(tmp_path):
+    """頭が短すぎる（版2の長さの欄が切れている）ものも、エラーにせず形式不明の読み方へ（評価の指摘）。"""
+    p = tmp_path / "short.npy"
+    p.write_bytes(b"\x93NUMPY\x02\x00\x01\x02\x03")
+    res = _scan(tmp_path, p)
+    assert "unpack" not in (res.items[0].reason or "")
 
 
 def test_unicode_array_is_scanned(tmp_path):
@@ -108,12 +136,37 @@ def test_torch_zip_tensors_are_out_of_scope(tmp_path):
     assert "phone" in by["adapter_model/data.pkl"].finding_counts
 
 
+def _data_zip(p, members: dict[str, bytes], compress=zipfile.ZIP_STORED):
+    with zipfile.ZipFile(p, "w", compress) as z:
+        for name, body in members.items():
+            z.writestr(name, body)
+
+
+PII = "電話 090-1234-5678 氏名 山田太郎\n".encode("utf-8")
+
+
 def test_plain_zip_named_data_is_not_torch(tmp_path):
-    """data.pkl の無い zip の data/1 は、ふつうに検査する（名前だけで対象外にしない）。"""
-    p = tmp_path / "plain.zip"
-    with zipfile.ZipFile(p, "w") as z:
-        z.writestr("data/1", "電話 090-1234-5678\n".encode("utf-8"))
+    """torch.save の形がそろわない zip の data/1 は、ふつうに検査する（名前だけで対象外にして見逃さない）。"""
+    cases = {
+        "no_pkl.zip": ({"data/1": PII}, zipfile.ZIP_STORED),
+        "no_version.zip": ({"data.pkl": b"\x80\x02x", "data/1": PII}, zipfile.ZIP_STORED),  # 評価で見つかった誤爆
+        "not_pickle.zip": ({"p/data.pkl": b"hello", "p/version": b"3\n", "p/data/1": PII}, zipfile.ZIP_STORED),
+        "deflated.zip": ({"p/data.pkl": b"\x80\x02x", "p/version": b"3\n", "p/data/1": PII}, zipfile.ZIP_DEFLATED),
+    }
+    for name, (members, compress) in cases.items():
+        p = tmp_path / name
+        _data_zip(p, members, compress)
+        res = _scan(tmp_path, p)
+        by = {it.path.rsplit("!", 1)[-1]: it for it in res.items}
+        target = next(k for k in by if k.endswith("data/1"))
+        assert by[target].status != Status.OUT_OF_SCOPE, name
+        assert "phone" in by[target].finding_counts, name
+
+
+def test_new_torch_layout_with_dot_data_version(tmp_path):
+    """新しい torch の形（<名前>/.data/version）も torch とみなす。"""
+    p = tmp_path / "m.pt"
+    _data_zip(p, {"m/data.pkl": b"\x80\x02x", "m/.data/version": b"3\n", "m/data/0": os.urandom(4096)})
     res = _scan(tmp_path, p)
     by = {it.path.rsplit("!", 1)[-1]: it for it in res.items}
-    assert by["data/1"].status != Status.OUT_OF_SCOPE
-    assert "phone" in by["data/1"].finding_counts
+    assert by["m/data/0"].status == Status.OUT_OF_SCOPE

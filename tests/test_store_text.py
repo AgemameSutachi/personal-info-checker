@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+
 from pii_checker.models import Confidence, Finding, FileResult, ItemResult, ScanOptions, Status
 from pii_checker.store import Store, db_text
 
@@ -45,5 +47,10 @@ def test_save_result_with_surrogate_names(tmp_path):
     assert len(locs) == 1 and locs[0].startswith("1行目 ")
     state = store.query("SELECT state, n_findings FROM files WHERE job_id=?", (job,))[0]
     assert (state[0], state[1]) == ("done", 1)
+    # JSON の列（注記）も、読み戻して JSON として読める（直した後の文字が JSON の書き方を壊さない・評価の指摘）
+    notes = json.loads(store.query("SELECT notes FROM items WHERE job_id=? AND seq=1", (job,))[0][0])
+    assert notes == ["名前 \\x82 を読めなかった"]
+    for (text,) in store.query("SELECT counts FROM items WHERE job_id=?", (job,)):
+        json.loads(text)
     # 書き直しても重ならない（最初の失敗した書き込みは巻き戻っている）
     assert store.query("SELECT COUNT(*) FROM items WHERE job_id=?", (job,))[0][0] == 2

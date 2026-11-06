@@ -179,16 +179,16 @@ def handle_zip(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                 return _zip_python_encrypted(ctx, blob, item, z, infos, depth)
             return handle_with_7z_exe(ctx, blob, item, col, depth, kind="zip")
         item.method = f"zip を展開（{len(infos)}件）"
-        torch_dirs = _torch_dirs(infos)
+        torch_dirs = _torch_dirs(z, infos)
         for info in infos:
             name = _fix_zip_name(info)
             display = f"{blob.display}!{name}"
-            if torch_dirs and _is_torch_tensor(info.filename, torch_dirs):
+            if torch_dirs and _is_torch_tensor(info, torch_dirs):
                 add_failed_item(
                     ctx,
                     display,
                     Status.OUT_OF_SCOPE,
-                    "機械学習のモデル（PyTorch）の重みの数（テンソル）で、文字を含まない",
+                    "機械学習のモデル（PyTorch）の重み（数だけのデータ）で、文字を含まない",
                     depth + 1,
                     size=info.file_size,
                 )
@@ -210,22 +210,36 @@ def handle_zip(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             _scan_extracted(ctx, display, data_or_path, depth + 1, name, info)
 
 
-def _torch_dirs(infos: list[zipfile.ZipInfo]) -> set[str]:
+def _torch_dirs(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> set[str]:
     """PyTorch の保存形式（torch.save の zip）の根のフォルダ（「x/」）を返す。無ければ空。
 
-    torch.save の zip は「<名前>/data.pkl」（テンソルの並びの pickle）と「<名前>/data/<番号>」（テンソルの数の本体）を持つ。
-    数の本体は形式不明の高いエントロピーとして検査不能になっていた（実物の F の検査で 334 件）。
+    torch.save の zip は「<名前>/data.pkl」（テンソルの並びの pickle）・「<名前>/version」（新しい版は
+    「<名前>/.data/version」）・「<名前>/data/<番号>」（テンソルの数の本体・無圧縮）を持つ。数の本体は形式不明の
+    高いエントロピーとして検査不能になっていた（実物の F の検査で 334 件）。data.pkl と data/1 を持つだけの
+    普通の zip を誤って対象外にしないよう、version と pickle の印もそろったときだけ torch とみなす。
     """
+    names = {i.filename.replace("\\", "/"): i for i in infos}
     dirs = set()
-    for i in infos:
-        n = i.filename.replace("\\", "/")
-        if n == "data.pkl" or n.endswith("/data.pkl"):
-            dirs.add(n[: -len("data.pkl")])
+    for n, info in names.items():
+        if not (n == "data.pkl" or n.endswith("/data.pkl")):
+            continue
+        d = n[: -len("data.pkl")]
+        if f"{d}version" not in names and f"{d}.data/version" not in names:
+            continue
+        try:
+            with _open_zip_member(z, info, None) as f:
+                if f.read(1) != b"\x80":  # pickle の版2以降の印
+                    continue
+        except Exception:  # noqa: BLE001  読めなければ torch とみなさない（ふつうに検査する）
+            continue
+        dirs.add(d)
     return dirs
 
 
-def _is_torch_tensor(filename: str, torch_dirs: set[str]) -> bool:
-    n = filename.replace("\\", "/")
+def _is_torch_tensor(info: zipfile.ZipInfo, torch_dirs: set[str]) -> bool:
+    if info.compress_type != zipfile.ZIP_STORED:  # torch.save はテンソルを圧縮しない
+        return False
+    n = info.filename.replace("\\", "/")
     for d in torch_dirs:
         if n.startswith(f"{d}data/") and n[len(d) + 5 :].isdigit():
             return True

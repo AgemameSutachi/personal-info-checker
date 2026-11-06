@@ -162,6 +162,17 @@ def db_text(value):
         return value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
 
 
+def _deep_clean(value, clean):
+    """dict・list の中の文字（キーも）に clean を当てた写しを返す（JSON にする前に使う）。"""
+    if isinstance(value, str):
+        return clean(value)
+    if isinstance(value, dict):
+        return {_deep_clean(k, clean): _deep_clean(v, clean) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_deep_clean(v, clean) for v in value]
+    return value
+
+
 def _add_counts(acc: dict[str, int], text: str | dict | None) -> None:
     """「種類:確度」→件数（JSON の文字列か dict）を acc に足す。"""
     d = json.loads(text) if isinstance(text, str) else (text or {})
@@ -638,6 +649,12 @@ class Store:
 
         def write(clean) -> None:
             """1つのトランザクションで書く。clean は文字の直し（None ならそのまま書く）。"""
+
+            def js(value) -> str:
+                # JSON の列は、JSON にする前に中の文字を直す（できあがった JSON の文字列を直すと、\xNN が
+                # JSON として不正な書き方になり、読むときに json.loads が落ちる）
+                return json.dumps(value if clean is None else _deep_clean(value, clean), ensure_ascii=False)
+
             with self.tx() as c:
                 c.execute(
                     "DELETE FROM items WHERE job_id=? AND top_path=?",
@@ -661,12 +678,12 @@ class Store:
                         it.mtime,
                         it.depth,
                         it.password_kind,
-                        json.dumps(it.finding_counts, ensure_ascii=False),
-                        json.dumps(it.notes, ensure_ascii=False),
-                        json.dumps(it.conf_counts, ensure_ascii=False),
+                        js(it.finding_counts),
+                        js(it.notes),
+                        js(it.conf_counts),
                         it.allowed,
-                        json.dumps(it.distinct_counts or {}, ensure_ascii=False),
-                        json.dumps(it.rule_counts or {}, ensure_ascii=False),
+                        js(it.distinct_counts or {}),
+                        js(it.rule_counts or {}),
                     )
                     c.execute(
                         "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime,"

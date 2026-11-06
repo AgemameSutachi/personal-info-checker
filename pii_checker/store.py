@@ -916,6 +916,21 @@ class Store:
             "files_with_findings": files_with_findings,
         }
 
+    def biggest_of(self, job_id: str, paths) -> tuple[str, int] | None:
+        """paths（検査中のファイル）のうち、列挙したときの大きさが一番大きいものと、その大きさ。無ければ None。
+
+        コマンドの1行表示で、数が進まないときに何を読んでいるかを添えるのに使う。保存とは別の接続で読む。
+        """
+        paths = list(paths)[:500]  # 検査中に配るのはワーカー数の4倍まで。念のため SQL の引数の上限より小さく抑える
+        if not paths:
+            return None
+        rows = self._reader_query(
+            f"SELECT top_path, size FROM files WHERE job_id=? AND top_path IN ({','.join('?' * len(paths))})"
+            " ORDER BY size DESC LIMIT 1",
+            (job_id, *paths),
+        )
+        return (rows[0][0], rows[0][1] or 0) if rows else None
+
     def progress_cached(self, job_id: str, min_age: float = 1.0) -> dict:
         """検査中のコマンドの1行表示用の progress。使い回す長さは summary_cached と同じ考え（集計の時間の4倍・上限 30 秒）。
 

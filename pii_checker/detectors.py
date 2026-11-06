@@ -1549,18 +1549,24 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
 # ハッシュ・識別子（git のオブジェクトや pack の名前・SHA-1/SHA-256/MD5・UUID）。16進の数字だけの並びが偶然
 # 12桁の検査数字に合うと、マイナンバー等として拾ってしまう（40桁のランダムな16進の約0.15%）。英字を1つ以上含む
 # 32文字以上の16進の並び（頭の 0x は許す）と、UUID の形の中で見つけたものは、種類を問わず捨てる
-# （数字だけの長い並びは今までどおり扱う）。利用者が足した規則（userrules）の検出は detect を通らないので対象外
+# （数字だけの長い並びは今までどおり扱う）。利用者が足した規則（userrules）の検出は detect を通らないので対象外。
+# 頭に 0x の付いた12文字以上の16進（Python の repr の番地「object at 0x000001958895D6D0」・C の16進の数）も捨てる
+# （2026-11-07・デバッグのログ1つで 599 件。0x を書いた時点で16進の数で、番号ではない）
 _HASH_LIKE = re.compile(
-    r"(?<![0-9A-Za-z])(?:0[xX])?"
+    r"(?<![0-9A-Za-z])(?:"
+    r"(?:0[xX])?"
     r"(?:[0-9A-Fa-f]{32,}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
-    r"(?![0-9A-Za-z])"
+    r"|0[xX][0-9A-Fa-f]{12,}"
+    r")(?![0-9A-Za-z])"
 )
+# _HASH_LIKE に当たる最も短い並び（「0x」＋12文字）。これより短い本文は並びを探さない
+_HASH_LIKE_MIN = 14
 
 
 def _drop_inside_hash(text: str, hits: list[Hit]) -> list[Hit]:
     """ハッシュ・UUID の並びの中で見つけた検出を除く（検出があるときだけ呼ばれる）。"""
-    if len(text) < 32:
-        return hits  # 32文字に満たない本文に16進の並び・UUID は入らない
+    if len(text) < _HASH_LIKE_MIN:
+        return hits  # 16進の並び・UUID の入らない短い本文
     spans = [m.span() for m in _HASH_LIKE.finditer(text) if not m.group().replace("-", "").isdigit()]
     if not spans:
         return hits

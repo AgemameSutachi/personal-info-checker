@@ -92,6 +92,10 @@ def test_detects(text, expected):
         "md5 090123456780abcdef0123456789abcd",
         "id=0a1b2c3d-4e5f-4a6b-8c7d-123456789018",
         "0x4111111111111111abcdef0123456789abcdef01",
+        # Python の repr の番地・頭に 0x の付いた16進の数（32文字に満たない）
+        "<__main__.Foo object at 0x000001958895D6D0>",
+        "0x123456789018",
+        "mask=0X4111111111111111",
     ],
 )
 def test_nothing_inside_hash(text):
@@ -105,6 +109,10 @@ def test_nothing_inside_hash(text):
         # 16進の並びが短い・英字を含まない・前後に英数字が続くものは今までどおり拾う
         ("個人番号 123456789018 abcdef", "my_number"),
         ("a123456789018bc", "my_number"),
+        # 0x の付かない16進・0x の前に英数字が続くもの・0x の後ろが12文字に満たないもの
+        ("番地 000001958895D6D0", "my_number"),
+        ("10x123456789018", "my_number"),
+        ("0x1F 123456789018", "my_number"),
         ("カード 4111111111111111 sha 0123456789abcdef0123456789abcdef", "credit_card"),
     ],
 )

@@ -135,10 +135,32 @@ FILE_EXTRA_COLUMNS = {
     # 結果を DB へ書くのにかかった秒。SAVE_RECHECK_SECONDS 以上かかったときだけ確定の書き込みを含む。NULL は使い回し・古い版
     "save_elapsed": "REAL",
     "wall_elapsed": "REAL",  # ワーカーへ配ってから結果を受け取るまでの秒（待ち行列・プロセスの起動を含む）
+    # 保存が SAVE_RECHECK_SECONDS 以上かかったときだけ、その内訳（JSON・save_detail_of）。速い保存と使い回しは NULL
+    "save_detail": "TEXT",
 }
 REUSABLE_STATUSES = (Status.SCANNED, Status.PARTIAL, Status.OUT_OF_SCOPE)
 # 保存がこの秒数以上かかったら、確定の書き込みを含めた時間で save_elapsed を書き直す
 SAVE_RECHECK_SECONDS = 0.5
+
+
+def save_detail_of(started: float, cpu_started: float, marks: dict[str, float], retried: bool) -> dict:
+    """遅かった保存の内訳（秒）を返す。原因を後から事実で分けるための記録（docs/開発者向け.md の残り課題6）。
+
+    prep は保存の前の集計、lock は鍵（Store._lock）の待ち（別のスレッドの読み書きが鍵を持っていた）、
+    write は項目と検出の書き込み、commit は確定（WAL の自動の checkpoint もここに入る）。
+    cpu はこのスレッドの CPU 時間で、合計より大きく少なければ、待っていた（鍵・ディスク・プロセスごとの停止）ことになる。
+    retried は文字の直しで書き直したとき（lock・write・commit は書き直した回の値で、prep は最初の失敗した回の時間も含む）。
+    """
+    end = time.perf_counter()
+    return {
+        "prep": round(marks["asked"] - started, 4),
+        "lock": round(marks["locked"] - marks["asked"], 4),
+        "write": round(marks["written"] - marks["locked"], 4),
+        "commit": round(marks["committed"] - marks["written"], 4),
+        "total": round(end - started, 4),
+        "cpu": round(time.thread_time() - cpu_started, 4),
+        "retried": retried,
+    }
 
 
 def db_text(value):
@@ -664,6 +686,8 @@ class Store:
         from .engine import risk_of, worst_status
 
         save_started = time.perf_counter()
+        cpu_started = time.thread_time()
+        marks: dict[str, float] = {}  # 内訳の時刻（save_detail_of）
         worst = worst_status(result.items) if result.items else Status.UNCHECKABLE
         risk = risk_of(result.items)
         n_findings = sum(sum(i.finding_counts.values()) for i in result.items)
@@ -684,7 +708,9 @@ class Store:
                 # JSON として不正な書き方になり、読むときに json.loads が落ちる）
                 return json.dumps(value if clean is None else _deep_clean(value, clean), ensure_ascii=False)
 
+            marks["asked"] = time.perf_counter()
             with self.tx() as c:
+                marks["locked"] = time.perf_counter()
                 c.execute(
                     "DELETE FROM items WHERE job_id=? AND top_path=?",
                     (job_id, result.top_path),
@@ -742,8 +768,8 @@ class Store:
                     "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
                     " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
                     " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
-                    " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?"
-                    " WHERE job_id=? AND top_path=?",
+                    " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?,"
+                    " save_detail=NULL WHERE job_id=? AND top_path=?",
                     (
                         worst.value,
                         risk,
@@ -767,22 +793,27 @@ class Store:
                         result.top_path,
                     ),
                 )
+                marks["written"] = time.perf_counter()
+            marks["committed"] = time.perf_counter()
 
+        retried = False
         try:
             write(None)
         except UnicodeEncodeError:
             # 名前などに UTF-8 にできない文字が混ざっていた（db_text の説明）。巻き戻ったので、直した文字で書き直す。
             # ふつうの保存では全部の値を通す手間（検出 100 万件で約2秒・実測）をかけないよう、失敗したときだけ直す
+            retried = True
             write(db_text)
         # 上で書いた値は確定の書き込みを含まない。検出が数百万件あると確定の重さが効くので、遅かったときだけ
-        # 確定まで含めた時間で書き直す（速い保存のたびに確定を1回増やすと、数万ファイルで無視できない）
+        # 確定まで含めた時間と、その内訳で書き直す（速い保存のたびに確定を1回増やすと、数万ファイルで無視できない）
         total = time.perf_counter() - save_started
         if total >= SAVE_RECHECK_SECONDS:
+            detail = save_detail_of(save_started, cpu_started, marks, retried)
             try:
                 with self.tx() as c:
                     c.execute(
-                        "UPDATE files SET save_elapsed=? WHERE job_id=? AND top_path=?",
-                        (total, job_id, result.top_path),
+                        "UPDATE files SET save_elapsed=?, save_detail=? WHERE job_id=? AND top_path=?",
+                        (detail["total"], json.dumps(detail), job_id, result.top_path),
                     )
             except (
                 Exception
@@ -833,7 +864,8 @@ class Store:
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
                 " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, scanned_at=?,"
                 " atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL, access_who=NULL,"
-                " access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL WHERE job_id=? AND top_path=?",
+                " access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL, save_detail=NULL"
+                " WHERE job_id=? AND top_path=?",
                 (
                     src["worst_status"],
                     src["risk"],

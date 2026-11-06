@@ -125,6 +125,51 @@ def test_save_result_writes_given_wall_and_rewrites_slow_saves(tmp_path, monkeyp
     assert _times(store, job)[1] > 0
 
 
+def test_slow_save_records_detail_and_lock_wait(tmp_path, monkeypatch):
+    """遅い保存だけ内訳を残す。別のスレッドが鍵を持っていた分は lock に出て、CPU 時間は小さい（待っていた）。"""
+    import json
+    import threading
+
+    import pii_checker.store as store_mod
+    from pii_checker.models import FileResult, ItemResult, Status
+
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = _one_file_job(store, tmp_path)
+    result = FileResult(top_path="a.txt", items=[ItemResult(path="a.txt", kind="", status=Status.SCANNED)])
+
+    def detail():
+        return store.query("SELECT save_detail FROM files WHERE job_id=? AND top_path='a.txt'", (job,))[0][0]
+
+    # 速い保存の側は、遅いディスクでも 0.5 秒を超えて揺れないよう閾値を上げて見る
+    monkeypatch.setattr(store_mod, "SAVE_RECHECK_SECONDS", 30.0)
+    store.save_result(job, result)
+    assert detail() is None  # 速い保存は内訳を残さない
+    monkeypatch.setattr(store_mod, "SAVE_RECHECK_SECONDS", 0.5)
+
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with store._lock:
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    held.wait(5)
+    threading.Timer(0.8, release.set).start()
+    store.save_result(job, result)
+    t.join()
+    d = json.loads(detail())
+    assert set(d) == {"prep", "lock", "write", "commit", "total", "cpu", "retried"}
+    assert d["lock"] >= 0.6 and d["retried"] is False
+    assert d["cpu"] < d["lock"]
+    assert _times(store, job)[1] == pytest.approx(d["total"])
+
+    monkeypatch.setattr(store_mod, "SAVE_RECHECK_SECONDS", 30.0)
+    store.save_result(job, result)
+    assert detail() is None  # 次の速い保存で前の内訳を消す（古い内訳が残らない）
+
+
 def test_failure_records_wall_elapsed(tmp_path):
     """時間切れ・異常終了の行にも、配ってから受け取るまでの時間を残す（遅さの調べで一番知りたい行）。"""
     store = Store(str(tmp_path / "jobs.sqlite3"))

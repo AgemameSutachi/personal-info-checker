@@ -401,6 +401,27 @@ def _parse_7z_list(out: str) -> list[dict]:
 WRONG_PW_MARKERS = ("Wrong password", "Can not open encrypted archive", "Cannot open encrypted archive")
 
 
+def _drop_parent_dirs(entries: list[dict]) -> list[dict]:
+    """ほかの項目の親になっている名前の項目を外す。
+
+    CHM などはフォルダにも印（Folder = +・属性 D）を付けず、大きさ 0 の項目として並べる。そのまま展開しようとすると
+    「展開できなかった（壊れている可能性）」になっていた（実物の CHM 21 個で 1 つあたり 1〜4 件）。
+    """
+    parents = set()
+    for e in entries:
+        parts = (e.get("Path") or "").replace("/", "\\").split("\\")
+        for i in range(1, len(parts)):
+            parents.add("\\".join(parts[:i]))
+    if not parents:
+        return entries
+    # 大きさのある項目は、名前が親と重なっても中身を持つので残す（同じ名前のファイルとフォルダが並ぶ書庫など）
+    return [
+        e
+        for e in entries
+        if str(e.get("Size") or "0") != "0" or (e.get("Path") or "").replace("/", "\\") not in parents
+    ]
+
+
 def handle_with_7z_exe(
     ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int, kind: str = ""
 ) -> None:
@@ -442,6 +463,7 @@ def handle_with_7z_exe(
         for e in _parse_7z_list(listing)
         if e.get("Folder", "-") != "+" and not e.get("Attributes", "").startswith("D")
     ]
+    entries = _drop_parent_dirs(entries)
     if not entries:
         if os.path.getsize(path) > 512:
             raise Uncheckable("7-Zip で一覧を取れたが中身が1件も無い（空でないアーカイブなのに中身を取り出せない）")

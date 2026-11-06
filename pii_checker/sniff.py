@@ -64,6 +64,9 @@ KIND_LABELS = {
     "git_index": "git の索引（index）",
     "git_meta": "git の索引ファイル",
     "npy": "数値の配列（numpy .npy）",
+    "chm": "ヘルプ（CHM）",
+    "pyinstaller": "Python のプログラムの部品（PyInstaller）",
+    "der": "証明書・電子署名（DER）",
     "unknown": "形式不明",
 }
 
@@ -291,8 +294,12 @@ def sniff(blob: Blob) -> str:
         return "tar"
     if head.startswith(b"MSCF"):
         return "cab"
+    if head.startswith(b"ITSF") and head[4:8] in (b"\x02\x00\x00\x00", b"\x03\x00\x00\x00"):
+        return "chm"
     if head.startswith(b"\x93NUMPY") and len(head) > 10:
         return "npy"
+    if head.startswith(b"PYZ\x00") and head[6:8] == b"\r\n":
+        return "pyinstaller"  # PyInstaller の PYZ（Python の版の印に続けて、圧縮したモジュールが並ぶ）
     if len(head) > 7 and head[2:4] == b"-l" and head[6:7] == b"-":
         return "lzh"
     if head.startswith(b"\x60\xea"):
@@ -315,12 +322,16 @@ def sniff(blob: Blob) -> str:
         return "image"
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image"
+    if _looks_like_icon(head, blob.size):
+        return "image"
     # ここから下の目印は「対象外」に振るものが多い。テキストとして読めるもの（目印の文字で始まる CSV 等）を
     # 中身を読まずに対象外にすると言い切りを誤らせるので、テキストとして読むほうを先にする（本物の動画・音声・
     # 実行ファイルは NUL などの制御文字を含むのでテキストとはみなされない）
     kind = _text_kind(blob, head, ext)
     if kind:
         return kind
+    if _der_fills_file(head, blob.size):
+        return "der"
     if head[4:8] == b"ftyp":
         brand = head[8:12]
         if brand in (b"heic", b"heix", b"mif1", b"msf1", b"avif", b"heim", b"heis"):
@@ -376,8 +387,55 @@ def sniff(blob: Blob) -> str:
         return "disk_image"
     if _is_split_continuation(blob):
         return "split_volume"
+    if _is_pyinstaller_archive(blob):
+        return "pyinstaller"
     # 動画・実行ファイル・フォントの拡張子でも、中身の目印が無いものは対象外にしない（形式不明として文字列走査）
     return "unknown"
+
+
+PYINSTALLER_COOKIE = b"MEI\x0c\x0b\x0a\x0b\x0e"
+PYINSTALLER_COOKIE_SIZE = 88  # 目印 8・全体の長さ 4・目次の位置 4・目次の長さ 4・Python の版 4・ライブラリの名前 64
+
+
+def _is_pyinstaller_archive(blob: Blob) -> bool:
+    """PyInstaller の CArchive（build の途中にできる .pkg）か。末尾の目印と、そこに書いた全体の長さで見分ける。"""
+    size = blob.size
+    if size is None or size < PYINSTALLER_COOKIE_SIZE:
+        return False
+    try:
+        with blob.open() as f:
+            f.seek(-PYINSTALLER_COOKIE_SIZE, 2)
+            tail = f.read(PYINSTALLER_COOKIE_SIZE)
+    except OSError:
+        return False
+    return tail.startswith(PYINSTALLER_COOKIE) and int.from_bytes(tail[8:12], "big") == size
+
+
+def _looks_like_icon(head: bytes, size: int | None) -> bool:
+    """Windows のアイコン（.ico）・カーソル（.cur）か。頭の数・1つ目の項目の予約の値・画像の位置で確かめる。"""
+    if head[:4] not in (b"\x00\x00\x01\x00", b"\x00\x00\x02\x00") or len(head) < 22:
+        return False
+    count = int.from_bytes(head[4:6], "little")
+    if not 1 <= count <= 256 or head[9] != 0:
+        return False
+    offset = int.from_bytes(head[18:22], "little")
+    length = int.from_bytes(head[14:18], "little")
+    if offset < 6 + 16 * count or length <= 0 or (size is not None and offset + length > size):
+        return False
+    # 1つ目の画像の中身が PNG か BMP の情報の頭（大きさ 40）で始まるか（外れたものを画像として開けずに検査不能にしない）
+    first = head[offset : offset + 8]
+    return first == b"\x89PNG\r\n\x1a\n" or first[:4] == b"\x28\x00\x00\x00"
+
+
+def _der_fills_file(head: bytes, size: int | None) -> bool:
+    """DER の SEQUENCE 1つでファイルがちょうど埋まるか（証明書 .cer・電子署名 .p7s・MSI の署名など）。"""
+    if size is None or len(head) < 5 or head[0] != 0x30:
+        return False
+    if head[1] == 0x82:
+        return int.from_bytes(head[2:4], "big") + 4 == size and size > 255
+    if head[1] == 0x83:
+        return int.from_bytes(head[2:5], "big") + 5 == size and size > 65535
+    return False
 
 
 def _text_kind(blob: Blob, head: bytes, ext: str) -> str | None:
@@ -499,6 +557,9 @@ def handler_for(kind: str):
         "git_index": git.handle_git_index,
         "git_meta": git.handle_git_meta,
         "npy": misc.handle_npy,
+        "chm": archive.handle_with_7z_exe,
+        "pyinstaller": misc.handle_out_of_scope,
+        "der": misc.handle_der,
         "unknown": misc.handle_unknown,
     }
     return table[kind]

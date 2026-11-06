@@ -652,6 +652,12 @@ def handle_unknown(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
     head = blob.head(1024 * 1024)
     e = entropy(head)
     if e > 7.2 and len(head) > 4096:
+        if head.startswith(b"PAR1"):
+            # 頭は parquet なのに尾の定義が無い（書き出しの途中で止まった .part・途中で切れたコピー）
+            raise Uncheckable(
+                "Parquet の表の書きかけか途中で切れたもの（末尾にある表の定義が無い）で、中身が圧縮されているため"
+                "文字を取り出せない（元の完全なファイルを検査する）"
+            )
         raise Uncheckable(
             f"形式不明で、中身が圧縮または暗号化されている（エントロピー {e:.2f}/8）ため文字を取り出せない"
         )
@@ -662,6 +668,33 @@ def handle_unknown(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
     raise PartialScan(
         "形式が分からないため、文字として読める部分だけを検査した（独自形式の中の数値や圧縮された部分は読めない）"
     )
+
+
+DER_OID_ENVELOPED = bytes.fromhex("06092a864886f70d010703")  # PKCS#7 の EnvelopedData（暗号化したデータ）
+DER_OID_ENCRYPTED = bytes.fromhex("06092a864886f70d010706")  # PKCS#7 の EncryptedData
+
+
+def handle_der(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """証明書・電子署名（DER）。名前・メールなどの文字は圧縮されずに入っているので、文字の部分を全部読む。
+
+    鍵と署名の値が乱数に近いので、形式不明の読み方ではエントロピーで「圧縮または暗号化」とみなされて検査不能になっていた
+    （実物の F の検査で MSI の DigitalSignature・証明書 約 30 件）。
+    鍵と証明書をパスワードで包んだもの（PKCS#12・.pfx/.p12）と、暗号化したデータ（S/MIME の .p7m など）は、
+    文字の部分を読んでも中身が読めないので、検査したことにせず検査不能にする。
+    """
+    head = blob.head(256)
+    inner = head[4:] if head[1] == 0x82 else head[5:]
+    if inner.startswith(b"\x02\x01\x03"):  # PFX の版 3
+        raise Uncheckable(
+            "パスワードで守られた鍵と証明書のファイル（.pfx・.p12）で、中身が暗号化されているため検査できない"
+        )
+    if DER_OID_ENVELOPED in head or DER_OID_ENCRYPTED in head:
+        raise Uncheckable("暗号化されたデータ（暗号化メールの .p7m など）で、中身が暗号化されているため検査できない")
+    with blob.open() as f:
+        for s in iter_strings_chunked(f.read):
+            col.add_text(s, "証明書・署名の文字", method="DER の文字の部分")
+    item.method = "証明書・電子署名（DER）の文字の部分（名前・メール・組織名など）を読んだ"
+    item.notes.append("鍵と署名の値（数のデータ）は検査していない")
 
 
 def handle_bitlocker(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:

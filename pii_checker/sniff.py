@@ -67,6 +67,8 @@ KIND_LABELS = {
     "chm": "ヘルプ（CHM）",
     "pyinstaller": "Python のプログラムの部品（PyInstaller）",
     "der": "証明書・電子署名（DER）",
+    "stl": "3D モデル（STL）",
+    "mca": "Minecraft のワールド（region）",
     "unknown": "形式不明",
 }
 
@@ -332,6 +334,10 @@ def sniff(blob: Blob) -> str:
         return kind
     if _der_fills_file(head, blob.size):
         return "der"
+    if _is_binary_stl(head, blob.size):
+        return "stl"
+    if region_chunks(blob, head) is not None:
+        return "mca"
     if head[4:8] == b"ftyp":
         brand = head[8:12]
         if brand in (b"heic", b"heix", b"mif1", b"msf1", b"avif", b"heim", b"heis"):
@@ -436,6 +442,62 @@ def _der_fills_file(head: bytes, size: int | None) -> bool:
     if head[1] == 0x83:
         return int.from_bytes(head[2:5], "big") + 5 == size and size > 65535
     return False
+
+
+STL_HEADER = 80  # バイナリの STL: 見出し 80・三角形の数 4・三角形ごとに 50（法線と頂点の小数 12 個・属性 2）
+STL_TRIANGLE = 50
+
+
+def _is_binary_stl(head: bytes, size: int | None) -> bool:
+    """バイナリの STL（3D プリンタ・CAD の形）か。三角形の数から決まる大きさがファイルとちょうど合うかで見分ける。"""
+    if size is None or len(head) < STL_HEADER + 4:
+        return False
+    count = int.from_bytes(head[STL_HEADER : STL_HEADER + 4], "little")
+    return count > 0 and size == STL_HEADER + 4 + STL_TRIANGLE * count
+
+
+REGION_SECTOR = 4096  # Minecraft の region（.mca・.mcr）: 先頭 4KB が塊の置き場の表（1024 個）・次の 4KB が時刻
+REGION_COMPRESSIONS = (1, 2, 3, 4, 127)  # gzip・zlib・無圧縮・LZ4・独自
+
+
+def region_chunks(blob: Blob, head: bytes) -> list[tuple[int, int, int]] | None:
+    """Minecraft の region なら、使っている塊の (番号, 置き場の区画, 区画の数) を返す。違えば None。
+
+    置き場の表の 1024 個がすべて「空」か「表の後ろ・ファイルの中・互いに重ならない区画」を指し、
+    最初の塊の頭（長さ・圧縮の種類）が正しいときだけ region とみなす（乱数や別の形はまず通らない）。
+    """
+    size = blob.size
+    if size is None or size < 2 * REGION_SECTOR or len(head) < 2 * REGION_SECTOR:
+        return None
+    sectors = -(-size // REGION_SECTOR)
+    used = []
+    for i in range(1024):
+        entry = head[i * 4 : i * 4 + 4]
+        offset, count = int.from_bytes(entry[:3], "big"), entry[3]
+        if offset == 0 and count == 0:
+            continue
+        if offset < 2 or count == 0 or offset + count > sectors:
+            return None
+        used.append((i, offset, count))
+    if not used:
+        return None
+    spans = sorted((offset, count) for _, offset, count in used)
+    for (a, n), (b, _) in zip(spans, spans[1:]):
+        if a + n > b:
+            return None
+    first = spans[0][0] * REGION_SECTOR
+    try:
+        with blob.open() as f:
+            f.seek(first)
+            top = f.read(5)
+    except OSError:
+        return None
+    if len(top) < 5:
+        return None
+    length = int.from_bytes(top[:4], "big")
+    if not 1 <= length <= spans[0][1] * REGION_SECTOR or (top[4] & 0x7F) not in REGION_COMPRESSIONS:
+        return None
+    return used
 
 
 def _text_kind(blob: Blob, head: bytes, ext: str) -> str | None:
@@ -560,6 +622,8 @@ def handler_for(kind: str):
         "chm": archive.handle_with_7z_exe,
         "pyinstaller": misc.handle_out_of_scope,
         "der": misc.handle_der,
+        "stl": misc.handle_stl,
+        "mca": misc.handle_region,
         "unknown": misc.handle_unknown,
     }
     return table[kind]

@@ -697,6 +697,201 @@ def handle_der(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     item.notes.append("鍵と署名の値（数のデータ）は検査していない")
 
 
+def handle_stl(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """バイナリの STL（3D プリンタ・CAD の形）。文字を持てるのは先頭 80 バイトの見出しだけなので、そこを読む。
+
+    残りは三角形の頂点の小数の並びで、形式不明の読み方ではエントロピーで「圧縮または暗号化」とみなされて
+    検査不能になっていた（実物の F の検査で 102 件。3D プリンタのプロジェクト（.3mf・.cxprj）の中の .stl も同じ）。
+    """
+    from ..sniff import STL_HEADER
+
+    head = blob.head(STL_HEADER + 4)
+    text = head[:STL_HEADER].rstrip(b"\x00 ")
+    if text:
+        try:
+            col.add_text(text.decode("utf-8"), "見出し", method="STL の見出し")
+        except UnicodeDecodeError:
+            col.add_text(text.decode("cp932", "replace"), "見出し", method="STL の見出し")
+    count = int.from_bytes(head[STL_HEADER:], "little")
+    item.method = f"3D モデル（STL・三角形 {count:,} 個）の見出しを読んだ"
+    item.notes.append("形の数値（三角形の頂点・色の値）は文字を含まないので検査していない")
+
+
+REGION_MAX_CHUNK = 16 * 1024 * 1024  # 塊1つの展開後の上限（ふつうは数 MB 以下。細工した圧縮で膨らみ続けないように）
+NBT_MAX_DEPTH = 512  # Minecraft 自身の入れ子の上限
+NBT_FIXED = {1: 1, 2: 2, 3: 4, 4: 8, 5: 4, 6: 8}  # 数の型の大きさ（byte・short・int・long・float・double）
+NBT_ARRAYS = {7: 1, 11: 4, 12: 8}  # 数の配列の型の1要素の大きさ（byte・int・long の配列）
+# 1つずつ歩く要素の数の上限。実物の塊は展開後でも最大 約 170KB（要素は多くて数万）なので、十分に余裕がある。
+# 細工した塊（空の複合・空の文字が何百万も並ぶもの）で1ファイルの検査が何時間も止まらないようにする
+NBT_MAX_STEPS_CHUNK = 1_000_000
+NBT_MAX_STEPS_FILE = 20_000_000
+# 検査に回す文字の数の上限（1つずつ検出の処理を通すので、要素よりずっと重い）。実物は1ファイル最大 約2.7万・1塊 最大 117
+NBT_MAX_TEXTS_CHUNK = 20_000
+NBT_MAX_TEXTS_FILE = 500_000
+
+
+class NbtTooLarge(ValueError):
+    """NBT の要素が多すぎて、決めた手間の内に読み終えられない。"""
+
+
+def nbt_strings(data: bytes, budget: list[int] | None = None):
+    """NBT（Minecraft のデータの形・大きい順の数）の中の文字の値（TAG_String）だけを順に返す。
+
+    ブロックの並びなどの数の配列を文字として読むと「333333333333」のような並びがマイナンバーの形に当たるので、
+    数の部分は読み飛ばす。項目の名前（キー）は決まった英語なので返さない。形が壊れていれば ValueError。
+    budget（[残り]）を渡すと、ファイル全体で歩ける要素の数をそこから引き、尽きたら NbtTooLarge。
+    """
+    pos = 0
+    end = len(data)
+    steps = NBT_MAX_STEPS_CHUNK
+
+    def take(n: int) -> bytes:
+        nonlocal pos
+        if n < 0 or pos + n > end:
+            raise ValueError("NBT が途中で切れている")
+        chunk = data[pos : pos + n]
+        pos += n
+        return chunk
+
+    def text() -> str:
+        raw = take(int.from_bytes(take(2), "big"))
+        return raw.decode("utf-8", "replace")  # Java の修正 UTF-8 も、ふつうの文字なら UTF-8 と同じ
+
+    # (型, 残りの数) の積み上げで歩く。複合（10）は名前つきの項目が End（0）まで、一覧（9）は同じ型が数だけ並ぶ
+    tag = take(1)[0]
+    if tag != 10:
+        raise ValueError("NBT の先頭が複合の型ではない")
+    text()  # 根の名前
+    stack: list[list[int]] = [[10, -1]]
+    while stack:
+        if len(stack) > NBT_MAX_DEPTH:
+            raise ValueError("NBT の入れ子が深すぎる")
+        steps -= 1
+        if budget is not None:
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise NbtTooLarge("ファイル全体の要素が多すぎる")
+        if steps < 0:
+            raise NbtTooLarge("塊の要素が多すぎる")
+        frame = stack[-1]
+        if frame[0] == 10:
+            tag = take(1)[0]
+            if tag == 0:
+                stack.pop()
+                continue
+            text()  # 項目の名前
+        else:
+            if frame[1] == 0:
+                stack.pop()
+                continue
+            frame[1] -= 1
+            tag = frame[0] - 100  # 一覧は要素の型に 100 を足して積んでいる
+        if tag in NBT_FIXED:
+            take(NBT_FIXED[tag])
+        elif tag in NBT_ARRAYS:
+            take(int.from_bytes(take(4), "big", signed=True) * NBT_ARRAYS[tag])
+        elif tag == 8:
+            s = text()
+            if s:
+                yield s
+        elif tag == 9:
+            inner = take(1)[0]
+            count = int.from_bytes(take(4), "big", signed=True)
+            if count > 0:
+                if inner == 0 or inner > 12:
+                    raise ValueError("NBT の一覧の型が不正")
+                if inner in NBT_FIXED:
+                    take(
+                        count * NBT_FIXED[inner]
+                    )  # 数の一覧は1要素ずつ歩かず、まとめて読み飛ばす（細工で遅くさせない）
+                else:
+                    stack.append([inner + 100, count])
+        elif tag == 10:
+            stack.append([10, -1])
+        else:
+            raise ValueError(f"NBT の型が不正（{tag}）")
+
+
+def handle_region(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """Minecraft のワールドの region（.mca・.mcr）。塊ごとに展開し、中の文字（看板・本・名前など）を検査する。
+
+    塊は gzip・zlib で圧縮されているので、形式不明の読み方ではエントロピーで検査不能になっていた
+    （実物の F の検査で 96 件・git の履歴の中にも同じものがある）。LZ4・独自の圧縮と、別ファイル（.mcc）に
+    置いた大きな塊は読めないので、残ったら一部だけ検査したことにする。
+    """
+    import zlib
+
+    from ..sniff import REGION_SECTOR, region_chunks
+
+    used = region_chunks(blob, blob.head(2 * REGION_SECTOR))
+    if not used:
+        return handle_unknown(ctx, blob, item, col, depth)
+    done = 0
+    skipped: dict[str, int] = {}
+    budget = [NBT_MAX_STEPS_FILE]
+    texts_left = [NBT_MAX_TEXTS_FILE]
+    too_many = "要素が多すぎて読み切れなかった塊"
+    with blob.open() as f:
+        for index, offset, count in used:
+            if budget[0] <= 0:
+                skipped[too_many] = skipped.get(too_many, 0) + 1
+                continue
+            f.seek(offset * REGION_SECTOR)
+            top = f.read(5)
+            length = int.from_bytes(top[:4], "big") if len(top) == 5 else 0
+            kind = top[4] if len(top) == 5 else 0
+            if not 1 <= length <= count * REGION_SECTOR:
+                skipped["壊れた塊"] = skipped.get("壊れた塊", 0) + 1
+                continue
+            if kind & 0x80:
+                skipped["別ファイル（.mcc）に置いた大きな塊"] = skipped.get("別ファイル（.mcc）に置いた大きな塊", 0) + 1
+                continue
+            data = f.read(length - 1)
+            try:
+                if kind in (1, 2):
+                    # 1 は gzip（wbits 31）・2 は zlib。どちらも上限までしか展開しない
+                    raw = zlib.decompressobj(31 if kind == 1 else 15).decompress(data, REGION_MAX_CHUNK)
+                elif kind == 3:
+                    raw = data
+                else:
+                    skipped["LZ4・独自の圧縮の塊"] = skipped.get("LZ4・独自の圧縮の塊", 0) + 1
+                    continue
+            except (OSError, EOFError, zlib.error):
+                skipped["壊れた塊"] = skipped.get("壊れた塊", 0) + 1
+                continue
+            # 同じ文字は塊ごとに1回だけ検査する（別の塊にあれば、その塊の場所でも出す）
+            where = f"塊（チャンク） ({index % 32}, {index // 32})"
+            seen: set[str] = set()
+            try:
+                for s in nbt_strings(raw, budget):
+                    if s not in seen:
+                        if len(seen) >= NBT_MAX_TEXTS_CHUNK or texts_left[0] <= 0:
+                            raise NbtTooLarge("文字の値が多すぎる")
+                        seen.add(s)
+                        texts_left[0] -= 1
+                        col.add_text(s, where, method="region の塊の文字")
+            except NbtTooLarge:
+                if texts_left[0] <= 0:
+                    budget[0] = 0  # 文字の残りが尽きたら、後の塊は読まずに数える
+                skipped[too_many] = skipped.get(too_many, 0) + 1
+                continue
+            except ValueError:
+                # 途中で壊れていても、そこまでに読めた文字は検査した（読めた塊には数えない）
+                skipped["壊れた塊"] = skipped.get("壊れた塊", 0) + 1
+                continue
+            done += 1
+    item.method = f"Minecraft の region の塊（チャンク）を展開して中の文字を読んだ（{done}/{len(used)} 個）"
+    item.notes.append("ブロック・座標などの数値は文字を含まないので検査していない")
+    if skipped:
+        detail = "・".join(f"{k} {n} 個" for k, n in skipped.items())
+        remedy = "ワールドをゲームで開いて保存し直すか、看板・本などを目で確かめる"
+        if done == 0:
+            raise Uncheckable(f"region の塊（チャンク）を1つも最後まで読めなかった（{detail}）。{remedy}")
+        raise PartialScan(
+            f"region の塊（チャンク）のうち読めないものがあった（{detail}）。読めた塊は検査した。{remedy}"
+        )
+
+
 def handle_bitlocker(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     raise Uncheckable("BitLocker で暗号化されたボリュームのため中身を検査できない（回復キーで解除してから再検査）")
 

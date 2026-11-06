@@ -119,7 +119,7 @@ def test_terminal_rewrites_line_and_fits_width(clock, monkeypatch):
 
     monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24)))
     store, out = FakeStore(), Out(tty=True)
-    store.biggest = ("D:/共有/" + "とても長い名前" * 10 + ".zip", 5 * 1024**2)
+    store.biggest = ("D:/共有/" + "とても長い名前" * 10 + ".zip", 500 * 1024**2)
     p = cli._ProgressPrinter(store, FakeRunner(), out)
     p.tick()
     clock[0] += cli.STALL_SECONDS
@@ -129,7 +129,7 @@ def test_terminal_rewrites_line_and_fits_width(clock, monkeypatch):
     assert all(cli._display_width(w) <= 79 for w in writes)
     # 80 桁では件数の側を短くして、名前を縮めて添える
     assert writes[1].startswith("[検査] 0/10 ファイル  大きなファイルを検査中: とても")
-    assert "…" in writes[1] and writes[1].endswith(".zip（5.0 MB）")
+    assert "…" in writes[1] and writes[1].endswith(".zip（500.0 MB）")
     assert "検出あり" not in writes[1]
     store.done += 1
     clock[0] += 1
@@ -137,8 +137,22 @@ def test_terminal_rewrites_line_and_fits_width(clock, monkeypatch):
     last = out.getvalue().split("\r")[-1]
     assert cli._display_width(last) == cli._display_width(writes[1])  # 空白で埋めて同じ幅
     assert "大きなファイル" not in last
+    monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((40, 24)))
     p.final()
-    assert out.getvalue().endswith("\n")
+    final = out.getvalue().split("\r")[-1]
+    assert final.endswith("\n")
+    assert final.rstrip().endswith("簡易 0")  # 最後の行は幅で切らない
+
+
+def test_small_file_is_not_called_big(clock):
+    """止まっているのが小さなファイル（遅いネットワークなど）なら「大きな」と言わない。"""
+    store, out = FakeStore(), Out(tty=False)
+    store.biggest = ("//nas/共有/tiny.txt", 120)
+    p = cli._ProgressPrinter(store, FakeRunner(), out)
+    p.tick()
+    clock[0] += cli.STALL_SECONDS
+    p.tick()
+    assert p._hint_text() == "  検査中: tiny.txt（120 B）"
 
 
 def test_helpers():

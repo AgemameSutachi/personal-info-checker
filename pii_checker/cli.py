@@ -60,6 +60,7 @@ EPILOG = r"""使用例:
 
 STALL_SECONDS = 60  # 済んだ数がこれだけ進まなければ、検査中の一番大きなファイルを添える
 LOG_INTERVAL = 60.0  # 出力が端末でない（ログのファイル・パイプ）とき、1行を足す間隔
+BIG_HINT_BYTES = 100 * 1024**2  # 添え書きで「大きなファイル」と呼ぶ大きさ
 
 
 def _progress_line(s: dict, phase: str) -> str:
@@ -153,7 +154,9 @@ class _ProgressPrinter:
     def _hint_text(self, name_limit: int = 40) -> str:
         if not self.hint:
             return ""
-        return f"  大きなファイルを検査中: {_short_name(self.hint[0], name_limit)}（{_size_text(self.hint[1])}）"
+        # 小さなファイルで止まっている（遅いネットワークなど）ときは「大きな」と言わない
+        label = "大きなファイルを検査中" if self.hint[1] >= BIG_HINT_BYTES else "検査中"
+        return f"  {label}: {_short_name(self.hint[0], name_limit)}（{_size_text(self.hint[1])}）"
 
     def _columns(self) -> int:
         return max(20, shutil.get_terminal_size((120, 24)).columns - 1)
@@ -200,7 +203,8 @@ class _ProgressPrinter:
         phase = "中断" if self.runner.error else "完了"
         line = _progress_line(self.store.progress(self.runner.job_id), phase)
         if self.tty:
-            self._rewrite(line, "\n")
+            # 最後の行は切らない（以後は書き換えないので、折り返しても全部読めるほうがよい）
+            self.out.write("\r" + line + " " * max(0, self.width - _display_width(line)) + "\n")
         else:
             self.out.write(line + "\n")
         self.out.flush()

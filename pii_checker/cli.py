@@ -80,6 +80,9 @@ def _run_until_done(store: Store, runner: JobRunner) -> None:
         runner.cancel()
         runner.wait()
     sys.stdout.write(_progress_line(store, runner, final=True) + "\n")
+    # 前の検査の残りの片付けは裏で走る。コマンドはこの後すぐ終わるので、終わるまで待つ（待たないと、短い検査を
+    # 繰り返したときに毎回途中で止まって片付かない・評価の指摘）
+    runner.wait_cleanup()
     if runner.error:
         # 自分から止めた理由（NAS への接続が切れた・ドライブの満杯等）。再開の仕方は最後に出す
         print(f"検査を止めました: {runner.error}")

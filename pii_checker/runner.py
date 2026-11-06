@@ -244,6 +244,10 @@ class JobRunner:
     def cancel(self) -> None:
         self._stop.set()
 
+    def wait_cleanup(self, timeout: float | None = None) -> None:
+        """裏で走っている一時フォルダの片付けが終わるのを待つ（すぐ終わるプロセス（CLI）の終わりに使う）。"""
+        self._cleanup.wait(timeout)
+
     def wait(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout)

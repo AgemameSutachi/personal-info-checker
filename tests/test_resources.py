@@ -152,10 +152,12 @@ def test_run_starts_scanning_before_cleanup_finishes(tmp_path, monkeypatch):
     import threading
 
     release = threading.Event()
+    begun = threading.Event()
     events = []
 
     def slow_cleanup(dirs, no_mark_grace=600.0):
         events.append("cleanup-start")
+        begun.set()
         release.wait(10)
         events.append("cleanup-end")
         return 0
@@ -168,6 +170,7 @@ def test_run_starts_scanning_before_cleanup_finishes(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "_low_space", lambda: False)
 
     def fake_scan():
+        begun.wait(5)  # 片付けのスレッドが走り出してから記録する（記録の順の揺れを無くす）
         events.append("scan")
         release.set()  # 検査が始まってから片付けを終わらせる（待っていたらここに来ない）
 

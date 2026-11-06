@@ -1253,10 +1253,13 @@ _RE_DATE_PREFIX_12 = re.compile(r"(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[1
 _RE_DATE_NUMBERS = re.compile(r"[0-9]+|元")
 _NUMERIC_CHARS = frozenset("0123456789.+-:/,")
 _RE_NUMBER_CHUNK_SPLIT = re.compile(r"[\s,]+")
-# 16進のダンプの行（番地＋2桁の組が8つ以上「0000030  36 32 34 4B …」か、4桁の組が4つ以上「00000030: 3632 344b …」）
+# 16進のダンプの行。od・hexdump の「0000030  36 32 34 4B …」（番地7〜8桁＋2桁の組が8つ以上）と
+# xxd の「00000030: 3632 344b …」（番地8桁＋コロン＋4桁の組が4つ以上）。番地は16の倍数なので末尾が0
+# （「2024 11 07 12 30 …」のような年と2桁の数の並びに当たらないよう、番地の桁と末尾を絞る）
 _RE_DUMP_LINE = re.compile(
-    r"\s*[0-9A-Fa-f]{4,8}:?(?:(?:[ \t]+[0-9A-Fa-f]{2}){8,}|(?:[ \t]+[0-9A-Fa-f]{4}){4,})(?![0-9A-Fa-f])"
+    r"[ \t]*(?:[0-9A-Fa-f]{6,7}0(?:[ \t]+[0-9A-Fa-f]{2}){8,}|[0-9A-Fa-f]{7}0:(?:[ \t]+[0-9A-Fa-f]{4}){4,})(?![0-9A-Fa-f])"
 )
+_DUMP_LINE_MAX = 200
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
@@ -1356,7 +1359,8 @@ def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
 
 
 def _across_number_lines(text: str, start: int, end: int) -> bool:
-    """検出が改行をまたいでいて、その前の行か後ろの行が数だけの行か（1行に数が1つずつ並ぶ一覧の一部）。
+    """検出が改行をまたいでいて、検出の始まる行の1つ前の行か、終わる行の1つ後ろの行が数だけの行か
+    （1行に数が1つずつ並ぶ一覧の一部）。
 
     Perl の unicore の表（「1132↵1133↵1134」）・Excel のシートの XML を文にしたもの（セルの値が1行ずつ）では、
     4桁の行が3つ続くと区切りの改行をはさんで12桁の番号の形になる。1行ずつ書いた番号（前後が数の行でない）は残す。
@@ -1381,13 +1385,26 @@ def _in_dump_or_mesh_line(text: str, start: int) -> bool:
     """検出の始まる行が、16進のダンプの行か Wavefront OBJ の要素の行か。
 
     - ダンプ（od・hexdump・xxd の出力をログに貼ったもの）: 右の文字の欄「624K000135004120」に数字が並ぶと、
-      左の16進の欄と同じ中身が12桁の番号の形に見える（実物の検査の見本で 1,322 件中 約600件）
+      左の16進の欄と同じ中身が12桁の番号の形に見える（見本のダンプの貼られたログ1つで 106 件）
     - OBJ の面・頂点の行「f 1074 1076 1075」: 4桁の数が3つ空白で並ぶと、区切りつきの12桁の形になる
+    どちらの行も短いので、前後 _DUMP_LINE_MAX 文字の中に行の端が無い行は見ない
+    （改行の無い長い本文で、検出ごとに行全体をなめて二乗の遅さにならないため）。
     """
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", start)
-    line = text[line_start : line_end if line_end >= 0 else len(text)]
-    return bool(_RE_DUMP_LINE.match(line) or _RE_OBJ_LINE.fullmatch(line.strip()))
+    line_start = text.rfind("\n", max(0, start - _DUMP_LINE_MAX), start) + 1
+    if line_start == 0 and start > _DUMP_LINE_MAX:
+        return False
+    line_end = text.find("\n", start, start + _DUMP_LINE_MAX)
+    if line_end < 0:
+        if len(text) > start + _DUMP_LINE_MAX:
+            return False
+        line_end = len(text)
+    if _RE_DUMP_LINE.match(text, line_start, line_end):
+        return True
+    while line_start < line_end and text[line_start] in " \t":
+        line_start += 1
+    while line_end > line_start and text[line_end - 1] in " \t\r":
+        line_end -= 1
+    return bool(_RE_OBJ_LINE.fullmatch(text, line_start, line_end))
 
 
 def _era_date_is_broken(text: str, h: Hit) -> bool:

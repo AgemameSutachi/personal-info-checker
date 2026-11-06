@@ -781,13 +781,7 @@ class Collector:
         for c_idx, v in enumerate(values):
             if not v:
                 continue
-            # 12桁でないセル（表の大半）は今の判定を引くだけにする（1セルごとの呼び出しが重い）
-            if col_digits is None:
-                id_column = False
-            elif len(v) == 12:
-                id_column = col_digits.observe(c_idx, v)
-            else:
-                id_column = col_digits.verdict.get(c_idx, False)
+            id_column = False if col_digits is None else col_digits.cell(c_idx, v)
             if c_idx < n_headers:
                 header = headers[c_idx]
                 has_category = sure[c_idx] if sure is not None else bool(header and detectors.header_category(header))
@@ -823,7 +817,7 @@ class Collector:
 class _ColumnDigits:
     """表の列ごとに、12桁の数だけのセルの異なる値と、そのうち検査数字が合う数を数え、番号の列かを決める。
 
-    表（add_table・add_records の1回の呼び出し）ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで。
+    表（add_table・add_records の1回の呼び出し。Access の32ビットの補助の経路では表の名前）ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで。
     番号の列と決めた後も、検査数字の合う値が COLUMN_ID_RELEASE_STREAK 個続いたら判定を解いて数え直す
     （それまでに捨てた分は戻らない。列の途中から本物に変わっても、捨てるのは切り替わりの数個で済む）。
     """
@@ -837,6 +831,15 @@ class _ColumnDigits:
         self._last: dict[int, str] = {}  # 列ごとの直前の12桁の値
         self._streak: dict[int, int] = {}  # 列ごとの、検査数字の合う値（直前と違う値）が続いた数
         self.verdict: dict[int, bool] = {}  # 列ごとの今の判定（番号の列なら True）。12桁でないセルはこれを引くだけ
+
+    def cell(self, c_idx: int, v: str) -> bool:
+        """表のセルを1つ見て、番号の列か（id_column に渡す値）を返す。
+
+        12桁でないセル（表の大半）は今の判定を引くだけにする（1セルごとに observe を呼ぶと重い）。
+        """
+        if len(v) == 12:
+            return self.observe(c_idx, v)
+        return self.verdict.get(c_idx, False)
 
     def observe(self, c_idx: int, v: str) -> bool:
         """セルを1つ見て、この列が今のところ番号の列か（手がかり語の無い12桁のマイナンバーを落とすか）を返す。"""

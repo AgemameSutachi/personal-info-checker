@@ -122,6 +122,56 @@ def test_records_path_also_drops():
     assert _low_my_number(rows, records=True) == 2
 
 
+def _run_fake_helper32(tmp_path, monkeypatch, messages: list[dict]) -> ItemResult:
+    """32bit の補助（access32_helper）の代わりに、決めた JSON Lines を出すだけの台本で _read_access_helper32 を通す。"""
+    import json
+    from types import SimpleNamespace
+
+    from pii_checker.formats import database
+
+    data = tmp_path / "lines.jsonl"
+    data.write_text("\n".join(json.dumps(m, ensure_ascii=False) for m in messages) + "\n", encoding="utf-8")
+    script = tmp_path / "fake_helper.py"
+    script.write_text(
+        "import sys\nsys.stdin.read()\nsys.stdout.buffer.write(open(sys.argv[1], 'rb').read())\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(database, "find_helper32", lambda configured: [sys.executable, str(script), str(data)])
+    ctx = SimpleNamespace(
+        options=SimpleNamespace(access_helper32=None, max_rows_per_table=0), password_candidates=lambda: []
+    )
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    database._read_access_helper32(ctx, "dummy.mdb", col, item, 0, "t")
+    return item
+
+
+def _helper32_messages(tables: dict[str, tuple[list[str], list[list]]]) -> list[dict]:
+    msgs: list[dict] = [{"type": "open", "driver": "試験", "method": "試験"}]
+    for name, (columns, rows) in tables.items():
+        msgs.append({"type": "table", "name": name, "columns": columns})
+        msgs += [{"type": "row", "table": name, "row": i, "values": v} for i, v in enumerate(rows, start=1)]
+    msgs.append({"type": "done"})
+    return msgs
+
+
+def test_helper32_path_also_drops(tmp_path, monkeypatch):
+    """Access を32ビットの補助で読んだ表でも、番号の列の手がかり語の無い12桁を落とす（ほかの読み方と同じ）。"""
+    ids = _id_column(300, 10)
+    item = _run_fake_helper32(
+        tmp_path, monkeypatch, _helper32_messages({"races": (["race_id", "rank"], [[v, 1] for v in ids])})
+    )
+    assert item.conf_counts.get("my_number:low", 0) == 2, item.conf_counts
+
+
+def test_helper32_judges_each_table_separately(tmp_path, monkeypatch):
+    """32ビットの補助の経路でも、表ごとに判定する（前の表の番号の列の判定を、同じ列番号の次の表へ持ち越さない）。"""
+    ids = _id_column(300, 10)
+    nums = _valid_numbers(30, 7)
+    msgs = _helper32_messages({"races": (["race_id"], [[v] for v in ids]), "members": (["x"], [[v] for v in nums])})
+    item = _run_fake_helper32(tmp_path, monkeypatch, msgs)
+    assert item.conf_counts.get("my_number:low", 0) == 2 + 30, item.conf_counts
+
+
 def test_new_table_resets_the_judgement():
     """表が変われば判定をやり直す（前の表の番号の列の判定を持ち越さない）。"""
     item = ItemResult(path="t", kind="", status=Status.PENDING)

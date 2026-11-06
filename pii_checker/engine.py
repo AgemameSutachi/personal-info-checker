@@ -835,6 +835,9 @@ class _ColumnDigits:
         """セルを1つ見て、この列が今のところ番号の列か（手がかり語の無い12桁のマイナンバーを落とすか）を返す。"""
         if not (len(v) == 12 and RE_TWELVE_DIGITS.fullmatch(v)):
             return self.verdict.get(c_idx, False)
+        if c_idx in self._decided and not self.verdict[c_idx]:
+            # 本物の列と固まった: 解く判定は番号の列にしか効かないので、検査数字の計算を省く
+            return False
         valid = None
         if self._last.get(c_idx) != v:
             self._last[c_idx] = v

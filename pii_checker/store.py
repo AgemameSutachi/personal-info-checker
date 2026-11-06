@@ -141,6 +141,27 @@ REUSABLE_STATUSES = (Status.SCANNED, Status.PARTIAL, Status.OUT_OF_SCOPE)
 SAVE_RECHECK_SECONDS = 0.5
 
 
+def db_text(value):
+    """DB へ書く文字を、UTF-8 にできる形にする（文字でなければそのまま返す）。
+
+    書庫の中の名前などに、対になっていないサロゲート（surrogateescape で読んだ壊れたバイト・NTFS の不正な名前）が
+    混ざると、sqlite3 が UnicodeEncodeError を出して、そのファイルの結果を丸ごと書けなかった（実物の F の検査で、
+    7.8GB の zip の約1時間分の結果が「検査に失敗した」になった）。壊れたバイトは \\xNN の形で、それ以外の
+    はぐれたサロゲートは U+FFFD にして残す。
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        pass
+    try:
+        return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+
+
 def _add_counts(acc: dict[str, int], text: str | dict | None) -> None:
     """「種類:確度」→件数（JSON の文字列か dict）を acc に足す。"""
     d = json.loads(text) if isinstance(text, str) else (text or {})
@@ -614,21 +635,20 @@ class Store:
             _add_counts(conf_total, it.conf_counts)
         distinct = dict(result.distinct_counts or {})
         mark = reportflags.compute(conf_total, distinct)
-        with self.tx() as c:
-            c.execute(
-                "DELETE FROM items WHERE job_id=? AND top_path=?",
-                (job_id, result.top_path),
-            )
-            c.execute(
-                "DELETE FROM findings WHERE job_id=? AND top_path=?",
-                (job_id, result.top_path),
-            )
-            for seq, it in enumerate(result.items):
+
+        def write(clean) -> None:
+            """1つのトランザクションで書く。clean は文字の直し（None ならそのまま書く）。"""
+            with self.tx() as c:
                 c.execute(
-                    "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                    " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
+                    "DELETE FROM items WHERE job_id=? AND top_path=?",
+                    (job_id, result.top_path),
+                )
+                c.execute(
+                    "DELETE FROM findings WHERE job_id=? AND top_path=?",
+                    (job_id, result.top_path),
+                )
+                for seq, it in enumerate(result.items):
+                    row = (
                         job_id,
                         result.top_path,
                         seq,
@@ -647,11 +667,14 @@ class Store:
                         it.allowed,
                         json.dumps(it.distinct_counts or {}, ensure_ascii=False),
                         json.dumps(it.rule_counts or {}, ensure_ascii=False),
-                    ),
-                )
-                c.executemany(
-                    "INSERT INTO findings VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    [
+                    )
+                    c.execute(
+                        "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime,"
+                        " depth, password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        row if clean is None else tuple(map(clean, row)),
+                    )
+                    rows = [
                         (
                             job_id,
                             result.top_path,
@@ -665,37 +688,46 @@ class Store:
                             f.method,
                         )
                         for f in it.findings
-                    ],
+                    ]
+                    if clean is not None:
+                        rows = [tuple(map(clean, r)) for r in rows]
+                    c.executemany("INSERT INTO findings VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                c.execute(
+                    "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
+                    " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
+                    " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
+                    " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?"
+                    " WHERE job_id=? AND top_path=?",
+                    (
+                        worst.value,
+                        risk,
+                        result.elapsed,
+                        n_findings,
+                        src.get("mtime_ns"),
+                        src.get("change_ns"),
+                        src.get("file_id"),
+                        src.get("sha256"),
+                        engine_sig,
+                        reusable,
+                        time.time(),
+                        None if not src else int(bool(src.get("atime_kept"))),
+                        json.dumps(distinct, ensure_ascii=False),
+                        reportflags.encode(mark["flags"]),
+                        mark["people_n"],
+                        mark["people_type"],
+                        time.perf_counter() - save_started,
+                        wall_elapsed,
+                        job_id,
+                        result.top_path,
+                    ),
                 )
-            c.execute(
-                "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
-                " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
-                " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
-                " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?"
-                " WHERE job_id=? AND top_path=?",
-                (
-                    worst.value,
-                    risk,
-                    result.elapsed,
-                    n_findings,
-                    src.get("mtime_ns"),
-                    src.get("change_ns"),
-                    src.get("file_id"),
-                    src.get("sha256"),
-                    engine_sig,
-                    reusable,
-                    time.time(),
-                    None if not src else int(bool(src.get("atime_kept"))),
-                    json.dumps(distinct, ensure_ascii=False),
-                    reportflags.encode(mark["flags"]),
-                    mark["people_n"],
-                    mark["people_type"],
-                    time.perf_counter() - save_started,
-                    wall_elapsed,
-                    job_id,
-                    result.top_path,
-                ),
-            )
+
+        try:
+            write(None)
+        except UnicodeEncodeError:
+            # 名前などに UTF-8 にできない文字が混ざっていた（db_text の説明）。巻き戻ったので、直した文字で書き直す。
+            # ふつうの保存では全部の値を通す手間（検出 100 万件で約2秒・実測）をかけないよう、失敗したときだけ直す
+            write(db_text)
         # 上で書いた値は確定の書き込みを含まない。検出が数百万件あると確定の重さが効くので、遅かったときだけ
         # 確定まで含めた時間で書き直す（速い保存のたびに確定を1回増やすと、数万ファイルで無視できない）
         total = time.perf_counter() - save_started

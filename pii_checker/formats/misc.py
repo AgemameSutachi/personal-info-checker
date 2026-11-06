@@ -544,6 +544,74 @@ def handle_out_of_scope(ctx: ScanContext, blob: Blob, item: ItemResult, col: Col
     raise OutOfScope(f"{item.kind}は文字情報を持たない形式として対象外（中の映像・音声・プログラムは検査していない）")
 
 
+# numpy の型の文字のうち、数（真偽・整数・小数・複素数・日時）を表すもの
+NPY_NUMERIC_KINDS = set("biufcmM?")
+NPY_CHUNK_BYTES = 4 * 1024 * 1024
+
+
+def handle_npy(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """numpy の .npy（.npz の中身も）。数の配列は文字を含まないので対象外、文字の配列は要素ごとに検査する。
+
+    以前は形式不明として扱い、中身の数がばらけていると「圧縮または暗号化されている」で検査不能になっていた
+    （実物の F の検査で 628 件）。型の分からないもの（object の pickle・構造体の型）は今までどおり生データ走査。
+    """
+    import ast
+    import struct
+
+    head = blob.head(65536)
+    major = head[6]
+    if major == 1:
+        (hlen,) = struct.unpack("<H", head[8:10])
+        start = 10
+    else:
+        (hlen,) = struct.unpack("<I", head[8:12])
+        start = 12
+    try:
+        raw = head[start : start + hlen].decode("utf-8" if major >= 3 else "latin1")
+        meta = ast.literal_eval(raw.strip())
+        descr, shape = meta["descr"], tuple(meta["shape"])
+    except Exception:  # noqa: BLE001  頭が壊れている・読めない形は、形式不明と同じ読み方へ
+        return handle_unknown(ctx, blob, item, col, depth)
+    if not isinstance(descr, str) or len(descr) < 2:
+        return handle_unknown(ctx, blob, item, col, depth)  # 構造体の型（列の並び）
+    order, kind = descr[0], descr[1]
+    count = 1
+    for n in shape:
+        count *= int(n)
+    if kind in NPY_NUMERIC_KINDS:
+        item.method = f"numpy の配列の頭を読んだ（型 {descr}・形 {shape}）"
+        raise OutOfScope(f"数の配列（numpy・型 {descr}・形 {shape}）で、文字を含まない")
+    if kind not in "SU":
+        return handle_unknown(ctx, blob, item, col, depth)  # object（pickle）など
+    width = int(descr[2:] or 0) * (4 if kind == "U" else 1)
+    if width <= 0 or count == 0:
+        item.method = f"numpy の文字の配列（型 {descr}・形 {shape}・要素なし）"
+        return
+    enc = ("utf-32-be" if order == ">" else "utf-32-le") if kind == "U" else None
+    per = max(1, NPY_CHUNK_BYTES // width)
+    index = 0
+    with blob.open() as f:
+        f.seek(start + hlen)
+        while index < count:
+            data = f.read(width * min(per, count - index))
+            if not data:
+                break
+            for off in range(0, len(data) - width + 1, width):
+                cell = data[off : off + width]
+                if enc:
+                    text = cell.decode(enc, "replace").rstrip("\x00")
+                else:
+                    cell = cell.rstrip(b"\x00")
+                    try:
+                        text = cell.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = cell.decode("cp932", "replace")
+                if text:
+                    col.add_text(text, f"要素 {index + 1}", method="numpy の文字の配列")
+                index += 1
+    item.method = f"numpy の文字の配列（型 {descr}・形 {shape}・{index}件）"
+
+
 def handle_unknown(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     head = blob.head(1024 * 1024)
     e = entropy(head)

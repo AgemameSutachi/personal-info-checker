@@ -105,3 +105,24 @@ def test_broken_exif_does_not_stop_scan(tmp_path):
     misc.scan_exif(exif, item, col)
     assert col.texts == [("EXIF コメント", "AB")]
     misc.scan_exif(None, item, col)  # EXIF の無い画像
+
+
+def test_japanese_exif_text_is_decoded():
+    """日本語の撮影者（UTF-8・Shift_JIS）を読み直す（PIL は ASCII の型の値を latin-1 で返すため化けていた）。"""
+    assert misc._exif_text(0x013B, "山田太郎".encode("utf-8").decode("latin-1")) == "山田太郎"
+    assert misc._exif_text(0x013B, "山田太郎".encode("cp932").decode("latin-1")) == "山田太郎"
+    assert misc._exif_text(0x013B, "Café Tokyo") == "Café Tokyo"  # 本物の latin-1 はそのまま
+    assert misc._exif_text(0x9286, b"ASCII\x00\x00\x00" + "山田".encode("cp932")) == "山田"
+    assert misc._exif_text(0x9286, b"JIS\x00\x00\x00\x00\x00" + "山田".encode("cp932")) == "山田"
+    assert misc._exif_text(0x9286, b"\x00" * 8 + "山田".encode("utf-8")) == "山田"
+
+
+def test_japanese_artist_in_jpeg_is_found(tmp_path):
+    """撮影者に UTF-8 で書いた「氏名 山田太郎」を、JPEG に入れて読んでも拾う。小さな画像の説明も EXIF を読んだと書く。"""
+    exif = Image.Exif()
+    exif[0x013B] = "氏名 山田太郎".encode("utf-8")  # PIL は str の日本語を「?」にして書くので、道具と同じくバイト列で書く
+    p = tmp_path / "small.jpg"
+    p.write_bytes(_jpeg(exif, size=(16, 16)))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert dict(item.finding_counts).get("name"), (item.finding_counts, item.method)
+    assert item.method.startswith("写真の情報（EXIF）") and "検査不要" in item.method

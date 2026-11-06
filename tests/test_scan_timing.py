@@ -96,11 +96,47 @@ def test_pause_is_excluded_but_long_file_is_not(tmp_path):
     assert (s["whole"], s["span"]) == (pytest.approx(1.5), pytest.approx(1.5))
 
 
+def test_long_save_shows_detail(tmp_path):
+    """保存の内訳（save_detail）があれば、保存の長いファイルの行に鍵の待ち・確定などを添える。壊れた JSON は黙って外す。"""
+    db = _make_db(tmp_path, [("big", 1.0, 99.0, 1.0, 100.0), ("bad", 1.0, 2.0, 1.0, 101.0)])
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE files SET save_detail=? WHERE top_path='big'",
+        ('{"prep": 0.0, "lock": 97.5, "write": 0.1, "commit": 1.4, "total": 99.0, "cpu": 0.2, "retried": false}',),
+    )
+    con.execute("UPDATE files SET save_detail='{' WHERE top_path='bad'")
+    con.commit()
+    con.close()
+    with scan_timing.open_readonly(str(db)) as con:
+        got = scan_timing.load_rows(con, "J")
+    text = scan_timing.report(scan_timing.summarize(got, workers=1), after=20)
+    big = next(line for line in text.splitlines() if "big" in line)
+    assert "鍵の待ち 97.5" in big and "確定 1.4" in big and "CPU 0.2" in big
+    bad = next(line for line in text.splitlines() if "bad" in line)
+    assert "鍵の待ち" not in bad
+
+
 def test_empty_job_and_old_db(tmp_path):
     db = _make_db(tmp_path, [])
     with scan_timing.open_readonly(str(db)) as con:
         assert scan_timing.load_rows(con, "none") == []
     assert "ありません" in scan_timing.report(scan_timing.summarize([]), after=20)
+
+    # 時間の内訳はあるが保存の内訳（save_detail）の列が無い版の DB も読め、内訳を添えないだけ
+    mid = tmp_path / "mid.sqlite3"
+    con = sqlite3.connect(mid)
+    con.execute(
+        "CREATE TABLE files (job_id TEXT, top_path TEXT, state TEXT, size INTEGER, elapsed REAL, save_elapsed REAL,"
+        " wall_elapsed REAL, scanned_at REAL, n_findings INTEGER)"
+    )
+    con.execute("INSERT INTO files VALUES ('J', 'big', 'done', 1, 1.0, 9.0, 1.0, 100.0, 0)")
+    con.commit()
+    con.close()
+    with scan_timing.open_readonly(str(mid)) as con:
+        got = scan_timing.load_rows(con, "J")
+    assert got[0]["save_detail"] is None
+    text = scan_timing.report(scan_timing.summarize(got, workers=1), after=20)
+    assert "big" in text and "鍵の待ち" not in text
 
     old = tmp_path / "old.sqlite3"
     con = sqlite3.connect(old)

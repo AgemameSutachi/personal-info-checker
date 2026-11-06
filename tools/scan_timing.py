@@ -15,6 +15,7 @@ DB は読み取り専用で開くので、検査の途中の DB にも当てて�
 """
 
 import argparse
+import json
 import sqlite3
 import statistics
 import sys
@@ -43,8 +44,10 @@ def load_rows(con: sqlite3.Connection, job_id: str) -> list[sqlite3.Row]:
     cols = {r["name"] for r in con.execute("PRAGMA table_info(files)")}
     if "wall_elapsed" not in cols:
         raise ValueError("この DB は時間の内訳（save_elapsed・wall_elapsed）を記録する前の版です")
+    # 保存の内訳は、記録する前の版の DB では無い（空として読む）
+    detail = "save_detail" if "save_detail" in cols else "NULL AS save_detail"
     return con.execute(
-        "SELECT top_path, size, elapsed, save_elapsed, wall_elapsed, scanned_at, n_findings FROM files"
+        f"SELECT top_path, size, elapsed, save_elapsed, wall_elapsed, scanned_at, n_findings, {detail} FROM files"
         " WHERE job_id=? AND state='done' AND wall_elapsed IS NOT NULL AND scanned_at IS NOT NULL"
         " ORDER BY scanned_at",
         (job_id,),
@@ -98,6 +101,7 @@ def summarize(rows: list, workers: int | None = None, top: int = 10, after: int 
             "save": rows[i]["save_elapsed"] or 0.0,
             "findings": rows[i]["n_findings"],
             "size": rows[i]["size"],
+            "detail": _detail(rows[i]["save_detail"]),
         }
         for i in longest
         if (rows[i]["save_elapsed"] or 0.0) > 0
@@ -109,6 +113,29 @@ def summarize(rows: list, workers: int | None = None, top: int = 10, after: int 
     out["long_save_count"] = len(marks)
     out["wait_after_long_save"] = statistics.median(waits[j] for j in following) if following else None
     return out
+
+
+def _detail(text: str | None) -> dict | None:
+    """save_detail の JSON を読む。無い・壊れているときは None（内訳を出さないだけで集計は止めない）。"""
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _detail_text(d: dict | None) -> str:
+    """保存の内訳を1行にする（鍵の待ち・書き込み・確定・CPU）。"""
+    if not d:
+        return ""
+    parts = [f"{label} {float(d.get(key) or 0.0):.1f}" for key, label in _DETAIL_LABELS]
+    return "（" + "・".join(parts) + " 秒" + ("・文字を直して書き直し" if d.get("retried") else "") + "）"
+
+
+# save_detail のキーと、人が読む名前
+_DETAIL_LABELS = (("lock", "鍵の待ち"), ("write", "書き込み"), ("commit", "確定"), ("cpu", "CPU"))
 
 
 def _fmt(sec: float | None) -> str:
@@ -142,7 +169,9 @@ def report(s: dict, after: int) -> str:
     if s["long_saves"]:
         lines.append("保存の長いファイル:")
         for r in s["long_saves"]:
-            lines.append(f"  {r['save']:8.1f} 秒  検出 {r['findings'] or 0:>9,}  {r['path']}")
+            lines.append(
+                f"  {r['save']:8.1f} 秒  検出 {r['findings'] or 0:>9,}  {r['path']}{_detail_text(r.get('detail'))}"
+            )
     return "\n".join(lines)
 
 

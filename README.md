@@ -133,6 +133,7 @@ cmd\PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
 
 - 「検出なし」は、このツールが拾える形の個人情報が無いという意味です。氏名だけが単独で書かれた文・番地の無い住所・手がかり語の無い番号などは拾えないことがあります。基準は [詳しい説明](docs/詳しい説明.md) にあります
 - 画像の文字読み取り（OCR）は、手書き・かすれ・小さい文字を読み落とすことがあります。日本語の「光学式文字認識」が Windows に入っていないと、画像は検査不能になります
+- iPhone の写真（HEIC）・AVIF は Windows の部品で開きます。Windows に「HEIF 画像拡張機能」（HEIC は「HEVC ビデオ拡張機能」、AVIF は「AV1 Video Extension」も）が無い PC では検査不能になり、入れ方が理由に出ます
 - PST や読み解けない形のダンプは簡易検査（文字として読める部分だけ）、BitLocker のイメージは検査不能になります（一覧に理由つきで残ります）
 
 ## もっと詳しく
@@ -148,3 +149,5 @@ cmd\PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
 ## ライセンス
 
 このリポジトリのコードは MIT License です（[LICENSE](LICENSE)）。配布版は PyMuPDF（GNU AGPL-3.0）などを含むので、配布版の形で配るときは全体として AGPL-3.0 の条件（対応するソースの提供など。ソースはこのリポジトリ）に従ってください。同梱の部品（7-Zip・Java・Jackcess など）のライセンスと全文は、配布版の `THIRD-PARTY-LICENSES.txt` にあります（AGPL-3.0 の全文は [licenses/AGPL-3.0.txt](licenses/AGPL-3.0.txt)）。
+
+Python で動かすときに任意で入れられる pillow-heif（`pip install pillow-heif`。Windows の拡張が無くても HEIC を読める）は、配布の wheel が x265（GPLv2）などを含み約 28MB あるため、配布版には入れていません（配布版の大きさは増えません）。

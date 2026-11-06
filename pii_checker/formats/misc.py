@@ -283,6 +283,38 @@ def markup_to_text(src: str) -> str:
     return html.unescape(s)
 
 
+# 文書の XML（Word 2003 の XML・Office・XHTML）の印。1つの文が小さな要素（w:t など）に分かれるので、要素ごとに区切らない
+_DOCUMENT_XML = re.compile(
+    r"<(?:w|a|text|v|o|x):[A-Za-z]|<html\b|urn:schemas-microsoft-com:office|schemas\.openxmlformats\.org|"
+    r"www\.w3\.org/1999/xhtml|urn:oasis:names:tc:opendocument",
+    re.I,
+)
+# 葉の要素（中に要素を持たない）: <名前 属性>値</名前>
+_XML_LEAF = re.compile(r"<([^\s<>/!?]{1,100})(?:\s[^<>]{0,2000})?>([^<>]{1,10000})</\1\s*>")
+
+
+def is_document_xml(src: str) -> bool:
+    return bool(_DOCUMENT_XML.search(src[:65536]))
+
+
+def data_xml_to_text(src: str) -> str:
+    """データの XML（要素名が項目名の形。<電話番号>03-…</電話番号>）から本文を取り出す。
+
+    タグをただ外すと、値どうしが区切りなくつながり（「山田太郎03-1234-5678…」）、項目名も手がかりの語として
+    使えない。葉の要素は「項目名：値」の1行にし、ほかのタグは改行にする。
+    """
+    s = RE_SCRIPT.sub(" ", src)
+
+    def leaf(m: re.Match) -> str:
+        name = m.group(1).rsplit(":", 1)[-1]  # 名前空間の接頭辞は外す
+        value = m.group(2).strip()
+        return f"\n{name}：{value}\n" if value else "\n"
+
+    s = _XML_LEAF.sub(leaf, s)
+    s = RE_TAG.sub("\n", s)
+    return html.unescape(s)
+
+
 def attribute_texts(src: str) -> list[str]:
     """属性値のうち個人情報を含みうるもの（mailto: や長い数字・日本語）を拾う。"""
     out = []
@@ -295,8 +327,14 @@ def attribute_texts(src: str) -> list[str]:
 
 def handle_markup(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     src, enc = decode_text(blob.read_all())
-    item.method = f"タグを除いた本文と属性値（{enc}）"
-    col.add_lines(markup_to_text(src), method="本文")
+    from ..sniff import KIND_LABELS
+
+    if item.kind == KIND_LABELS["xml"] and not is_document_xml(src):
+        item.method = f"要素名を項目名にした本文と属性値（{enc}）"
+        col.add_lines(data_xml_to_text(src), method="本文")
+    else:
+        item.method = f"タグを除いた本文と属性値（{enc}）"
+        col.add_lines(markup_to_text(src), method="本文")
     scan_embedded_base64(ctx, blob, item, src, depth)  # Word 2003 XML の w:binData など
     for v in attribute_texts(src):
         col.add_text(v, "属性値", method="属性値")

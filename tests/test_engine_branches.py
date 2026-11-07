@@ -133,3 +133,69 @@ def test_alternate_stream_copy_failure_is_kept(tmp_path, monkeypatch):
     failed = by_path[str(src) + ":probe"]
     assert failed.depth == 1 and failed.status == Status.UNCHECKABLE
     assert not res.network_lost
+
+
+def _context(tmp_path):
+    top = tmp_path / "outer.zip"
+    top.write_bytes(b"")
+    return engine.ScanContext(str(top), ScanOptions(temp_dir=str(tmp_path)), [])
+
+
+def test_large_nested_item_is_spilled_to_temp_file(tmp_path, monkeypatch):
+    """メモリに置くには大きい内側のファイルは、一時フォルダへ書き出してから検査する（中身は同じに読める）。"""
+    monkeypatch.setattr(engine, "IN_MEMORY_LIMIT", 10)
+    data = f"電話 {PHONE}\n".encode("utf-8")
+    ctx = _context(tmp_path)
+    try:
+        item = ctx.scan_nested("outer.zip!inner.txt", data=data)
+        assert item.status == Status.SCANNED, item.reason
+        assert "phone" in item.finding_counts
+        spilled = [os.path.join(ctx.tmpdir, n) for n in os.listdir(ctx.tmpdir) if n != engine.OWNER_MARK]
+        assert [open(p, "rb").read() for p in spilled] == [data]
+    finally:
+        ctx.cleanup()
+
+
+def test_large_nested_item_without_temp_space_is_uncheckable(tmp_path, monkeypatch):
+    """書き出す空きが無ければ、その1件だけを理由つきの「検査不能」で残し、例外で残りの中身を止めない。"""
+    monkeypatch.setattr(engine, "IN_MEMORY_LIMIT", 10)
+
+    def short(folder, need, what="一時フォルダ"):
+        raise safeio.TempSpaceShort("一時フォルダの空きが足りない")
+
+    monkeypatch.setattr(safeio, "ensure_free", short)
+    ctx = _context(tmp_path)
+    try:
+        item = ctx.scan_nested("outer.zip!inner.txt", data=b"x" * 20, depth=2)
+        assert item.status == Status.UNCHECKABLE
+        assert "空きが足りない" in item.reason
+        assert (item.size, item.depth) == (20, 2)
+        assert ctx.items == [item]
+    finally:
+        ctx.cleanup()
+
+
+def test_blob_as_path_writes_memory_blob_with_extension(tmp_path):
+    """外部の道具に渡すため、メモリ上の中身は拡張子つきの一時ファイルに書き出す（suffix の指定が優先）。"""
+    ctx = _context(tmp_path)
+    try:
+        blob = engine.Blob(display="outer.zip!db/顧客.MDB", data=b"\x00\x01Standard Jet DB")
+        p = ctx.blob_as_path(blob)
+        assert p.endswith(".mdb") and os.path.dirname(p) == ctx.tmpdir
+        assert open(p, "rb").read() == blob.data
+        assert ctx.blob_as_path(blob, suffix=".accdb").endswith(".accdb")
+    finally:
+        ctx.cleanup()
+
+
+def test_blob_as_path_returns_real_file_path(tmp_path):
+    """実ファイルならそのパスを返す（書き出さない）。240文字以上なら Windows の長いパスの形にする。"""
+    ctx = _context(tmp_path)
+    short_path = str(tmp_path / "a.mdb")
+    assert ctx.blob_as_path(engine.Blob(display=short_path, path=short_path)) == short_path
+    long = str(tmp_path / ("d" * 120) / ("e" * 120) / "a.mdb")
+    got = ctx.blob_as_path(engine.Blob(display=long, path=long))
+    assert got == engine.long_path(long)
+    if os.name == "nt":
+        assert got.startswith("\\\\?\\")
+    assert ctx._tmp is None  # 一時フォルダも作らない

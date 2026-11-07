@@ -231,6 +231,12 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("https://cdn.example.com/public/123456789018_3fa9c2.jpg", "my_number"),
         ('src="http://192.0.2.10/a/b/123456789018"', "my_number"),
         ("見本 ftp://u:p@192.0.2.10:21/a-b_c~d/%E3%81%82/123456789018", "my_number"),
+        # AWS の ARN のアカウント番号の欄（IAM のポリシー・CloudFormation・ログの JSON・URL のパスの中）
+        ("arn:aws:iam::123456789018:role/admin", "my_number"),
+        ('"RoleArn": "arn:aws:iam::123456789018:role/x"', "my_number"),
+        ("arn:aws:lambda:ap-northeast-1:123456789018:function:hello", "my_number"),
+        ("arn:aws-us-gov:sns:us-gov-west-1:123456789018:topic", "my_number"),
+        ("https://console.aws.amazon.com/x/arn:aws:iam::123456789018:role/x", "my_number"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -275,6 +281,13 @@ def test_numeric_data_false_positive(text, pii_type):
         ("mailto:a@b.jp 123456789018", "my_number"),
         ("C:\\Users\\123456789018\\a.txt", "my_number"),
         ("個人番号 https://a.jp/123456789018", "my_number"),  # 語があれば（語の届く近さなら）確度 高 で残る
+        # ARN でも、アカウントの欄でないもの（S3 の空の欄の後の資源の名前）・後ろが「:」でないもの・
+        # 「arn」の前に英数字が続くもの・語があるものは残す
+        ("arn:aws:s3:::123456789018", "my_number"),
+        ("arn:aws:iam::123456789018 role", "my_number"),
+        ("xarn:aws:iam::123456789018:role/x", "my_number"),
+        ("arn:gcp:iam::123456789018:role/x", "my_number"),
+        ("個人番号 arn:aws:iam::123456789018:role/x", "my_number"),
         # 電話・カードの形は、隣に長い連続があっても今までどおり（語があっても同じ規則名で出るため）
         ("TEL 09012345678 ID 1234567890123456789012", "phone"),
         ("090-1234-5678 1234567890123456789012", "phone"),

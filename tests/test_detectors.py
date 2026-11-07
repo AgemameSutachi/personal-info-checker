@@ -182,6 +182,7 @@ def test_shape_filter_keeps_real_ones(text, expected):
         # 英字の頭のついたコード（大量保有報告の保有者名の口座のコード）
         ("SCB HK PROP-JP123456789018（常任代理人）", "my_number"),
         ("JP123456789018", "my_number"),
+        ("ID123456789018", "my_number"),  # 「NO」「ID」の直後に直接つなげたものも落ちる（文書に書いた見落とし）
         # 和暦の形: 英数字の直後の1文字の元号・小数へ続く・月日がありえない
         ("532637H 10.3-13.0 14.0", "birthdate"),
         ("H 10.3-13.0", "birthdate"),

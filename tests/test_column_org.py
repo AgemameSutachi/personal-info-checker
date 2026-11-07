@@ -53,10 +53,71 @@ def test_company_column_lowers_plain_company_names():
 
 
 def test_company_column_by_records():
-    """列名の分かっている表（データベース・parquet の経路）でも同じ。"""
+    """列名の分かっている表（データベース・parquet の経路）では先頭の行を先読みして判定するので、判定の前の社名も 低。"""
     values = MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55]
     got = _names(_rows("name", values), records=True)
-    assert got.get("name:low", 0) == 55 - (COLUMN_ORG_MIN_DISTINCT - 1 - 5), got
+    assert got == {"name:low": 55}, got
+
+
+def test_records_person_column_stays_medium():
+    """先読みしても、人の名前だけの列は 中 のまま（名簿の先頭に法人が数件あっても下げない）。"""
+    got = _names(_rows("氏名", MARKED_COMPANIES[:2] + PERSONS), records=True)
+    assert got == {"name:medium": len(PERSONS)}, got
+
+
+def test_records_small_table_is_not_judged():
+    """先読みで表の終わりまで読んでも、異なる値が 50 個に満たなければ判定しない。"""
+    got = _names(_rows("name", MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:40]), records=True)
+    assert got == {"name:medium": 40}, got
+
+
+def test_records_prefetch_keeps_row_keys():
+    """先読みで行の反復子の「今の行」が進んでも、対処のための位置の鍵は行ごとに正しい（DB・ダンプの経路）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+    col.collect_positions, col.pos_layout, col.pos_sheet = True, "sqlite", "t"
+    cur = [0]
+    col.row_key = lambda r: cur[0]
+
+    def rows():
+        for i, p in enumerate(PERSONS):
+            cur[0] = 1000 + i  # 呼び出し側が持つ「今の行」（データベースの rowid など）
+            yield [p, f"user{i}@example.com"]
+
+    col.add_records(["氏名", "mail"], rows(), lambda r, c: f"R{r}C{c + 1}")
+    got = sorted(arr[i] for (_, t, _), arr in col.positions.items() if t == "email" for i in range(0, len(arr), 4))
+    assert got == [1000 + i for i in range(len(PERSONS))], got
+    assert col.row_key(5) == cur[0]  # 先読みの間だけの差し替えを元に戻している
+
+
+def test_records_prefetch_error_scans_read_rows():
+    """先読みの途中で読み取りが失敗しても、読めた行を検査してから同じ例外を出す（今までどおり）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+
+    def rows():
+        for p in PERSONS[:10]:
+            yield [p]
+        raise OSError("壊れた行")
+
+    try:
+        col.add_records(["氏名"], rows(), lambda r, c: f"R{r}C{c + 1}")
+    except OSError as e:
+        assert str(e) == "壊れた行"
+    else:
+        raise AssertionError("例外が出なかった")
+    assert item.conf_counts.get("name:medium", 0) == 10, item.conf_counts
+
+
+def test_records_prefetch_is_bounded():
+    """氏名の列が判定に届かなくても、先読みは上限の行数で止める（残りは流しながら検査する）。"""
+    orgs_rows = [[f"{i}", "山田太郎"] for i in range(engine.COLUMN_ORG_PREFETCH_ROWS + 500)]
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col._col_orgs = engine._ColumnOrgs()
+    head, _, _, rest = col._prefetch_org_columns(["code", "氏名"], iter(orgs_rows))
+    assert len(head) == engine.COLUMN_ORG_PREFETCH_ROWS
+    assert len(list(rest)) == 500
 
 
 def test_small_table_is_not_judged():

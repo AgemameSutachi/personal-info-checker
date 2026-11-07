@@ -93,6 +93,11 @@ RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 # 松井の分売 6%・優待 9%・JPX の銘柄 10% があるので 10% にはしない）
 COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
+# 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
+# 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
+# 先読みは行数とセルの文字数の合計で抑える（幅の広い表・長い文の列でメモリを食わないため）
+COLUMN_ORG_PREFETCH_ROWS = 2000
+COLUMN_ORG_PREFETCH_CHARS = 4_000_000
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
 # 表の形で確度を 低 に下げたときに、明細の「検出規則」の末尾へ足す注（なぜ 低 なのかを使い手が引けるように）
 ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
@@ -842,12 +847,70 @@ class Collector:
         headers = list(columns)
         # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
         sure = [bool(h and detectors.header_category(h)) for h in headers]
+        head, keys, error, rest = self._prefetch_org_columns(headers, rows)
         n = 0
-        for r_idx, row in enumerate(rows, start=1):
+        row_key = self.row_key
+        if keys:
+            # 先読みで行の反復子の「今の行」が進んだので、先読みした行の位置の鍵は控えた値を返す
+            self.row_key = lambda r: keys[r - 1]
+        try:
+            for row in head:
+                n += 1
+                values = ["" if v is None else _cell_to_str(v) for v in row]
+                self._table_row(values, n, headers, location_fn, method, sure)
+        finally:
+            if keys:
+                self.row_key = row_key
+        if error is not None:
+            raise error  # 先読みの途中で読み取りが失敗した（読めた行は上で検査した）
+        for row in rest:
             n += 1
             values = ["" if v is None else _cell_to_str(v) for v in row]
-            self._table_row(values, r_idx, headers, location_fn, method, sure)
+            self._table_row(values, n, headers, location_fn, method, sure)
         return n
+
+    def _prefetch_org_columns(self, headers: list[str], rows):
+        """氏名の列があれば先頭の行を先読みし、会社名の列かの判定（_ColumnOrgs）を付けておく。
+
+        戻り値は（先読みした行・その行ごとの位置の鍵・先読みの途中の例外・残りの行の反復子）。
+        先読みは COLUMN_ORG_PREFETCH_ROWS 行・セルの文字数の合計 COLUMN_ORG_PREFETCH_CHARS までで、
+        どの氏名の列も判定が付いたら（異なる値が COLUMN_ORG_MIN_DISTINCT 個に届いたら）止める。
+        位置の鍵（row_key）は行の反復子が進める「今の行」を読むので、1行読むたびに控える。
+        読み取りの例外はここで止め、読めた行を検査してから呼び出し側で出し直す（今までどおり読めた行は検査する）。
+        """
+        rest = iter(rows)
+        name_cols = [i for i, h in enumerate(headers) if h and detectors.header_category(h) == "name"]
+        if not name_cols:
+            return [], [], None, rest
+        orgs = self._col_orgs
+        row_key = self.row_key
+        head: list = []
+        keys: list[int] = []
+        chars = 0
+        error: Exception | None = None
+        while len(head) < COLUMN_ORG_PREFETCH_ROWS and chars < COLUMN_ORG_PREFETCH_CHARS:
+            try:
+                row = next(rest)
+            except StopIteration:
+                break
+            except Exception as e:  # noqa: BLE001 - 読めた行を検査してから出し直す
+                error = e
+                break
+            head.append(row)
+            if row_key is not None:
+                keys.append(row_key(len(head)))
+            chars += sum(len(v) for v in row if isinstance(v, (str, bytes)))
+            settled = True
+            for c in name_cols:
+                v = row[c] if c < len(row) else None
+                if v is not None:
+                    s = _cell_to_str(v)
+                    if s:
+                        orgs.cell(c, headers[c], s)
+                settled = settled and orgs.settled(c)
+            if settled:
+                break
+        return head, keys, error, rest
 
     def _table_row(
         self, values, r_idx, headers, location_fn, method, sure: list[bool] | None = None, header_row: bool = False
@@ -939,6 +1002,15 @@ class _ColumnOrgs:
                 self._decided.add(c_idx)
                 del self._values[c_idx]
         return self.verdict.get(c_idx, False)
+
+    def settled(self, c_idx: int) -> bool:
+        """この列の判定が付いたか（異なる値が COLUMN_ORG_MIN_DISTINCT 個に届いたか・氏名の列でなければ常に付いている）。
+
+        まだ値を1つも見ていない列は付いていない（見出しが氏名かを調べる前なので）。
+        """
+        if self._is_name.get(c_idx) is False or c_idx in self._decided:
+            return True
+        return len(self._values.get(c_idx, ())) >= COLUMN_ORG_MIN_DISTINCT
 
 
 class _ColumnDigits:

@@ -1496,6 +1496,19 @@ def _decimal_adjacent(text: str, start: int, end: int) -> bool:
     )
 
 
+def _after_country_prefix(text: str, start: int) -> bool:
+    """検出の直前が、空白も記号も挟まない大文字の英字2文字（「JP」のような国の頭のついたコード）か。
+
+    大量保有報告の保有者名の口座のコード「…PROP-JP…（12桁）」の12桁がマイナンバーの検査数字に合ったもの
+    （2026-11-07 株のデータ）。人の番号は国の頭につなげて書かない。英字1文字や小文字が前後に続くもの
+    （「a123456789018bc」「10x123456789018」）は、今までどおり拾う。
+    """
+    before = text[max(0, start - 3) : start]
+    if len(before) < 2 or not (before[-2:].isascii() and before[-2:].isalpha() and before[-2:].isupper()):
+        return False
+    return len(before) == 2 or not (before[0].isascii() and before[0].isalnum())
+
+
 def _in_numeric_run(text: str, start: int, end: int, width: int = 30) -> bool:
     """検出と同じ行の前後（各 width 文字）が数字と数の記号だけで、ほかの数の塊が3つ以上・数字が10個以上あるか。
 
@@ -1646,7 +1659,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     16進のダンプの行と OBJ の要素の行の中のもの。マイナンバー（手がかり語なし）のすぐ隣が20桁以上の数字の連続のもの
     （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）。
     カード番号（確度 高 でないもの）の小数の途中のもの。メールアドレスの形の直後に「_＋小文字」が続くもの
-    （識別子の途中で TLD が切れた形・_email_before_identifier）
+    （識別子の途中で TLD が切れた形・_email_before_identifier）。マイナンバー（手がかり語なし）の直前が
+    大文字の英字2文字のもの（国の頭のついたコード「JP」＋12桁・_after_country_prefix）
     """
     out = []
     for h in hits:
@@ -1669,6 +1683,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value))
                 or _beside_long_digit_run(text, h.start, h.end)
                 or _in_url_path(text, h.start, h.end)
+                or _after_country_prefix(text, h.start)
             ):
                 continue
         elif h.rule == "和暦の日付（生年月日の可能性）":

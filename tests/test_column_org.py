@@ -165,3 +165,14 @@ def test_helper32_judges_each_table_separately(tmp_path, monkeypatch):
     got = _helper32_names(tmp_path, monkeypatch, {"brands": companies, "members": members})
     assert got.get("name:low", 0) == 55 - (COLUMN_ORG_MIN_DISTINCT - 1 - 5), got
     assert got.get("name:medium", 0) == (COLUMN_ORG_MIN_DISTINCT - 1 - 5) + 10, got
+
+
+def test_lowered_company_name_notes_why_low():
+    """会社名の列のせいで 低 にした明細には、検出規則の末尾にそのわけを足す（判定の前の 中 には足さない）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+    col.add_table(_rows("name", MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55]), lambda r, c: f"R{r}C{c + 1}")
+    low = [f.rule for f in item.findings if f.pii_type == "name" and f.confidence.value == "low"]
+    medium = [f.rule for f in item.findings if f.pii_type == "name" and f.confidence.value == "medium"]
+    assert low and all(r == engine.HEADER_NAME_RULE + engine.ORG_COLUMN_NOTE for r in low), low
+    assert medium and all(r == engine.HEADER_NAME_RULE for r in medium), medium

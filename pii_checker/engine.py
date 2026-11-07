@@ -94,6 +94,9 @@ RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
+# 表の形で確度を 低 に下げたときに、明細の「検出規則」の末尾へ足す注（なぜ 低 なのかを使い手が引けるように）
+ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
+WEAK_HEADER_NOTE = "（左隣のセルが「見出し語＋値」で、見出しが確かでないため 低）"
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:
@@ -393,8 +396,11 @@ class Collector:
             confidence = hit.confidence
             if plain is not None and hit.pii_type != "custom":
                 confidence = plain.get((hit.pii_type, hit.value), Confidence.LOW)
-            if org_column and hit.rule == HEADER_NAME_RULE and not detectors.name_value_has_honorific(hit.value):
+                if confidence == Confidence.LOW and hit.confidence.rank > Confidence.LOW.rank:
+                    hit.rule += WEAK_HEADER_NOTE
+            elif org_column and hit.rule == HEADER_NAME_RULE and not detectors.name_value_has_honorific(hit.value):
                 confidence = Confidence.LOW  # 銘柄名の列の、法人格の無い社名
+                hit.rule += ORG_COLUMN_NOTE
             if raw and confidence == Confidence.HIGH:
                 confidence = Confidence.MEDIUM  # 残留データは値の区切りが失われていて取り違えうるので1段下げる
             elif raw and confidence == Confidence.MEDIUM and hit.pii_type in ("credit_card", "my_number", "phone"):

@@ -96,7 +96,7 @@ COLUMN_ORG_MIN_RATIO = 0.05
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
 # 表の形で確度を 低 に下げたときに、明細の「検出規則」の末尾へ足す注（なぜ 低 なのかを使い手が引けるように）
 ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
-WEAK_HEADER_NOTE = "（左隣のセルが「見出し語＋値」で、見出しが確かでないため 低）"
+WEAK_HEADER_NOTE = "（左隣の「見出し語＋値」のセルを見出しにしたため 低）"
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:

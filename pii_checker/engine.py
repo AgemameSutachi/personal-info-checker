@@ -902,7 +902,8 @@ class Collector:
             pending.append(values)
             if not any(values) or _header_row_score(values)[0]:
                 break
-            chars += sum(len(v) for v in values)
+            # 空のセルも1字と数える（列の多い xlsx の空の行が 2,000 行積まれても上限を超えないように）
+            chars += sum(len(v) or 1 for v in values)
             decided = True
             for c in name_cols:
                 if c < len(values) and values[c]:

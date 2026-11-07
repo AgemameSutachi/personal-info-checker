@@ -275,14 +275,15 @@ def test_table_prefetch_stops_at_header_like_row():
 
 
 def test_table_prefetch_error_scans_read_rows():
-    """流しながら読む表でも、先読みの途中で読み取りが失敗したら、読めた行を検査してから同じ例外を出す。"""
+    """流しながら読む表でも、先読みの途中で読み取りが失敗したら、読めた行を検査してから同じ例外を出す。
+    読めた行は先読みで付けた判定で検査する（会社名の列なら、判定が付く前の行の社名も 低）。"""
     item = ItemResult(path="t", kind="", status=Status.PENDING)
     col = Collector(item, 100)
 
     def rows():
-        yield ["氏名"]
-        for p in PERSONS[:10]:
-            yield [p]
+        yield ["code", "name"]
+        for i, v in enumerate(MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55]):
+            yield [f"{1000 + i}", v]
         raise OSError("壊れた行")
 
     try:
@@ -291,7 +292,8 @@ def test_table_prefetch_error_scans_read_rows():
         assert str(e) == "壊れた行"
     else:
         raise AssertionError("例外が出なかった")
-    assert item.conf_counts.get("name:medium", 0) == 10, item.conf_counts
+    got = {k: n for k, n in item.conf_counts.items() if k.startswith("name:")}
+    assert got == {"name:low": 55}, got
 
 
 def test_table_prefetch_is_bounded():

@@ -1436,6 +1436,20 @@ _URL_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 # 区分（aws・aws-cn・aws-us-gov・aws-iso-b など）・サービス・地域（空のこともある）の後ろの「:」で終わる（_in_arn_account）
 _RE_ARN_ACCOUNT_BEFORE = re.compile(r"(?<![0-9A-Za-z])arn:aws(?:-[a-z]+)*:[a-z0-9-]{1,64}:[a-z0-9-]{0,32}:\Z")
 _ARN_PREFIX_MAX = 120
+# Google Cloud のプロジェクト番号の手前（_in_gcp_project_number）: 資源の名前の「projects/」・
+# JSON や設定の「project_number」「projectNumber」のキー
+_RE_GCP_NUMBER_BEFORE = re.compile(
+    r"(?<![0-9A-Za-z_])(?:projects/|project_?number[\"']?[ \t]*[:=][ \t]*[\"']?)\Z",
+    re.IGNORECASE,
+)
+# Google Cloud のプロジェクト番号の後ろ: Firebase のアプリ ID の「:android:」「:ios:」「:web:」・
+# OAuth のクライアント ID（「-<英数字>.apps.googleusercontent.com」）・サービスアカウントのアドレス
+# （「-compute@developer.gserviceaccount.com」「@cloudservices.gserviceaccount.com」）
+_RE_GCP_NUMBER_AFTER = re.compile(
+    r":(?:android|ios|web):[0-9a-f]"
+    r"|[-@](?:[0-9a-z.-]{0,40}@)?[0-9a-z.-]{0,80}\.(?:googleusercontent|gserviceaccount)\.com(?![0-9A-Za-z.-])"
+)
+_GCP_PREFIX_MAX = 40
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
@@ -1647,6 +1661,21 @@ def _in_arn_account(text: str, start: int, end: int) -> bool:
     return bool(_RE_ARN_ACCOUNT_BEFORE.search(text, max(0, start - _ARN_PREFIX_MAX), start))
 
 
+def _in_gcp_project_number(text: str, start: int, end: int) -> bool:
+    """検出が Google Cloud のプロジェクト番号（必ず12桁）の置き場か。
+
+    資源の名前の「projects/123456789012/…」・Firebase のアプリ ID「1:123456789012:android:…」・
+    OAuth のクライアント ID「123456789012-abc.apps.googleusercontent.com」・サービスアカウントの
+    「service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com」・「"project_number": "123456789012"」。
+    設定のファイル（google-services.json・サービスアカウントの鍵）やログに多く、検査数字が合うと
+    マイナンバーの形に見える（2026-11-08 に確かめた）。アプリ ID は頭の「1:」だけでは項目の番号の
+    「1:<12桁>」と分けられないので、後ろの「:android:」「:ios:」「:web:」で決める。
+    """
+    if _RE_GCP_NUMBER_AFTER.match(text, end):
+        return True
+    return bool(_RE_GCP_NUMBER_BEFORE.search(text, max(0, start - _GCP_PREFIX_MAX), start))
+
+
 def _across_number_lines(text: str, start: int, end: int) -> bool:
     """検出が改行をまたいでいて、検出の始まる行の1つ前の行か、終わる行の1つ後ろの行が数だけの行か
     （1行に数が1つずつ並ぶ一覧の一部）。
@@ -1783,7 +1812,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     「よくある姓＋空白＋名」の名の側が一般の語のもの（_NOT_GIVEN_NAMES）・「氏名の見出し語＋名前」の値に
     「名前」の語を含むもの（引数の説明の文）・「=」の形でコードの代入の続きのもの（関数の引数の中なら 低 に下げる・
     _name_label_code_shape）
-    2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）
+    2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）・
+    Google Cloud のプロジェクト番号の置き場のもの（_in_gcp_project_number）
     """
     out = []
     for h in hits:
@@ -1807,6 +1837,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 or _beside_long_digit_run(text, h.start, h.end)
                 or _in_url_path(text, h.start, h.end)
                 or _in_arn_account(text, h.start, h.end)
+                or _in_gcp_project_number(text, h.start, h.end)
                 or _after_country_prefix(text, h.start)
             ):
                 continue

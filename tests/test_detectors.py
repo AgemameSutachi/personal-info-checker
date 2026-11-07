@@ -252,6 +252,7 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("projectNumber: 123456789018", "my_number"),
         ('"messagingSenderId": "123456789018"', "my_number"),
         ('<string name="gcm_defaultSenderId">123456789018</string>', "my_number"),
+        ('<string name="gcm_defaultSenderId" translatable="false">123456789018</string>', "my_number"),
         ('{\\"project_number\\": \\"123456789018\\"}', "my_number"),
         ("1:123456789018:web:ABCDEF012345", "my_number"),
     ],
@@ -313,6 +314,7 @@ def test_numeric_data_false_positive(text, pii_type):
         ("123456789018-a.apps.googleusercontent.com.evil.example", "my_number"),
         ("project 123456789018", "my_number"),
         ("my_sender_id: 123456789018", "my_number"),
+        ('<string name="gcm_defaultSenderId" translatable="false"></string> 123456789018', "my_number"),
         ("PROJECT_ID  NAME  PROJECT_NUMBER\nmy-proj  My Project  123456789018", "my_number"),
         ("個人番号 projects/123456789018/x", "my_number"),
         # 電話・カードの形は、隣に長い連続があっても今までどおり（語があっても同じ規則名で出るため）

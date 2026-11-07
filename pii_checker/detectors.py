@@ -1439,10 +1439,11 @@ _ARN_PREFIX_MAX = 120
 # Google Cloud のプロジェクト番号の手前（_in_gcp_project_number）: 資源の名前の「projects/」・
 # JSON や設定の「project_number」「projectNumber」・Firebase の送信者 ID（中身はプロジェクト番号）の
 # 「messagingSenderId」「gcm_defaultSenderId」（Android の values.xml の「name="…">」）のキー。
-# 文字列に入れた JSON の「\"」も許す
+# 文字列に入れた JSON の「\"」と、XML の後ろの属性（Firebase の道具が作る「translatable="false"」）も許す
 _RE_GCP_NUMBER_BEFORE = re.compile(
     r"(?<![0-9A-Za-z_])(?:projects/"
-    r"|(?:project_?number|messaging_?sender_?id|gcm_default_?sender_?id)\\?[\"']?[ \t]*[:=>][ \t]*\\?[\"']?)\Z",
+    r"|(?:project_?number|messaging_?sender_?id|gcm_default_?sender_?id)\\?[\"']?"
+    r"(?:[ \t]+[A-Za-z:]{1,20}=\"[^\"<>]{0,20}\")*[ \t]*[:=>][ \t]*\\?[\"']?)\Z",
     re.IGNORECASE,
 )
 # Google Cloud のプロジェクト番号の後ろ: Firebase のアプリ ID の「:android:」「:ios:」「:web:」・
@@ -1453,7 +1454,7 @@ _RE_GCP_NUMBER_AFTER = re.compile(
     r"|[-@](?:[0-9a-z.-]{0,40}@)?[0-9a-z.-]{0,80}\.(?:googleusercontent|gserviceaccount)\.com(?![0-9A-Za-z.-])",
     re.IGNORECASE,
 )
-_GCP_PREFIX_MAX = 40
+_GCP_PREFIX_MAX = 80
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。

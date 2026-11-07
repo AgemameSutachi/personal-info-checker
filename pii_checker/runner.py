@@ -18,7 +18,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from concurrent.futures import wait as wait_futures
 from dataclasses import fields
 
-from .engine import checkpoint_path, read_checkpoint, scan_file, split_siblings
+from .engine import UNEXPECTED_HINT, checkpoint_path, error_detail, read_checkpoint, scan_file, split_siblings
 from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
@@ -576,14 +576,19 @@ class JobRunner:
                 self.job_id,
                 path,
                 f"読み取り中に検査プロセスが異常終了した（1プロセスのメモリ上限 {limit_gb:.1f}GB を超えた・"
-                f"壊れたファイルの可能性）。{kept}{CRASH_HINT}。詳細: {e}",
+                f"壊れたファイルの可能性）。{kept}{CRASH_HINT}（詳細: {e}）",
                 elapsed,
                 partial=partial,
             )
         except Exception as e:
             if is_disk_full(e):
                 raise
-            self.store.save_failure(self.job_id, path, f"検査に失敗した（{type(e).__name__}: {e}）", elapsed)
+            self.store.save_failure(
+                self.job_id,
+                path,
+                f"読み取りの途中で想定外のエラーになり、検査できなかった（要目視）。{UNEXPECTED_HINT}{error_detail(e)}",
+                elapsed,
+            )
 
 
 class BackgroundCleanup:

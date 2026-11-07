@@ -493,8 +493,8 @@ def handle_ole(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         ole = olefile.OleFileIO(data)
     except Exception as e:
         raise Uncheckable(
-            "OLE 複合文書として開けなかった（壊れている可能性。作ったアプリで開けるなら、"
-            f"別名で保存した写しを検査してください）: {e}"
+            "OLE 複合文書として開けなかった（壊れている可能性）。作ったアプリで開けるなら、"
+            f"別名で保存した写しを検査してください。開けなければ元のファイルを取り直してください（詳細: {e}）"
         )
     with ole:
         streams = ["/".join(e) for e in ole.listdir(streams=True, storages=False)]

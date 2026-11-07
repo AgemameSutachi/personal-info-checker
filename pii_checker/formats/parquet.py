@@ -174,7 +174,9 @@ def handle_parquet(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
             schema = pf.schema_arrow
         except (pa.ArrowException, OSError, ValueError) as e:
             raise Uncheckable(
-                f"parquet の表の定義を読めなかった（壊れている・暗号化されている・未対応の形の可能性）: {e}"
+                "parquet の表の定義を読めなかった（壊れている・暗号化されている・未対応の形の可能性）。"
+                "作ったアプリ（pandas・Spark 等）で読めるなら、CSV に書き出した写しを検査してください。"
+                f"読めなければ元のファイルを取り直してください（詳細: {e}）"
             )
         # 表の定義に付いた説明（pandas の列の情報など）にも文字が入りうる
         meta = pf.metadata.metadata or {}

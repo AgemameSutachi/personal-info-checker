@@ -572,7 +572,11 @@ def handle_eml(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                     path=f"{blob.display}!{filename or ctype}",
                     kind="メールの部品",
                     status=_St.UNCHECKABLE,
-                    reason=f"メールの部品を復号できなかった（{type(e).__name__}: {e}）",
+                    reason=(
+                        "メールの部品を復号できなかった（壊れている可能性）。メールのソフトで開けるなら、"
+                        "添付を保存して検査してください。開けなければ元のメールを取り直してください"
+                        f"（詳細: {type(e).__name__}: {e}）"
+                    ),
                     depth=depth + 1,
                 )
             )
@@ -955,7 +959,7 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
                 exif = None
             pil_xmp = _pil_xmp(im)
     except Exception as e:
-        raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式。{IMAGE_BROKEN_HELP}）: {e}")
+        raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式）。{IMAGE_BROKEN_HELP}（詳細: {e}）")
     exif_fields = scan_exif(exif, item, col)  # 写真の情報は、OCR を使わない・小さな画像でも読む
     xmp_count = scan_xmp(data, item, col, pil_xmp)
     if max(w, h) < ctx.options.min_image_px:
@@ -974,12 +978,12 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
         text = ocr.ocr_image_bytes(data)
     except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）
         if "画素数が大きすぎる" in str(e):
-            raise Uncheckable(f"画像の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {e}")
+            raise Uncheckable(f"画像の画素数が大きすぎるため検査していない。{IMAGE_TOO_LARGE_HINT}（詳細: {e}）")
         detail = str(e).removeprefix(
             "画像を読み込めませんでした（壊れている可能性があります）: "
         )  # 同じ言い回しを重ねない
         raise Uncheckable(
-            f"画像を読み込めなかった（途中で切れているか壊れている可能性。{IMAGE_BROKEN_HELP}）: {detail}"
+            f"画像を読み込めなかった（途中で切れているか壊れている可能性）。{IMAGE_BROKEN_HELP}（詳細: {detail}）"
         )
     item.method = f"OCR（{w}×{h}px・{frames}ページ）"
     item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
@@ -1008,8 +1012,10 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
         img = ocr.open_with_wic(data)
     except ValueError as e:
         if "画素数が大きすぎる" in str(e):
-            raise Uncheckable(f"画像（JPEG XR）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {e}")
-        raise Uncheckable(f"画像（JPEG XR）を開けなかった（{IMAGE_BROKEN_HELP}）: {e}")
+            raise Uncheckable(
+                f"画像（JPEG XR）の画素数が大きすぎるため検査していない。{IMAGE_TOO_LARGE_HINT}（詳細: {e}）"
+            )
+        raise Uncheckable(f"画像（JPEG XR）を開けなかった。{IMAGE_BROKEN_HELP}（詳細: {e}）")
     w, h = img.size
     if max(w, h) < ctx.options.min_image_px:
         item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
@@ -1075,7 +1081,7 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
         wic_error = str(e)
         if "画素数が大きすぎる" in wic_error:  # 拡張を入れても直らないので、入れ方を案内しない
             raise Uncheckable(
-                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {wic_error}"
+                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない。{IMAGE_TOO_LARGE_HINT}（詳細: {wic_error}）"
             )
         no_codec = _WIC_COMPONENT_NOT_FOUND in wic_error
         detail = _WIN_ERROR.search(wic_error)
@@ -1084,11 +1090,11 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
             img = _open_heif_with_pillow(data)
         except Image.DecompressionBombError as pe:
             raise Uncheckable(
-                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {pe}"
+                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない。{IMAGE_TOO_LARGE_HINT}（詳細: {pe}）"
             )
         except Exception as pe:  # pillow-heif の中の失敗（壊れている・未対応の符号化）
             help_text = f"。{HEIF_HELP}" if no_codec else f"。{IMAGE_BROKEN_HELP}"
-            raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）{help_text}: {pe}")
+            raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）{help_text}（詳細: {pe}）")
         how = "pillow-heif"
         if img is None:
             if no_codec:

@@ -235,6 +235,16 @@ RE_NAME_LABEL = re.compile(
 RE_NAME_LABEL_TIGHT = re.compile(
     rf"(?:^|(?<=[\s　:：、,|]))(?:氏名|お名前|名前|患者名|顧客名|契約者名)((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])"
 )
+# 英語の見出し語＋日本語の名前（「Name: 山田太郎」「Customer name = 佐藤花子」）。「name:」は YAML・設定の項目名にも多いので、
+# 値がよくある姓で始まり、漢字の名が続くものだけを拾う。区切りは「:」「=」だけ（空白だけの区切りは英文の途中に多い）。
+# 見出し語の直前が英数字・「_」のもの（「filename:」「company_name:」）と、英字＋空白・「_」・「-」のもの（「company name:」）は
+# 別の物の名前なので拾わない（iter_name_label_en が確かめる）
+EN_NAME_LABEL_WORDS = (
+    r"(?:(?:full|first|last|given|family|customer|client|user|contact|person|member|patient|display)[ _\-]?)?name"
+)
+RE_NAME_LABEL_EN = re.compile(
+    rf"""{EN_NAME_LABEL_WORDS}["']?\s*[:：=]\s*["']?((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])""", re.I
+)
 RE_NAME_HONORIFIC = re.compile(rf"(?<![一-龥])(?:{SURNAMES})[ 　]?[一-龥々]{{0,3}}(?:様|殿|さん|君|くん|ちゃん)")
 HONORIFIC_STOP = re.compile(
     r"(お客|皆|各位|関係者|担当者|会員|利用者|取引先|貴|御|責任者|代表者|社長|部長|課長|先生|保護者|ご家族|応募者|参加者|受講者|入居者|契約者)$"
@@ -282,6 +292,38 @@ def iter_name_spaced(text: str):
     if " " not in text and "　" not in text:
         return iter(())
     return _finditer_not_after_kanji(_RE_NAME_SPACED_BODY, text)
+
+
+NAME_LABEL_EN_RULE = "英語の氏名の見出し語＋よくある姓の名前"
+
+
+def _en_label_start_ok(text: str, start: int) -> bool:
+    """英語の見出し語が start から始まってよいか。直前が英数字・「_」、または英字＋空白・「_」・「-」なら別の語の続き。"""
+    if start == 0:
+        return True
+    prev = text[start - 1]
+    if prev.isascii() and (prev.isalnum() or prev == "_"):
+        return False
+    if prev in " _-" and start >= 2:
+        prev2 = text[start - 2]
+        if prev2.isascii() and prev2.isalpha():
+            return False
+    return True
+
+
+def iter_name_label_en(text: str):
+    """RE_NAME_LABEL_EN が当たる位置のうち、_en_label_start_ok を満たすものを、重ならないよう左から順に返す。"""
+    search = RE_NAME_LABEL_EN.search
+    pos = 0
+    while True:
+        m = search(text, pos)
+        if m is None:
+            return
+        if _en_label_start_ok(text, m.start()):
+            yield m
+            pos = m.end()
+        else:
+            pos = m.start() + 1
 
 
 SENSITIVE_WORDS = r"(?:病名|病歴|既往歴|診断名|傷病名|障害等級|障害者手帳|犯罪歴|前科|信仰|宗教|信条|本籍)"
@@ -1132,6 +1174,8 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
         hits.append(
             Hit("name", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "氏名の見出し語＋よくある姓の名前")
         )
+    for m in iter_name_label_en(text):
+        hits.append(Hit("name", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), NAME_LABEL_EN_RULE))
     for m in iter_name_honorific(text):
         conf = Confidence.MEDIUM if len(m.group(0)) >= 4 else Confidence.LOW
         hits.append(Hit("name", conf, m.group(0), m.start(), m.end(), "よくある姓＋敬称"))
@@ -1972,6 +2016,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）
     Google Cloud のプロジェクト番号の置き場のもの（_in_gcp_project_number）
     2026-11-08: カード番号（手がかりなしの 中）のすぐ前が ID の項目のキーのものは 低 に下げる（RE_ID_KEY_BEFORE）
+    2026-11-08: 「英語の氏名の見出し語＋よくある姓の名前」にも、コードの代入・引数の見分け（_name_label_code_shape）をかける
     """
     out = []
     for h in hits:
@@ -2057,6 +2102,13 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                     continue
                 if shape == "low":
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
+        elif h.rule == NAME_LABEL_EN_RULE:
+            # コードの代入の続き（`name = 山田太郎.strip()`）は落とし、関数の引数（`User(name="山田太郎")`）は 低 にする
+            shape = _name_label_code_shape(text, h)
+            if shape == "drop":
+                continue
+            if shape == "low":
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない
             # （「田中部長殿」のように姓が前に付いたものは人なので残す）。空白は姓の直後に入りうる（「関 係者様」）ので詰めて比べる

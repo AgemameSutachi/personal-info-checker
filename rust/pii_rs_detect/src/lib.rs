@@ -126,6 +126,7 @@ pub struct Rules {
     email: Rg,
     name_label: Rg,
     name_label_tight: Rg,
+    name_label_en: Rg,
     name_honorific: Rg,
     name_honorific_any: Rg,
     name_spaced: Rg,
@@ -200,6 +201,7 @@ impl Rules {
             email: rg("RE_EMAIL")?,
             name_label: rg("RE_NAME_LABEL")?,
             name_label_tight: rg("RE_NAME_LABEL_TIGHT")?,
+            name_label_en: rg("RE_NAME_LABEL_EN")?,
             name_honorific: rg("RE_NAME_HONORIFIC")?,
             name_honorific_any: rg("RE_NAME_HONORIFIC_ANY")?,
             name_spaced: rg("RE_NAME_SPACED")?,
@@ -285,6 +287,18 @@ fn lb_my_number(t: &str, s: usize, _: &Captures) -> bool {
 /// (?:^|(?<=[\s　:：、,|]))
 fn lb_tight(t: &str, s: usize, _: &Captures) -> bool {
     s == 0 || prev_char(t, s).map_or(true, |c| py_is_space(c) || matches!(c, '　' | ':' | '：' | '、' | ',' | '|'))
+}
+/// 英語の氏名の見出し語の前（Python の _en_label_start_ok）: 直前が英数字・「_」、または英字＋空白・「_」・「-」でない
+fn lb_name_en(t: &str, s: usize, _: &Captures) -> bool {
+    let mut it = t[..s].chars().rev();
+    let Some(p1) = it.next() else { return true };
+    if p1.is_ascii_alphanumeric() || p1 == '_' {
+        return false;
+    }
+    if matches!(p1, ' ' | '_' | '-') && it.next().map_or(false, |c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    true
 }
 /// (?=[0-9A-Za-z\-]*[0-9])（値に数字を含む）
 fn post_member(_t: &str, _s: usize, c: &Captures) -> bool {
@@ -800,6 +814,10 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
     scan(&r.name_label_tight, text, &lb_tight, &lb_none, &mut |c, _| {
         let g = c.get(1).unwrap();
         hits.push(hit(NAME, MED, g.start(), g.end(), "氏名の見出し語＋よくある姓の名前"));
+    });
+    scan(&r.name_label_en, text, &lb_name_en, &lb_none, &mut |c, _| {
+        let g = c.get(1).unwrap();
+        hits.push(hit(NAME, MED, g.start(), g.end(), "英語の氏名の見出し語＋よくある姓の名前"));
     });
     scan(&r.name_honorific, text, &lb_kanji, &lb_none, &mut |c, end| {
         let ms = c.get(0).unwrap().start();

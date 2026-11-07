@@ -36,6 +36,8 @@ from ..models import Status
 from ..textdecode import iter_strings_chunked
 
 CREATE_NO_WINDOW = 0x08000000
+# Access の表を読めなかったときの次の手（詳しい説明の表と同じ）
+ACCESS_REPAIR_HINT = "Access で開けるなら「データベースの最適化/修復」をかけた写しを検査してください"
 
 
 def _dev_helper_pythons() -> list[str]:
@@ -169,7 +171,7 @@ def _dump_odbc(ctx: ScanContext, conn, col: Collector, item: ItemResult, depth: 
         try:
             c2.execute(f"SELECT * FROM [{name}]")
         except Exception as e:
-            _failed_table(ctx, display, name, f"表を読めなかった: {e}", depth)
+            _failed_table(ctx, display, name, f"表を読めなかった。{ACCESS_REPAIR_HINT}（詳細: {e}）", depth)
             continue
         col.pos_sheet = name  # 対処のための位置: シートは表の名前、行は SELECT * の通し番号
         columns = [d[0] for d in c2.description]
@@ -238,7 +240,14 @@ def _scan_odbc_attachments(
             try:
                 cur.execute(f"SELECT {c}.[FileName], {c}.[FileData] FROM {t}")
             except Exception as e:  # noqa: BLE001
-                _failed_table(ctx, display, table, f"添付ファイル型の列「{cname}」を読めなかった: {e}", depth)
+                _failed_table(
+                    ctx,
+                    display,
+                    table,
+                    f"添付ファイル型の列「{cname}」を読めなかった。Access で添付を保存して検査するか、"
+                    f"中身を目視で確かめてください（詳細: {e}）",
+                    depth,
+                )
                 continue
             k = 0
             while not (limit and k >= limit):
@@ -587,7 +596,9 @@ def _read_access_parser(ctx: ScanContext, path: str, col: Collector, item: ItemR
             with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
                 table = db.parse_table(name)
         except Exception as e:
-            _failed_table(ctx, item.path, name, f"表を読めなかった（access_parser）: {e}", 0)
+            _failed_table(
+                ctx, item.path, name, f"表を読めなかった。{ACCESS_REPAIR_HINT}（詳細: access_parser: {e}）", 0
+            )
             continue
         n_tables += 1
         col.pos_sheet = name
@@ -684,7 +695,10 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
         )
     raise Uncheckable(
         "Access の表を読めなかった（生データ走査のみ。数値型の列は検査できていない。壊れている可能性があり、"
-        "Access で開けるなら「データベースの最適化/修復」をかけた写しを検査してください）: " + " / ".join(attempts)
+        "Access で開けるなら「データベースの最適化/修復」をかけた写しを検査してください）"
+        + "（詳細: "
+        + " / ".join(attempts)
+        + "）"
     )
 
 
@@ -696,7 +710,10 @@ def handle_sqlite(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     try:
         conn = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro&immutable=1", uri=True)
     except sqlite3.Error as e:
-        raise Uncheckable(f"SQLite を開けなかった: {e}")
+        raise Uncheckable(
+            "SQLite を開けなかった（暗号化か壊れている可能性）。壊れているなら元のファイルを取り直し、"
+            f"暗号化なら持ち主に中身を確かめてもらってください（詳細: {e}）"
+        )
     ok = False
     try:
         names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
@@ -775,7 +792,9 @@ def handle_dbf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             fields.append((name, length))
             pos += 32
     except Exception as e:
-        raise Uncheckable(f"dBase の見出しを読めなかった: {e}")
+        raise Uncheckable(
+            f"dBase の見出しを読めなかった（壊れている可能性）。元のファイルを取り直してください（詳細: {e}）"
+        )
     columns = [f[0] for f in fields]
     deleted = 0
     truncated: list[int] = []

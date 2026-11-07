@@ -42,6 +42,11 @@ SUPPORTED_ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_B
 CREATE_NO_WINDOW = 0x08000000
 
 
+# 書庫が壊れていて開けない・取り出せないときの次の手
+ARCHIVE_BROKEN_HINT = (
+    "7-Zip などで展開できるなら、展開したフォルダを検査してください。"
+    "展開できなければ元のファイルを取り直してください"
+)
 # 7z.exe が見つからないときの次の手。画面・Web の版には 7z.exe の場所の設定が無く、指定できるのはコマンドの版の --sevenzip だけ
 SEVENZIP_HINT = (
     "配布版は 7-Zip を同梱しているので、配布物の _internal\\7z が欠けていれば配布物を置き直す。"
@@ -212,7 +217,7 @@ def handle_zip(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                     ctx,
                     display,
                     Status.UNCHECKABLE,
-                    f"zip から取り出せなかった（{type(e).__name__}: {e}）",
+                    f"zip から取り出せなかった（壊れている可能性）。{ARCHIVE_BROKEN_HINT}（詳細: {type(e).__name__}: {e}）",
                     depth + 1,
                     size=info.file_size,
                 )
@@ -328,7 +333,13 @@ def _zip_python_encrypted(
             except Uncheckable:
                 raise
             except Exception as e:
-                add_failed_item(ctx, display, Status.UNCHECKABLE, f"取り出せなかった: {e}", depth + 1)
+                add_failed_item(
+                    ctx,
+                    display,
+                    Status.UNCHECKABLE,
+                    f"zip から取り出せなかった（壊れている可能性）。{ARCHIVE_BROKEN_HINT}（詳細: {type(e).__name__}: {e}）",
+                    depth + 1,
+                )
             continue
         opened = None
         for pw in ctx.password_candidates():
@@ -741,7 +752,7 @@ def handle_tar(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         try:
             tf = tarfile.open(fileobj=f, mode="r:*", ignore_zeros=True)  # 連結した tar の2つ目以降も読む
         except tarfile.TarError as e:
-            raise Uncheckable(f"tar を開けなかった: {e}")
+            raise Uncheckable(f"tar を開けなかった（壊れている可能性）。{ARCHIVE_BROKEN_HINT}（詳細: {e}）")
         n = 0
         with tf:
             # pg_dump の tar 形式: toc.dat の列名を先に読んでおく
@@ -769,7 +780,14 @@ def handle_tar(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                 n += 1
                 src = tf.extractfile(m)
                 if src is None:
-                    add_failed_item(ctx, display, Status.UNCHECKABLE, "取り出せなかった", depth + 1)
+                    add_failed_item(
+                        ctx,
+                        display,
+                        Status.UNCHECKABLE,
+                        "tar から取り出せなかった（通常のファイルでない項目か、"
+                        f"壊れている可能性）。{ARCHIVE_BROKEN_HINT}",
+                        depth + 1,
+                    )
                     continue
                 if m.size > IN_MEMORY_LIMIT:
                     try:
@@ -995,9 +1013,14 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
             dst.write(chunk)
     item.method = f"展開（{written:,}バイト）"
     if truncated and not written:
-        raise Uncheckable(f"圧縮データが壊れていて展開できなかった（{truncated}）")
+        raise Uncheckable(
+            f"圧縮データが壊れていて展開できなかった。元のファイルを取り直してください（詳細: {truncated}）"
+        )
     ctx.scan_nested(f"{blob.display}!{name}", path=out, depth=depth + 1, name_hint=name)
     if truncated:
         from ..engine import PartialScan
 
-        raise PartialScan(f"圧縮データが途中で切れていた（{truncated}）。展開できた {written:,} バイトだけを検査した")
+        raise PartialScan(
+            f"圧縮データが途中で切れていた。展開できた {written:,} バイトだけを検査した。"
+            f"残りも見るには元のファイルを取り直してください（詳細: {truncated}）"
+        )

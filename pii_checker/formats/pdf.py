@@ -56,8 +56,8 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             doc = fitz.open(ctx.blob_as_path(blob), filetype="pdf")
     except Exception as e:
         raise Uncheckable(
-            "PDF を開けなかった（壊れている可能性。PDF の閲覧ソフトで開けるなら、"
-            f"別名で保存した写しを検査してください。開けなければ元のファイルを取り直してください）: {e}"
+            "PDF を開けなかった（壊れている可能性）。PDF の閲覧ソフトで開けるなら、"
+            f"別名で保存した写しを検査してください。開けなければ元のファイルを取り直してください（詳細: {e}）"
         )
     with doc:
         repaired = doc.is_repaired
@@ -157,7 +157,11 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                         path=f"{blob.display}!{name}",
                         kind="PDF の添付",
                         status=Status.UNCHECKABLE,
-                        reason=f"添付を取り出せなかった: {e}",
+                        reason=(
+                            "添付を取り出せなかった（壊れている可能性）。PDF の閲覧ソフトで添付を保存できるなら、"
+                            "保存したファイルを検査してください。保存できなければ元のファイルを取り直してください"
+                            f"（詳細: {type(e).__name__}: {e}）"
+                        ),
                         depth=depth + 1,
                     )
                 )

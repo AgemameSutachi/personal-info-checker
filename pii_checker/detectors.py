@@ -143,6 +143,12 @@ MODEL_KW = re.compile(
     r"(型番|品番|製品コード|商品コード|部品番号|図面番号|(?<![a-z])isbn(?![a-z])|(?<![a-z])jan(?![a-z]))",
     re.I,
 )
+# 値のすぐ前が ID の項目のキー（ログの「id=…」・JSON の「"user_id": "…"」・「requestId:」）。識別番号の数がカード番号の
+# 形に偶然合ったものとみなす（2026-11-08・ログ 1600 行の「id=<14桁>」で 中 35件）。「paid=」「valid:」は ID のキーにしない
+RE_ID_KEY_BEFORE = re.compile(
+    r"""(?<![A-Za-z0-9])["']?(?:id|ID|[A-Za-z0-9]+[_\-.](?:id|ID)|[a-z0-9]+(?:Id|ID))["']?\s*[=:]\s*["']?\Z"""
+)
+ID_KEY_NOTE = "（すぐ前が ID の項目のキーで、識別番号とみなした）"
 # 語が無ければ拾わない番号（クレジットカードの Luhn が合わないものを、打ち間違いとして 低 で残すときの語）
 CARD_NUMBER_KW = re.compile(r"(カード番号|クレジット|クレカ|card\s?no|card\s?number)", re.I)
 MONEY_AFTER = re.compile(r"^\s*(円|,|万|千|百|ドル|\.[0-9])")
@@ -1917,6 +1923,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     _name_label_code_shape）
     2026-11-08: 「氏名の見出し語＋名前」が固定幅の表の見出し行の隣の見出しのもの（_name_label_in_header_row）
     2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）
+    2026-11-08: カード番号（手がかりなしの 中）のすぐ前が ID の項目のキーのものは 低 に下げる（RE_ID_KEY_BEFORE）
     """
     out = []
     for h in hits:
@@ -1964,6 +1971,13 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             # 小数の途中のもの（数値の表の「0.1234567890123545」の小数部が Luhn に合う・2026-11-07 株のデータ）
             if h.confidence != Confidence.HIGH and _decimal_adjacent(text, h.start, h.end):
                 continue
+            # すぐ前が ID の項目のキー（ログの「id=<14桁>」）: 識別番号とみなして 低 にする（手がかりなしの 中 だけ）
+            if (
+                h.confidence == Confidence.MEDIUM
+                and h.rule == "Luhn一致・ブランド番号体系一致"
+                and RE_ID_KEY_BEFORE.search(text, max(0, h.start - 40), h.start)
+            ):
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + ID_KEY_NOTE)
         elif h.pii_type == "phone" and h.confidence == Confidence.LOW:
             before = text[max(0, h.start - 2) : h.start]
             after = text[h.end : h.end + 2]

@@ -52,3 +52,25 @@ def test_folder_permission_names_next_step(tmp_path, monkeypatch):
     assert errors, "権限の無いフォルダが記録されていない"
     assert "フォルダを開く権限がない" in errors[0].reason, errors[0].reason
     assert "管理者に読む権限を頼んでから再検査してください" in errors[0].reason, errors[0].reason
+
+
+@pytest.mark.parametrize(
+    "reached, hint", [(False, "パスとネットワークの接続を確かめてから"), (True, "読む権限があるかを確かめてから")]
+)
+def test_unreadable_folder_hint_follows_note(tmp_path, monkeypatch, reached, hint):
+    """読めなかったフォルダは接続を確かめる手を出す。共有に届いている（Samba の権限の返し方）ときは権限を確かめる手にする。"""
+    real = walker.os.scandir
+
+    def broken(path):
+        if str(path).rstrip("\\/").endswith("share"):
+            raise OSError(64, "ネットワーク名は使用できません")
+        return real(path)
+
+    (tmp_path / "share").mkdir()
+    monkeypatch.setattr(walker.os, "scandir", broken)
+    monkeypatch.setattr(walker, "is_network_lost", lambda e: reached)
+    monkeypatch.setattr(walker, "_really_lost", lambda e, root: False)
+    errors = [e for e in walker.walk([str(tmp_path)]) if e.kind == "error"]
+    assert errors and "フォルダを読めなかった" in errors[0].reason, errors
+    assert hint in errors[0].reason, errors[0].reason
+    assert ("回線断ではない" in errors[0].reason) is reached, errors[0].reason

@@ -595,7 +595,7 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
         if copies or failed:
             raise Uncheckable(
                 f"PostgreSQL の custom 形式のデータ部を見つけられず、表 {len(copies)} 個の中身を検査していない。"
-                "PostgreSQL を入れて再検査してください（その pg_restore を PATH か C:\\Program Files\\PostgreSQL の下から自動で探します）"
+                "PostgreSQL を入れて再検査してください（その pg_restore を PATH か C:\\Program Files\\PostgreSQL の下から自動で探します。入っていて戻せないなら、ダンプを取り直してください）"
             )
         raise PartialScan(
             "データ部が見つからなかった（表の定義だけのダンプの可能性）。文字として読める部分だけを検査した"

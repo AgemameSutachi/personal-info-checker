@@ -738,7 +738,7 @@ def ftp_walk(conn: Connection, password: str):
                 yield Entry(
                     "error",
                     base + folder,
-                    reason=f"フォルダが {FTP_MAX_DIRS:,} 個を超えた（サーバー側のリンクのループの可能性）。ここで辿るのを止めた。サーバー側のリンクを直すか、ループに入らない下のフォルダを指定して検査してください",
+                    reason=f"フォルダが {FTP_MAX_DIRS:,} 個を超えた（サーバー側のリンクのループの可能性）。ここで辿るのを止めた。サーバーの管理者にリンクを直してもらうか、検査するフォルダを問題の無い下の階層に絞って指定してください",
                 )
                 return
             try:
@@ -747,7 +747,7 @@ def ftp_walk(conn: Connection, password: str):
                 yield Entry(
                     "error",
                     base + folder,
-                    reason=f"フォルダを開けなかった（権限が無い・見つからない）: {e}。FTP の利用者にそのフォルダを読む権限があるか、パスが合っているかを確かめてください",
+                    reason=f"フォルダを開けなかった（権限が無い・見つからない）: {str(e).rstrip('。.')}。FTP の利用者にそのフォルダを読む権限があるか、パスが合っているかを確かめてください",
                 )
                 continue
             except Exception as e:  # noqa: BLE001
@@ -790,7 +790,7 @@ def ftp_walk(conn: Connection, password: str):
                     "link",
                     base + folder,
                     reason=f"既に辿ったフォルダ（{base + loop_of}）と同じ中身が続いている（サーバー側のリンク等でループして"
-                    "いる可能性）。この先は辿っていない。サーバー側のリンクを直すか、ループに入らない下のフォルダを指定して検査してください",
+                    "いる可能性）。この先は辿っていない。サーバーの管理者にリンクを直してもらうか、検査するフォルダを問題の無い下の階層に絞って指定してください",
                 )
                 continue
             sigs[folder] = sig
@@ -810,7 +810,7 @@ def ftp_walk(conn: Connection, password: str):
                             "link",
                             url,
                             reason=f"フォルダが {FTP_MAX_DEPTH} 段より深い（サーバー側のリンクでループしている可能性）。"
-                            "この先は辿っていない。サーバー側のリンクを直すか、ループに入らない下のフォルダを指定して検査してください",
+                            "この先は辿っていない。サーバーの管理者にリンクを直してもらうか、検査するフォルダを問題の無い下の階層に絞って指定してください",
                         )
                         continue
                     stack.append(path)

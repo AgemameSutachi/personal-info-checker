@@ -173,10 +173,13 @@ def walk(roots: list[str], connection: dict | None = None, password: str = "") -
                 note = ""
                 if is_network_lost(e) and not lost:
                     note = "（共有には届いているので回線断ではない。Samba では権限の無いフォルダでこう返ることがある）"
+                hint = (
+                    "そのフォルダを読む権限があるかを確かめてから" if note else "パスとネットワークの接続を確かめてから"
+                )
                 yield Entry(
                     "error",
                     folder,
-                    reason=f"フォルダを読めなかった: {e.strerror or e}{note}。パスとネットワークの接続を確かめてから再検査してください",
+                    reason=f"フォルダを読めなかった: {e.strerror or e}{note}。{hint}再検査してください",
                     network_lost=lost,
                 )
                 continue

@@ -59,6 +59,21 @@ def test_company_column_by_records():
     assert got == {"name:low": 55}, got
 
 
+def test_records_prefetch_waits_until_decided():
+    """50 個の時点では会社の印が5%未満でも、後で5%を超える列は、先読みで固まった判定を先頭の行から使う（全部 低）。"""
+    # 異なる値 50 個で 2/50（未満）・51 個目で 3/51・終わりの 60 個で 3/60（ちょうど5%）
+    values = MARKED_COMPANIES[:2] + PLAIN_COMPANIES[:48] + MARKED_COMPANIES[2:3] + PLAIN_COMPANIES[48:57]
+    assert _names(_rows("name", values), records=True) == {"name:low": 57}
+    # 流しながら読む表（add_table）は今までどおり、判定が変わるまでの 48 行は 中
+    assert _names(_rows("name", values)) == {"name:medium": 48, "name:low": 9}
+
+
+def test_records_prefetch_uses_final_verdict_when_ratio_drops():
+    """50 個の時点で5%以上でも、後ろに人の名前が続いて割合が下がる列は、先頭の行から 中（下げすぎない）。"""
+    values = MARKED_COMPANIES[:3] + PLAIN_COMPANIES[:47] + PERSONS
+    assert _names(_rows("氏名", values), records=True) == {"name:medium": 47 + len(PERSONS)}
+
+
 def test_records_person_column_stays_medium():
     """先読みしても、人の名前だけの列は 中 のまま（名簿の先頭に法人が数件あっても下げない）。"""
     got = _names(_rows("氏名", MARKED_COMPANIES[:2] + PERSONS), records=True)

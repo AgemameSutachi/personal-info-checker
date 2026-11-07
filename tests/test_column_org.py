@@ -140,3 +140,39 @@ def test_judgement_is_fixed_after_track_limit():
     assert 1 in orgs._decided and 1 not in orgs._values
     assert orgs.cell(1, "name", "新しい社名") is True
     assert orgs.cell(0, "code", "株式会社サンプル") is False  # 氏名の列でなければ数えない
+
+
+def _helper32_names(tmp_path, monkeypatch, tables: dict[str, list[list[str]]]) -> dict[str, int]:
+    """Access を32ビットの補助で読んだときの氏名の件数（補助の出力は決めた JSON Lines で代える）。"""
+    from test_column_id import _helper32_messages, _run_fake_helper32
+
+    msgs = _helper32_messages({name: (rows[0], rows[1:]) for name, rows in tables.items()})
+    item = _run_fake_helper32(tmp_path, monkeypatch, msgs)
+    return {k: n for k, n in item.conf_counts.items() if k.startswith("name:")}
+
+
+def test_helper32_path_also_lowers(tmp_path, monkeypatch):
+    """Access を32ビットの補助で読んだ表でも、会社名の列の法人格の無い社名を 低 にする（ほかの読み方と同じ）。"""
+    values = MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55]
+    got = _helper32_names(tmp_path, monkeypatch, {"brands": _rows("name", values)})
+    assert got.get("name:low", 0) == 55 - (COLUMN_ORG_MIN_DISTINCT - 1 - 5), got
+
+
+def test_helper32_judges_each_table_separately(tmp_path, monkeypatch):
+    """32ビットの補助の経路でも表ごとに判定する（前の表の会社名の列の判定を、同じ列番号の次の表へ持ち越さない）。"""
+    companies = _rows("name", MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55])
+    members = _rows("氏名", PERSONS[:10])
+    got = _helper32_names(tmp_path, monkeypatch, {"brands": companies, "members": members})
+    assert got.get("name:low", 0) == 55 - (COLUMN_ORG_MIN_DISTINCT - 1 - 5), got
+    assert got.get("name:medium", 0) == (COLUMN_ORG_MIN_DISTINCT - 1 - 5) + 10, got
+
+
+def test_lowered_company_name_notes_why_low():
+    """会社名の列のせいで 低 にした明細には、検出規則の末尾にそのわけを足す（判定の前の 中 には足さない）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+    col.add_table(_rows("name", MARKED_COMPANIES[:5] + PLAIN_COMPANIES[:55]), lambda r, c: f"R{r}C{c + 1}")
+    low = [f.rule for f in item.findings if f.pii_type == "name" and f.confidence.value == "low"]
+    medium = [f.rule for f in item.findings if f.pii_type == "name" and f.confidence.value == "medium"]
+    assert low and all(r == engine.HEADER_NAME_RULE + engine.ORG_COLUMN_NOTE for r in low), low
+    assert medium and all(r == engine.HEADER_NAME_RULE for r in medium), medium

@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pii_checker.engine import Collector  # noqa: E402
+from pii_checker.engine import WEAK_HEADER_NOTE, Collector  # noqa: E402
 from pii_checker.models import ItemResult, Status  # noqa: E402
 
 
@@ -68,3 +68,13 @@ def test_raw_keeps_medium_of_other_kinds(text, want):
 def test_weak_side_header_keeps_plain_confidence(label, value, want):
     got = _conf_counts(lambda c: c.add_table([[label, value]], lambda r, k: f"R{r}C{k + 1}"))
     assert got == want, got
+
+
+def test_weak_side_header_notes_why_low():
+    """弱い見出しのせいで 低 にした明細には、検出規則の末尾にそのわけを足す（中 のままの値には足さない）。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_table([["氏名 佐藤", "鈴木", "電話 090-1111-2222", "090-1234-5678"]], lambda r, k: f"R{r}C{k + 1}")
+    rules = {(f.pii_type, f.confidence.value): f.rule for f in item.findings}
+    assert rules[("name", "low")].endswith(WEAK_HEADER_NOTE), rules
+    assert not any(r.endswith(WEAK_HEADER_NOTE) for k, r in rules.items() if k[1] != "low"), rules

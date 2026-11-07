@@ -661,11 +661,15 @@ _XMP_TEXT_FIELDS = {
     ("http://cipa.jp/exif/1.0/", "CameraOwnerName"): "カメラの持ち主",
     ("http://iptc.org/std/Iptc4xmpExt/2008-02-29/", "PersonInImage"): "写っている人",
     ("http://ns.microsoft.com/photo/1.2/t/Region#", "PersonDisplayName"): "写っている人",  # Windows のフォトの顔の名前
-    (_NS_MWG_RS, "Name"): "写っている人",  # Lightroom・Picasa の顔の名前（Type が Pet の領域は除く）
+    (_NS_MWG_RS, "Name"): "写っている人",  # Lightroom・Picasa の顔の名前（Type が Face 以外の領域は除く）
 }
 # 写っている人（顔のタグ）の値は姓名だけで書かれるので、「氏名」の列の値として検査する。
 # 作成者・撮影者・著作権は会社名・写真の配信元の名前が多く、氏名の列とみなすと会社名まで名前になるので、そのまま検査する
 _XMP_PERSON_LABEL = "写っている人"
+# 顔のタグに道具が書く名前でない定型（「Unknown」「Person 1」「人物1」）。これと、文のような長い値は氏名の列とみなさない
+_XMP_PERSON_PLACEHOLDER = re.compile(r"(?i)(?:unknown|person|face|人物|不明|匿名|未登録)\s*[0-9]*")
+_XMP_PERSON_MAX = 10  # 日本語の姓名は長くても10字ほど（英字だけの名前は _XMP_PERSON_MAX_ASCII まで）
+_XMP_PERSON_MAX_ASCII = 30
 # 作成者の連絡先（IPTC の CreatorContactInfo）。中の項目は「項目名：値」の行にして、住所・電話の手がかりの語にする
 _XMP_CONTACT = (_NS_IPTC_CORE, "CreatorContactInfo")
 _XMP_CONTACT_LABELS = {
@@ -726,15 +730,28 @@ def _xmp_contact_text(el) -> str:
     return "\n".join(lines)
 
 
-def _is_pet_region(desc) -> bool:
-    """mwg-rs の領域（rdf:Description）が動物の顔か（Type="Pet"。属性で書く形と要素で書く形がある）。"""
+def _is_non_face_region(desc) -> bool:
+    """mwg-rs の領域（rdf:Description）が人の顔でないか（Type が Face 以外。Pet・Focus・BarCode）。
+
+    Type は属性で書く形と要素で書く形がある。Type の無い領域は人の顔とみなす。
+    """
     if desc is None:
         return False
     kind = desc.get(f"{{{_NS_MWG_RS}}}Type")
     if kind is None:
         child = desc.find(f"{{{_NS_MWG_RS}}}Type")
         kind = child.text if child is not None else None
-    return (kind or "").strip() == "Pet"
+    kind = (kind or "").strip()
+    return bool(kind) and kind.lower() != "face"
+
+
+def _person_name_like(value: str) -> bool:
+    """写っている人の値を「氏名」の列の値として検査してよいか（名前でない定型・文のような長い値は除く）。"""
+    return (
+        len(value) <= (_XMP_PERSON_MAX_ASCII if value.isascii() else _XMP_PERSON_MAX)
+        and not any(c in value for c in "。、.!?！？")
+        and not _XMP_PERSON_PLACEHOLDER.fullmatch(value.strip())
+    )
 
 
 def xmp_fields(packet: bytes) -> list[tuple[str, str]]:
@@ -765,14 +782,14 @@ def xmp_fields(packet: bytes) -> list[tuple[str, str]]:
         for name, value in el.attrib.items():
             ns, _, local = name[1:].partition("}") if name.startswith("{") else ("", "", name)
             label = _XMP_TEXT_FIELDS.get((ns, local))
-            if label and not (ns == _NS_MWG_RS and _is_pet_region(el)):
+            if label and not (ns == _NS_MWG_RS and _is_non_face_region(el)):
                 add(label, value.strip())
         ns, _, local = el.tag[1:].partition("}") if el.tag.startswith("{") else ("", "", el.tag)
         if (ns, local) == _XMP_CONTACT:
             add("作成者の連絡先", _xmp_contact_text(el))
             continue
         label = _XMP_TEXT_FIELDS.get((ns, local))
-        if label and not (ns == _NS_MWG_RS and _is_pet_region(el.getparent())):
+        if label and not (ns == _NS_MWG_RS and _is_non_face_region(el.getparent())):
             add(label, _xmp_value(el))
     return out
 
@@ -794,7 +811,7 @@ def scan_xmp(data: bytes, item: ItemResult, col: Collector, extra=None) -> int:
     for packet in packets:
         fields += [f for f in xmp_fields(packet) if f not in fields]
     for label, text in fields:
-        header = "氏名" if label == _XMP_PERSON_LABEL else None
+        header = "氏名" if label == _XMP_PERSON_LABEL and _person_name_like(text) else None
         col.add_text(text[:10000], f"XMP {label}", header=header, method="XMP", skip_seen=True)
     if fields:
         labels = "・".join(dict.fromkeys(label for label, _ in fields))

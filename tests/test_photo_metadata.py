@@ -253,6 +253,28 @@ def test_xmp_face_tags_are_names_but_creators_are_not(tmp_path):
     assert any("（作成者・著作権・写っている人）" in n for n in item.notes), item.notes
 
 
+def test_xmp_face_tag_placeholders_are_not_names():
+    """顔のタグの定型（Unknown・Person 1・不明）・文のような値は氏名の列とみなさない。顔でない領域（Focus）は読まない。"""
+    for v in (
+        "Unknown",
+        "Person 1",
+        "face 2",
+        "人物1",
+        "不明",
+        "匿名",
+        "運動会で撮った写真です。",
+        "家族旅行の集合写真の右から二番目",
+    ):
+        assert not misc._person_name_like(v), v
+    for v in ("山田太郎", "山田 太郎", "Taro Yamada"):
+        assert misc._person_name_like(v), v
+    focus = _FACES.replace(
+        b'mwg-rs:Name="\xe4\xbd\x90\xe8\x97\xa4\xe8\x8a\xb1\xe5\xad\x90" mwg-rs:Type="Face"',
+        b'mwg-rs:Name="X" mwg-rs:Type="Focus"',
+    )
+    assert ("写っている人", "X") not in misc.xmp_fields(focus)
+
+
 def test_xmp_in_other_containers(tmp_path):
     """圧縮した PNG の iTXt（PIL が解いたもの）・TIFF（700 番）・WebP の XMP も読む。"""
     from PIL.PngImagePlugin import PngInfo

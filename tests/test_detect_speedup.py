@@ -226,7 +226,8 @@ def old_header_category(header):
     core = detectors.RE_ANNOTATION.sub("", h).strip()
     if core:
         h = core
-    key = re.sub(r"[\s_\-・()（）\[\]【】:：]", "", h).lower()
+    # 照合の鍵の作り方は本体と同じにする（アポストロフィを除く。速くする前後で変えたのは下見だけ）
+    key = re.sub(r"[\s_\-・()（）\[\]【】:：'’‘]", "", h).lower()
     if key in detectors.HEADER_EXACT:
         return detectors.HEADER_EXACT[key]
     if detectors.HEADER_NOT_PII.search(h.lower()):
@@ -242,6 +243,7 @@ HEADER_PIECES = (
     + [w for p, _ in detectors.HEADER_CONTAINS for w in re.findall(r"[^()|?.{}0-9,\\]+", p.pattern)]
     + ["ＴＥＬ", "℡", "〒", "Ｅメール", "MAIL", "Address", "e-Mail", "No.", "番号", "名", "(必須)", "（任意）"]
     + ["1", "2024", "-", "/", ":", " ", "　", "_", "・", "a", "Z", "ｱ", "あ", "漢", "会社名", "所在地", "本社"]
+    + ["'", "’", "Driver’s License"]
 )
 
 

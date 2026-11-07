@@ -68,6 +68,16 @@ def table_counts(rows) -> dict[str, int]:
             ],
             {"name": 6, "drivers_license": 2},
         ),
+        # Word などが自動で曲げたアポストロフィの「Driver’s License」も免許証の見出しと読む
+        (
+            [["Name", "Driver’s License"], ["Taro Yamada", "301234567890"]],
+            {"name": 1, "drivers_license": 1},
+        ),
+        # 横持ちの見出しでも同じ（左の項目名を値と読まず、右の番号を免許証として拾う）
+        ([["Driver’s License", "301234567890"], ["Name", "Taro Yamada"]], {"name": 1, "drivers_license": 1}),
+        ([["Driver‘s License", "301234567890"]], {"drivers_license": 1}),
+        # 曲がったアポストロフィの名前（O’Brien・D’Angelo）は氏名のまま
+        ([["Name"], ["O’Brien"], ["D’Angelo"]], {"name": 2}),
         # 英語の名前が tel・mail・dob を含んでも氏名の列から落とさない（前は Patel・Ismail・Dobson を項目名とみなしていた）。
         # 見出しの行の長い項目名「Date of Birth」「Address Line 1」は、左隣の見出しの値として拾わない
         (

@@ -607,7 +607,8 @@ def header_category(header: str | None) -> str | None:
     core = RE_ANNOTATION.sub("", h).strip()
     if core:
         h = core
-    key = re.sub(r"[\s_\-・()（）\[\]【】:：]", "", h).lower()
+    # アポストロフィも除く（Word などが自動で曲げた「Driver’s License」も Driver's と同じに読む）
+    key = re.sub(r"[\s_\-・()（）\[\]【】:：'’‘]", "", h).lower()
     if key in HEADER_EXACT:
         return HEADER_EXACT[key]
     if not _HEADER_ANY.search(key):
@@ -678,12 +679,15 @@ _EN_HEADER_WORDS = frozenset(
 )
 _RE_EN_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
 _RE_ALPHA_RUN = re.compile(r"[a-z]+")
+# Word などが自動で曲げたアポストロフィ。英語の項目名（Driver’s License）が ASCII でない扱いにならないよう ' に揃える
+_CURLY_APOSTROPHES = str.maketrans("’‘", "''")
 
 
 def _is_header_word_value(v: str) -> bool:
     """表の値が「住所」「電話」「Date of Birth」などの見出し語そのもの（横持ちの表の項目名）か。"""
     if cannot_be_header(v) or header_category(v) is None:
         return False
+    v = v.translate(_CURLY_APOSTROPHES)
     if not v.isascii():
         return len(v) <= 12
     words = [w.lower() for w in _RE_EN_WORD.findall(v)]
@@ -710,6 +714,7 @@ def en_header_word_backed(core: str) -> bool:
     見出しになり、右隣の値を電話・メールの見出しで読んでいた。「Shipping Address」「Guardian Phone」は Address・Phone の
     語があるので見出しのまま。英字の語が無いもの・ASCII でないものは判定しない（True）。
     """
+    core = core.translate(_CURLY_APOSTROPHES)
     if not core.isascii():
         return True
     words = [w.lower() for w in _RE_EN_WORD.findall(core)]

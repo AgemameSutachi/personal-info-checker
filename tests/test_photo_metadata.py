@@ -423,12 +423,26 @@ def test_extended_xmp_guid_limit_and_bad_offsets():
     assert packets == [] and misc._XMP_EXT_SIG not in cleaned
 
 
+def test_extended_xmp_known_guid_after_limit_is_read():
+    """GUID の数が上限に届いた後でも、既に読んだ GUID の続きの区切りは組み直しに加える（上限を超えた新しい GUID は読まない）。"""
+    guids = [bytes([65 + i]) * 32 for i in range(misc._XMP_EXT_MAX_GUIDS)]
+    segs = [_ext_seg(g, 4, 0, b"ab") for g in guids]
+    segs.append(_ext_seg(b"z" * 32, 4, 0, b"zzzz"))
+    segs += [_ext_seg(g, 4, 2, b"cd") for g in guids]
+    assert misc._jpeg_extended_xmp(_with_segs(segs))[1] == [b"abcd"] * misc._XMP_EXT_MAX_GUIDS
+
+
 def test_extended_xmp_stops_at_image_data_and_truncation():
-    """画像のデータ（SOS）より後ろの区切りは読まない。途中で切れたファイル・一部の区切りが欠けた塊でも落ちない。"""
+    """画像のデータ（SOS）・終わり（EOI）より後ろの区切りは読まない。途中で切れたファイル・一部の区切りが欠けた塊でも落ちない。"""
     plain = _jpeg_with_xmp(_xmp_packet(), size=(16, 16))
     sos = plain.index(b"\xff\xda")
-    after = plain[: sos + 2] + _ext_seg(b"c" * 32, 3, 0, b"abc") + plain[sos + 2 :]
+    # SOS の頭（印＋長さ＋中身）の直後へ入れる。止めずに SOS を普通の区切りとして飛ばすと、ここで区切りを拾ってしまう
+    sos_end = sos + 2 + int.from_bytes(plain[sos + 2 : sos + 4], "big")
+    after = plain[:sos_end] + _ext_seg(b"c" * 32, 3, 0, b"abc") + plain[sos_end:]
     assert misc._jpeg_extended_xmp(after) == (after, [])
+    # EOI の後ろ。止めずに EOI の後ろの2バイトを長さ（2）と読んで進むと、続く区切りを拾ってしまう
+    after_eoi = plain[:2] + b"\xff\xd9\x00\x02" + _ext_seg(b"c" * 32, 3, 0, b"abc")
+    assert misc._jpeg_extended_xmp(after_eoi) == (after_eoi, [])
     # 区切りの長さがファイルの終わりを越える（途中で切れた）もの
     seg = _ext_seg(b"d" * 32, 3, 0, b"abc")
     cut = plain[:2] + seg[:-2]

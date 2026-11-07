@@ -162,17 +162,24 @@ def walk(roots: list[str], connection: dict | None = None, password: str = "") -
                 with os.scandir(long_path(folder)) as it:
                     entries = list(it)
             except PermissionError as e:
-                yield Entry("error", folder, reason=f"フォルダを開く権限がない: {e.strerror or e}")
+                yield Entry(
+                    "error",
+                    folder,
+                    reason=f"フォルダを開く権限がない: {e.strerror or e}。読む権限のあるアカウントで検査するか、管理者に読む権限を頼んでから再検査してください",
+                )
                 continue
             except OSError as e:
                 lost = _really_lost(e, root)
                 note = ""
                 if is_network_lost(e) and not lost:
                     note = "（共有には届いているので回線断ではない。Samba では権限の無いフォルダでこう返ることがある）"
+                hint = (
+                    "そのフォルダを読む権限があるかを確かめてから" if note else "パスとネットワークの接続を確かめてから"
+                )
                 yield Entry(
                     "error",
                     folder,
-                    reason=f"フォルダを読めなかった: {e.strerror or e}{note}",
+                    reason=f"フォルダを読めなかった: {e.strerror or e}{note}。{hint}再検査してください",
                     network_lost=lost,
                 )
                 continue
@@ -184,7 +191,7 @@ def walk(roots: list[str], connection: dict | None = None, password: str = "") -
                     yield Entry(
                         "error",
                         path,
-                        reason=f"属性を読めなかった: {e.strerror or e}",
+                        reason=f"属性を読めなかった: {e.strerror or e}。パスとネットワークの接続を確かめてから再検査してください",
                         network_lost=_really_lost(e, root),
                     )
                     continue

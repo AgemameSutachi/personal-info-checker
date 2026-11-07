@@ -803,5 +803,5 @@ def handle_dbf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     item.method = f"dBase の全レコード {n} 件（削除フラグ付き {deleted} 件を含む）"
     if truncated:
         raise PartialScan(
-            f"dBase のレコードが途中で切れている（見出しの件数 {n_records} 件のうち {truncated[0]} 件まで読んだ）"
+            f"dBase のレコードが途中で切れている（見出しの件数 {n_records} 件のうち {truncated[0]} 件まで読んだ。残りの行は検査していない。元のファイルを取り直してください）"
         )

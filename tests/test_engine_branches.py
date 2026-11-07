@@ -2,8 +2,10 @@
 
 読み取りの失敗を「検査不能」に振り分ける分岐・大きすぎて簡易検査に回したあとの失敗・NTFS の隠しストリーム（代替データストリーム）の検査。
 大きな内側のファイルの書き出し・外部の道具に渡すパス・FTP の接続先の設定が無いとき・分割アーカイブの続きの集め方。
+表のセルの文字列化と、説明文・注記のセルを見出しとみなさない判定（網羅の測り直しで通っていなかった所）。
 """
 
+import datetime as _dt
 import errno
 import os
 from pathlib import Path
@@ -261,3 +263,35 @@ def test_split_siblings_returns_nothing(tmp_path, name, others):
     """2つ目以降（.002・.part2.rar）・続きの無いふつうの zip と rar・書庫でないファイルは、続きを返さない。"""
     _touch(tmp_path, name, *others)
     assert engine.split_siblings(str(tmp_path / name)) == []
+
+
+@pytest.mark.parametrize(
+    "value, text",
+    [
+        (3.0, "3"),  # Excel の数値のセル（整数でも float で来る）は「3.0」にしない（番号・郵便番号を拾うため）
+        (3.5, "3.5"),
+        (1e18, "1e+18"),  # 大きすぎる float は int にしない（桁が化けた番号を作らない）
+        (b"\x00\x01", ""),  # バイト列のセルは文字にしない
+        (_dt.datetime(2024, 4, 1), "2024-04-01"),
+        (_dt.datetime(2024, 4, 1, 9, 30), "2024-04-01T09:30:00"),
+        (12, "12"),
+    ],
+)
+def test_cell_to_str(value, text):
+    """表のセルの値を検出に渡す文字列へ。"""
+    assert engine._cell_to_str(value) == text
+
+
+@pytest.mark.parametrize(
+    "cell, strength",
+    [
+        ("氏名", engine.HEADER_SURE),
+        ("氏名を記入してください", engine.HEADER_NONE),  # 説明文は見出しではない
+        ("住所は省略します", engine.HEADER_NONE),
+        ("※氏名", engine.HEADER_NONE),  # 注記
+        ("会議の議題", engine.HEADER_NONE),  # 個人情報の見出し語が無い
+    ],
+)
+def test_header_strength_rejects_sentences_and_notes(cell, strength):
+    """見出し語を含んでも、説明文・注記のセルは見出しとみなさない（その下の列を住所・氏名の列と読まない）。"""
+    assert engine._header_strength(cell) == strength

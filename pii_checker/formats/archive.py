@@ -40,6 +40,13 @@ SUPPORTED_ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_B
 CREATE_NO_WINDOW = 0x08000000
 
 
+# 7z.exe が見つからないときの次の手。画面・Web の版には 7z.exe の場所の設定が無く、指定できるのはコマンドの版の --sevenzip だけ
+SEVENZIP_HINT = (
+    "配布版は 7-Zip を同梱しているので、配布物の _internal\\7z が欠けていれば配布物を置き直す。"
+    "ほかは 7-Zip を Program Files に入れてから再検査する。コマンドの版は --sevenzip で 7z.exe の場所も指定できる"
+)
+
+
 def find_7z(configured: str | None) -> str | None:
     """7z.exe を探す（設定 → 実行ファイルの隣 → Program Files → PATH）。"""
     candidates = []
@@ -432,8 +439,7 @@ def handle_with_7z_exe(
         if blob.head(6) == b"7z\xbc\xaf\x27\x1c":
             return _handle_7z_python(ctx, blob, item, col, depth)
         raise Uncheckable(
-            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない"
-            "（7-Zip を入れるか、設定で 7z.exe の場所を指定して再検査）"
+            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）"
         )
     path = ctx.blob_as_path(blob)
     common = ["-sccUTF-8", "-scsUTF-8"]
@@ -603,7 +609,8 @@ def _check_bomb(ctx: ScanContext, total: int, archive_size: int) -> None:
         )
     if total > 10 * 1024**3 and archive_size > 0 and total / archive_size > ctx.options.max_expand_ratio:
         raise Uncheckable(
-            f"圧縮率が異常（{total / archive_size:.0f}倍・展開後 {total / 1024**3:.1f}GB）のため打ち切り（zip 爆弾の疑い）"
+            f"圧縮率が異常（{total / archive_size:.0f}倍・展開後 {total / 1024**3:.1f}GB）のため打ち切り"
+            "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
         )
 
 
@@ -630,7 +637,7 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
     exe = find_7z(ctx.options.sevenzip)
     try:
         if not exe:
-            raise Uncheckable("ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない")
+            raise Uncheckable(f"ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）")
         handle_with_7z_exe(ctx, blob, item, col, depth, kind="image")
         item.notes.append(
             "ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外。必要なら「イメージの未使用領域も走査」を有効に）"
@@ -975,11 +982,12 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
             if ctx.expanded_bytes + written > ctx.options.max_expand_bytes:
                 raise Uncheckable(
                     f"展開後の大きさが上限（{size_text(ctx.options.max_expand_bytes)}）を超えたため打ち切り"
-                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してからそのフォルダを検査してください）"
+                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             if written > 10 * 1024**3 and written / max(1, blob.size) > ctx.options.max_expand_ratio:
                 raise Uncheckable(
-                    f"圧縮率が異常（{written / max(1, blob.size):.0f}倍）のため打ち切り（圧縮爆弾の疑い）"
+                    f"圧縮率が異常（{written / max(1, blob.size):.0f}倍）のため打ち切り"
+                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             dst.write(chunk)
     item.method = f"展開（{written:,}バイト）"

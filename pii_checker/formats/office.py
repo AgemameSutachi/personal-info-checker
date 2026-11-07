@@ -489,7 +489,10 @@ def handle_ole(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     try:
         ole = olefile.OleFileIO(data)
     except Exception as e:
-        raise Uncheckable(f"OLE 複合文書として開けなかった（壊れている可能性）: {e}")
+        raise Uncheckable(
+            "OLE 複合文書として開けなかった（壊れている可能性。作ったアプリで開けるなら、"
+            f"別名で保存した写しを検査してください）: {e}"
+        )
     with ole:
         streams = ["/".join(e) for e in ole.listdir(streams=True, storages=False)]
         top = {s.split("/")[0] for s in streams}
@@ -503,7 +506,11 @@ def handle_ole(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                 item.kind = "暗号化された Office 文書（docx/xlsx/pptx）"
             decrypted, was_encrypted = try_decrypt_office(ctx, data)
             if not was_encrypted and "EncryptedPackage" in top:
-                raise Uncheckable("暗号化された Office 文書だが、暗号化の方式を判別できず復号できなかった")
+                raise Uncheckable(
+                    "暗号化された Office 文書だが、暗号化の方式を判別できず復号できなかった"
+                    "（Office で開いてパスワードを外し、別名で保存した写しを検査してください。"
+                    "パスワードが分からなければ持ち主に中身を確かめてもらってください）"
+                )
             if was_encrypted:
                 item.method = "暗号化を解除して中身を検査"
                 item.notes.append("暗号化されていたため、パスワード（または既定値）で復号した")

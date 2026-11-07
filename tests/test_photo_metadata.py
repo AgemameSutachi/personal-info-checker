@@ -392,3 +392,61 @@ def test_gps_photos_are_counted_in_summary(tmp_path):
     v0 = verdict.decide({**summary, "gps_photos": 0}, store.job(job)["state"])
     assert not any("撮影場所" in line for line in v0.detail), v0.detail
     assert v.level == v0.level and v.level != "found", (v.level, v0.level)
+
+
+def _ext_seg(guid: bytes, total: int, offset: int, chunk: bytes) -> bytes:
+    """Extended XMP の区切り1つ（APP1）を作る。"""
+    body = misc._XMP_EXT_SIG + guid + total.to_bytes(4, "big") + offset.to_bytes(4, "big") + chunk
+    return b"\xff\xe1" + (len(body) + 2).to_bytes(2, "big") + body
+
+
+def _with_segs(segs: list[bytes]) -> bytes:
+    """XMP の無い小さな JPEG の頭（SOI の直後）に区切りを入れる。"""
+    plain = _jpeg_with_xmp(_xmp_packet(), size=(16, 16))
+    return plain[:2] + b"".join(segs) + plain[2:]
+
+
+def test_extended_xmp_guid_limit_and_bad_offsets():
+    """GUID は上限の数まで読む。全体の長さをはみ出す位置の区切り・40バイト以下の短い区切りは中身を読まず埋める。"""
+    guids = [str(i).encode() * 32 for i in range(misc._XMP_EXT_MAX_GUIDS + 1)]
+    data = _with_segs([_ext_seg(g, 4, 0, b"ab" + g[:2]) for g in guids])
+    cleaned, packets = misc._jpeg_extended_xmp(data)
+    assert packets == [b"ab" + g[:2] for g in guids[: misc._XMP_EXT_MAX_GUIDS]]
+    assert misc._XMP_EXT_SIG not in cleaned and len(cleaned) == len(data)
+    # 位置が全体の長さをはみ出す区切りは捨て、その分は空白のまま
+    data = _with_segs([_ext_seg(b"a" * 32, 6, 0, b"abc"), _ext_seg(b"a" * 32, 6, 4, b"xyz")])
+    assert misc._jpeg_extended_xmp(data)[1] == [b"abc   "]
+    # 頭（GUID・長さ・位置）だけで中身の無い区切りは読まないが埋める
+    short = misc._XMP_EXT_SIG + b"b" * 32 + bytes(8)
+    data = _with_segs([b"\xff\xe1" + (len(short) + 2).to_bytes(2, "big") + short])
+    cleaned, packets = misc._jpeg_extended_xmp(data)
+    assert packets == [] and misc._XMP_EXT_SIG not in cleaned
+
+
+def test_extended_xmp_known_guid_after_limit_is_read():
+    """GUID の数が上限に届いた後でも、既に読んだ GUID の続きの区切りは組み直しに加える（上限を超えた新しい GUID は読まない）。"""
+    guids = [bytes([65 + i]) * 32 for i in range(misc._XMP_EXT_MAX_GUIDS)]
+    segs = [_ext_seg(g, 4, 0, b"ab") for g in guids]
+    segs.append(_ext_seg(b"z" * 32, 4, 0, b"zzzz"))
+    segs += [_ext_seg(g, 4, 2, b"cd") for g in guids]
+    assert misc._jpeg_extended_xmp(_with_segs(segs))[1] == [b"abcd"] * misc._XMP_EXT_MAX_GUIDS
+
+
+def test_extended_xmp_stops_at_image_data_and_truncation():
+    """画像のデータ（SOS）・終わり（EOI）より後ろの区切りは読まない。途中で切れたファイル・一部の区切りが欠けた塊でも落ちない。"""
+    plain = _jpeg_with_xmp(_xmp_packet(), size=(16, 16))
+    sos = plain.index(b"\xff\xda")
+    # SOS の頭（印＋長さ＋中身）の直後へ入れる。止めずに SOS を普通の区切りとして飛ばすと、ここで区切りを拾ってしまう
+    sos_end = sos + 2 + int.from_bytes(plain[sos + 2 : sos + 4], "big")
+    after = plain[:sos_end] + _ext_seg(b"c" * 32, 3, 0, b"abc") + plain[sos_end:]
+    assert misc._jpeg_extended_xmp(after) == (after, [])
+    # EOI の後ろ。止めずに EOI の後ろの2バイトを長さ（2）と読んで進むと、続く区切りを拾ってしまう
+    after_eoi = plain[:2] + b"\xff\xd9\x00\x02" + _ext_seg(b"c" * 32, 3, 0, b"abc")
+    assert misc._jpeg_extended_xmp(after_eoi) == (after_eoi, [])
+    # 区切りの長さがファイルの終わりを越える（途中で切れた）もの
+    seg = _ext_seg(b"d" * 32, 3, 0, b"abc")
+    cut = plain[:2] + seg[:-2]
+    assert misc._jpeg_extended_xmp(cut) == (cut, [])
+    # 2つに分けた片方だけ: 欠けた所は空白で、読める側の値だけ残る
+    half = _with_segs([_ext_seg(b"e" * 32, 8, 4, b"wxyz")])
+    assert misc._jpeg_extended_xmp(half)[1] == [b"    wxyz"]

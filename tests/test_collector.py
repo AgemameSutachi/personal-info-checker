@@ -90,6 +90,14 @@ def table_counts(rows) -> dict[str, int]:
             [["Name", "Remarks", "Department", "Job Title", "Join Date"], ["Taro Yamada", "-", "Sales", "Manager", ""]],
             {"name": 1},
         ),
+        # 区切りの無い大文字・小文字の項目名（HOMEPHONE・TELNO・emailaddress）も、左隣の Name の値・氏名の列の値と読まない。
+        # 頭だけ大文字の名前（Ageno）は見出しの語のつなぎに当たっても名前のまま
+        (
+            [["Name", "HOMEPHONE", "TELNO", "emailaddress"], ["Taro Yamada", "0312345678", "0612345678", ""]],
+            {"name": 1, "phone": 2},
+        ),
+        ([["Name"], ["HOMEPHONE"], ["Taro Yamada"], ["Ageno"]], {"name": 2}),
+        ([["Name"], ["AGENO"], ["YAMADA"]], {"name": 2}),  # パスポート式の全部大文字の姓は名前のまま
         # 1行目が横持ちの申込書でも、値の英語の名前は今までどおり拾う（Roman・Kana は見出しの語だが名前にもある）
         ([["Name", "Grant Price"], ["Phone", "090-1234-5678"]], {"name": 1, "phone": 1}),
         ([["Name", "Roman"], ["Phone", "090-1234-5678"]], {"name": 1, "phone": 1}),

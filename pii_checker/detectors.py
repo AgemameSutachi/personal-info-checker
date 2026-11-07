@@ -1399,7 +1399,11 @@ def _in_url_path(text: str, start: int, end: int) -> bool:
     クエリの値（「?id=123456789018」）・「;jsessionid=」の類は番号が漏れる経路なので残す。
     URL の後ろに空白なしで続く文（「https://a.jp/、123456789018」「…/x,山田,123456789018」）も、
     句読点・カンマで URL の外とみなして残す。日本語を含むパスも同じく外とみなす（見落とすより残す側）。
+    検出のすぐ前が「:」「=」のもの（「https://a.jp/x:123456789018」・「?」の無い「…/x=123456789018」）は、
+    パスの一部ではなく項目の値として書いた形なので残す（配信の URL の番号は「/」「_」の後ろに来る）。
     """
+    if start > 0 and text[start - 1] in ":=":
+        return False
     i = text.rfind("://", max(0, start - _URL_PATH_MAX), start)
     if i <= 0 or not (text[i - 1].isascii() and text[i - 1].isalpha()):
         return False

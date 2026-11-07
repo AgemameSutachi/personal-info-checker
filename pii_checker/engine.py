@@ -86,9 +86,12 @@ COLUMN_ID_TRACK = 200  # 1列で数える異なる値の上限（ここで判定
 COLUMN_ID_RELEASE_STREAK = 8
 RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 # 氏名の列が会社名の列か（株の表の英語の見出し「name」の銘柄名・2026-11-07）。列の異なる値のうち会社の印（法人格など）を
-# 含むものが COLUMN_ORG_MIN 個以上、かつ COLUMN_ORG_MIN_RATIO 以上なら、その列で見出しのおかげで拾えた氏名を 低 に下げる
-# （人の名前の列に会社の印はまず入らない。法人格の無い社名「トヨタ自動車」は1つずつでは人の名前と見分けられない）
-COLUMN_ORG_MIN = 3
+# 含むものが COLUMN_ORG_MIN_RATIO 以上なら、その列で見出しのおかげで拾えた氏名を 低 に下げる
+# （人の名前の列に会社の印はまず入らない。法人格の無い社名「トヨタ自動車」は1つずつでは人の名前と見分けられない）。
+# 異なる値が COLUMN_ORG_MIN_DISTINCT 個そろうまでは判定しない（名簿の先頭に法人の顧客が数件並んだだけで、後ろの人の名前を
+# 下げないため）。銘柄の一覧の会社の印の割合は、異なる値 200 個の時点で 6〜74%（2026-11-07・株のデータの28ファイル。
+# 松井の分売 6%・優待 9%・JPX の銘柄 10% があるので 10% にはしない）
+COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
 
@@ -897,7 +900,7 @@ class _ColumnOrgs:
     """表の氏名の列ごとに、異なる値と、そのうち会社の印を含む数を数え、会社名の列（銘柄の一覧など）かを決める。
 
     _ColumnDigits と同じく表ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで（そこで判定を固める）。
-    判定が付く前に読んだ値は今までどおり（中）。
+    判定が付く前（異なる値が COLUMN_ORG_MIN_DISTINCT 個未満）に読んだ値は今までどおり（中）。小さな表は判定しない。
     """
 
     __slots__ = ("_values", "_orgs", "_decided", "_is_name", "verdict")
@@ -923,7 +926,9 @@ class _ColumnOrgs:
         if v and v not in values:
             values.add(v)
             orgs = self._orgs[c_idx] = self._orgs.get(c_idx, 0) + detectors.org_name_marked(v)
-            self.verdict[c_idx] = orgs >= COLUMN_ORG_MIN and orgs >= len(values) * COLUMN_ORG_MIN_RATIO
+            if len(values) >= COLUMN_ORG_MIN_DISTINCT:
+                # 判定の後も、上限までは値が増えるたびに割合を見直す（割合が下がれば 中 に戻る）
+                self.verdict[c_idx] = orgs >= len(values) * COLUMN_ORG_MIN_RATIO
             if len(values) >= COLUMN_ID_TRACK:
                 self._decided.add(c_idx)
                 del self._values[c_idx]

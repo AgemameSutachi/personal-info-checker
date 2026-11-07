@@ -1141,19 +1141,41 @@ def test_name_label_followed_by_description_is_not_name(text):
     assert "name" not in types_of(text)
 
 
+def _label_name_confidences(text):
+    """「氏名の見出し語＋名前」の検出の確度の一覧。"""
+    return [
+        h.confidence.name
+        for h in detect(normalize(text))
+        if h.pii_type == "name" and h.rule.startswith("氏名の見出し語＋名前")
+    ]
+
+
 @pytest.mark.parametrize(
     "text",
     [
-        # 固定幅の表の見出し行の、隣の列の見出し（2026-11-07・株のデータの報告の文）
-        "名前          年率    超過    最大DD\nベンチ      5.2%    0.0%   -12%",
-        "名前      年率      超過\n\nA戦略     3.1%      1.2%",  # 空行をはさんだデータの行
-        "名前\t年率\t超過\nベンチ\t5.2%\t0.0%",  # タブ区切り
-        "氏名      住所      電話",  # 値そのものが個人情報の見出しの語
+        # 固定幅の表の見出し行で、右の列の見出しが個人情報の見出しの語
+        "氏名      住所      電話",
         "氏名　　住所　　電話番号　　生年月日",
     ],
 )
-def test_name_label_in_fixed_width_header_row_is_not_name(text):
-    assert "name" not in types_of(text)
+def test_name_label_beside_pii_header_word_is_not_name(text):
+    assert _label_name_confidences(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 固定幅の表の見出し行の右の列の見出しで、次の行がデータの行（2026-11-07・株のデータの報告の文）
+        "名前          年率    超過    最大DD\nベンチ      5.2%    0.0%   -12%",
+        "名前      年率      超過\n\nA戦略     3.1%      1.2%",  # 空行をはさんだデータの行
+        "名前　　年率　　超過\nベンチ　　5.2%　　0.0%",  # 全角空白の区切り
+        # 帳票の次の行が同じ形になるもの（見出しの語でない項目名＋数字）は、本物の名前でもあるので 低 で残す
+        "氏名    山田太郎    営業部\n入社日    2024/01/01    正社員",
+        "氏名    山田太郎    フリガナ\nヤマダタロウ    1990    男",
+    ],
+)
+def test_name_label_in_fixed_width_header_row_is_low(text):
+    assert _label_name_confidences(text) == ["LOW"]
 
 
 @pytest.mark.parametrize(
@@ -1163,13 +1185,26 @@ def test_name_label_in_fixed_width_header_row_is_not_name(text):
         "名前    山田太郎    年齢 40",  # 行に数字がある（値の入った帳票の行）
         "名前 山田太郎 営業部\n鈴木 3.1% 1.2%",  # 空白1つの区切りは表の列とみなさない
         "氏名    山田太郎    営業部\n電話    03-1234-5678    内線12",  # 次の行の最初のセルが見出しの語
-        "氏名    山田太郎    営業部\n担当    東京    大阪",  # 次の行に数字が無い
+        "氏名    山田太郎    営業部\n勤務地    東京    大阪",  # 次の行に数字が無い
         "氏名    山田太郎    営業部\nA    1    2    3",  # 次の行のセルの数が違う
+        "氏名    山田太郎    営業部\n職位    課長    3年",  # 値と同じ列のセルに数字が無い
+        "お名前    山田太郎    様\n001    田中    東京",
+        "氏名    山田太郎    営業部\n\n\n\n2024    1    2",  # 空行が3つ以上はさまる
         "名前      年率      超過",  # 次の行が無く、値が見出しの語でもない（見落とさない側）
     ],
 )
 def test_name_label_not_header_row_still_found(text):
-    assert "name" in types_of(text)
+    assert _label_name_confidences(text) == ["MEDIUM"]
+
+
+def test_name_label_header_row_check_is_not_quadratic():
+    # 改行の無い長い本文で、検出ごとに行の端を本文の全体から探さない（評価で 4 万回 4.9 秒だった）
+    import time
+
+    text = "名前    山田    " * 40000
+    started = time.perf_counter()
+    detect(text)
+    assert time.perf_counter() - started < 3.0
 
 
 @pytest.mark.parametrize(

@@ -1703,6 +1703,9 @@ _RE_SPACE = re.compile(r"[ 　]")
 # 固定幅の表の列の区切り（空白2つ以上・タブ・全角空白。_name_label_in_header_row）と、見る行の長さの上限
 _RE_CELL_GAP = re.compile(r"(?: {2,}|[\t　][ \t　]*| [\t　][ \t　]*)")
 _HEADER_ROW_MAX = 200
+# 見出し行とデータの行の間にはさんでよい空行の数
+_HEADER_ROW_BLANKS = 2
+NAME_IN_HEADER_ROW_NOTE = "（固定幅の表の見出し行の形のため 低）"
 # 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
 # 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
 # 「=」「<」「>」も入れない（`氏名=山田太郎 年齢=40`・`氏名=山田太郎<br>`）。「÷」のほかの演算子は、前後に空白があって
@@ -1717,53 +1720,70 @@ def _fixed_width_cells(line: str) -> list[str]:
     return [c for c in _RE_CELL_GAP.split(line.strip(" \t　\r")) if c]
 
 
-def _name_label_in_header_row(text: str, h: Hit) -> bool:
-    """「氏名の見出し語＋名前」が、固定幅の表の見出し行の隣の見出しを名前に読んだものか。
+def _line_bounds(text: str, start: int, end: int) -> tuple[int, int] | None:
+    """text[start:end] を含む行の始まりと終わり。行が _HEADER_ROW_MAX 文字を超えるなら None。
 
-    「名前      年率      超過」「氏名      住所      電話」では、見出し語の後の空白の並びの先の語
-    （次の列の見出し）を名前に読んでいた（2026-11-07 の株のデータの報告の文で見つけた形）。次の4つがそろうものだけ:
-    - 見出し語と値の間が、空白2つ以上・タブ・全角空白（表の列の区切り）
-    - その行が3つ以上のセルに分かれ、数字を1つも含まない（見出し行には値が無い）。行が _HEADER_ROW_MAX 文字までのもの
-    - 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）か、
-      次の空でない行が同じ数のセルに分かれ、数字を含むセルがあり、最初のセルが見出しの語でない（表のデータの行）
-    「氏名    山田太郎    営業部」の次の行が「電話    03-1234-5678    内線12」のような書式の帳票は、
-    次の行の最初のセルが見出しの語なので残す。
+    行の端は前後 _HEADER_ROW_MAX 文字の中だけを探す（改行の無い長い本文で、検出ごとに全体をなめないため）。
     """
-    sep_start = h.start
-    while sep_start > 0 and text[sep_start - 1] in " \t　":
-        sep_start -= 1
-    if not _RE_CELL_GAP.fullmatch(text, sep_start, h.start):
-        return False
-    line_start = text.rfind("\n", 0, h.start) + 1
-    line_end = text.find("\n", h.end)
+    line_start = text.rfind("\n", max(0, start - _HEADER_ROW_MAX), start) + 1
+    if line_start == 0 and start > _HEADER_ROW_MAX:
+        return None
+    line_end = text.find("\n", end, end + _HEADER_ROW_MAX)
     if line_end < 0:
+        if len(text) > end + _HEADER_ROW_MAX:
+            return None
         line_end = len(text)
     if line_end - line_start > _HEADER_ROW_MAX:
-        return False
+        return None
+    return line_start, line_end
+
+
+def _name_label_in_header_row(text: str, h: Hit) -> str:
+    """「氏名の見出し語＋名前」が、固定幅の表の見出し行の隣の見出しを名前に読んだものかを返す。
+
+    「名前      年率      超過」「氏名      住所      電話」では、見出し語の後の空白の並びの先の語
+    （次の列の見出し）を名前に読んでいた（2026-11-07 の株のデータの報告の文で見つけた形）。見るのは、
+    見出し語と値の間が空白2つ以上・タブ・全角空白（表の列の区切り）で、その行が3つ以上のセルに分かれ、
+    数字を1つも含まない（見出し行には値が無い）・_HEADER_ROW_MAX 文字までの行だけ。
+    - "drop": 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）
+    - "low": 次の空でない行が同じ数のセルに分かれ、値と同じ列のセルに数字があり、最初のセルが見出しの語でない
+      （表のデータの行「ベンチ      5.2%    0.0%」）。帳票の「氏名    山田太郎    営業部」の次の行が
+      「入社日    2024/01/01    正社員」のように同じ形になることがあるので、落とさずに 低 にする
+    - "": 上のどれでもない。次の行が「電話    03-1234-5678    内線12」のように見出しの語で始まる帳票・
+      次の行の無い1行だけの見出しは、今までどおり 中
+    """
+    sep_start = h.start
+    while sep_start > max(0, h.start - _HEADER_ROW_MAX) and text[sep_start - 1] in " \t　":
+        sep_start -= 1
+    if not _RE_CELL_GAP.fullmatch(text, sep_start, h.start):
+        return ""
+    bounds = _line_bounds(text, h.start, h.end)
+    if bounds is None:
+        return ""
+    line_start, line_end = bounds
     line = text[line_start:line_end]
     if any(c.isdigit() for c in line):
-        return False
+        return ""
     cells = _fixed_width_cells(line)
     if len(cells) < 3:
-        return False
+        return ""
     if header_category(_RE_SPACE.split(h.value, maxsplit=1)[0]) is not None:
-        return True
+        return "drop"
+    column = len(_fixed_width_cells(text[line_start : h.start]))
     pos = line_end + 1
-    while pos < len(text):
-        nxt_end = text.find("\n", pos)
-        if nxt_end < 0:
-            nxt_end = len(text)
-        if nxt_end - pos > _HEADER_ROW_MAX:
-            return False
-        nxt = _fixed_width_cells(text[pos:nxt_end])
+    for _ in range(_HEADER_ROW_BLANKS + 1):
+        if pos >= len(text):
+            return ""
+        nxt_bounds = _line_bounds(text, pos, pos)
+        if nxt_bounds is None:
+            return ""
+        nxt = _fixed_width_cells(text[pos : nxt_bounds[1]])
         if nxt:
-            return (
-                len(nxt) == len(cells)
-                and any(any(c.isdigit() for c in cell) for cell in nxt)
-                and header_category(nxt[0]) is None
-            )
-        pos = nxt_end + 1
-    return False
+            if len(nxt) == len(cells) and any(c.isdigit() for c in nxt[column]) and header_category(nxt[0]) is None:
+                return "low"
+            return ""
+        pos = nxt_bounds[1] + 1
+    return ""
 
 
 def _name_label_code_shape(text: str, h: Hit) -> str:
@@ -1887,14 +1907,18 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
                 continue
             # 固定幅の表の見出し行（「名前      年率      超過」の「年率」）
-            if _name_label_in_header_row(text, h):
+            header_row = _name_label_in_header_row(text, h)
+            if header_row == "drop":
                 continue
-            # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
-            shape = _name_label_code_shape(text, h)
-            if shape == "drop":
-                continue
-            if shape == "low":
-                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
+            if header_row == "low":
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_HEADER_ROW_NOTE)
+            else:
+                # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
+                shape = _name_label_code_shape(text, h)
+                if shape == "drop":
+                    continue
+                if shape == "low":
+                    h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない
             # （「田中部長殿」のように姓が前に付いたものは人なので残す）。空白は姓の直後に入りうる（「関 係者様」）ので詰めて比べる

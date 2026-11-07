@@ -677,7 +677,7 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
             item.method += "＋イメージ全体の生データ走査"
         else:  # オンで検査したときに「オンにして再検査」と案内しない
             item.notes.append(
-                f"ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外）。{DEEP_SWEEP_HINT}"
+                f"ファイルシステムの中のファイルを検査した（削除されたファイル・ディスクイメージの空き領域は対象外）。{DEEP_SWEEP_HINT}"
             )
         return
     except NeedPassword:

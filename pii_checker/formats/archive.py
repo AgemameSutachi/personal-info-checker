@@ -20,7 +20,9 @@ import zipfile
 from pathlib import Path
 
 from ..engine import (
+    DEEP_SWEEP_HINT,
     IN_MEMORY_LIMIT,
+    TEMP_DIR_HINT,
     Blob,
     Collector,
     ItemResult,
@@ -496,7 +498,7 @@ def handle_with_7z_exe(
                     f"{blob.display}!{e['Path']}",
                     Status.UNCHECKABLE,
                     f"一時領域の空きが足りず展開できない（必要 {batch_size / 1024**3:.1f}GB・空き {free / 1024**3:.1f}GB）。"
-                    "設定で一時フォルダを空きの多いドライブにして再検査",
+                    + TEMP_DIR_HINT,
                     depth + 1,
                     size=int(e.get("Size") or 0),
                 )
@@ -639,14 +641,15 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         if not exe:
             raise Uncheckable(f"ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）")
         handle_with_7z_exe(ctx, blob, item, col, depth, kind="image")
-        item.notes.append(
-            "ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外。必要なら「イメージの未使用領域も走査」を有効に）"
-        )
         if ctx.options.deep_image_sweep:
             with blob.open() as f:
                 for s in iter_strings_chunked(f.read):
                     col.add_text(s, "イメージ全体の生データ", method="生データ走査", raw=True)
             item.method += "＋イメージ全体の生データ走査"
+        else:  # オンで検査したときに「オンにして再検査」と案内しない
+            item.notes.append(
+                f"ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外）。{DEEP_SWEEP_HINT}"
+            )
         return
     except NeedPassword:
         raise

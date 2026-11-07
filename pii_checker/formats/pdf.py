@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from ..engine import Blob, Collector, ItemResult, NeedPassword, ScanContext, Uncheckable
+from ..engine import OCR_OFF_HINT, Blob, Collector, ItemResult, NeedPassword, ScanContext, Uncheckable
 from ..models import Status
 
 OCR_DPI = 200
@@ -267,7 +267,7 @@ def _needs_ocr(page, text: str) -> str:
 
 def _ocr_page(ctx: ScanContext, page, col: Collector, no: int) -> tuple[bool, str]:
     if not ctx.options.ocr:
-        return False, "OCR を無効にして実行した"
+        return False, f"OCR を無効にして実行した。{OCR_OFF_HINT}"
     from .. import ocr
 
     if not ocr.is_available():

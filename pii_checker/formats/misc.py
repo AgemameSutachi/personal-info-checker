@@ -8,7 +8,17 @@ import html
 import io
 import re
 
-from ..engine import Blob, Collector, ItemResult, OutOfScope, PartialScan, ScanContext, Uncheckable
+from ..engine import (
+    IMAGE_TOO_LARGE_HINT,
+    OCR_OFF_HINT,
+    Blob,
+    Collector,
+    ItemResult,
+    OutOfScope,
+    PartialScan,
+    ScanContext,
+    Uncheckable,
+)
 from ..models import GPS_NOTE_MARK
 from ..textdecode import decode_text, entropy, iter_strings_chunked
 
@@ -953,14 +963,14 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
             )
         return
     if not ctx.options.ocr:
-        raise Uncheckable("OCR を無効にして実行したため画像の中の文字を検査していない（要目視）")
+        raise Uncheckable(f"OCR を無効にして実行したため画像の中の文字を検査していない（要目視。{OCR_OFF_HINT}）")
     if not ocr.is_available():
         raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}")
     try:
         text = ocr.ocr_image_bytes(data)
     except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）
         if "画素数が大きすぎる" in str(e):
-            raise Uncheckable(f"画像の画素数が大きすぎるため検査していない（要目視）: {e}")
+            raise Uncheckable(f"画像の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {e}")
         detail = str(e).removeprefix(
             "画像を読み込めませんでした（壊れている可能性があります）: "
         )  # 同じ言い回しを重ねない
@@ -982,7 +992,9 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
 
     scan_xmp(data, item, col)  # 写真の情報は、OCR を使わなくても読む
     if not ctx.options.ocr:
-        raise Uncheckable("OCR を無効にして実行したため画像（JPEG XR）の中の文字を検査していない（要目視）")
+        raise Uncheckable(
+            f"OCR を無効にして実行したため画像（JPEG XR）の中の文字を検査していない（要目視。{OCR_OFF_HINT}）"
+        )
     if not ocr.is_available():
         raise Uncheckable(
             "OCR が使えないため画像（JPEG XR）の中の文字を検査できない（要目視。JPEG XR は Windows の部品で開くため、"
@@ -992,7 +1004,7 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
         img = ocr.open_with_wic(data)
     except ValueError as e:
         if "画素数が大きすぎる" in str(e):
-            raise Uncheckable(f"画像（JPEG XR）の画素数が大きすぎるため検査していない（要目視）: {e}")
+            raise Uncheckable(f"画像（JPEG XR）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {e}")
         raise Uncheckable(f"画像（JPEG XR）を開けなかった（{IMAGE_BROKEN_HELP}）: {e}")
     w, h = img.size
     if max(w, h) < ctx.options.min_image_px:
@@ -1044,7 +1056,9 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
     scan_exif(exif_from_raw(head), item, col)  # 写真の情報は、OCR を使わなくても読む
     scan_xmp(head, item, col)
     if not ctx.options.ocr:
-        raise Uncheckable("OCR を無効にして実行したため画像（HEIC/AVIF）の中の文字を検査していない（要目視）")
+        raise Uncheckable(
+            f"OCR を無効にして実行したため画像（HEIC/AVIF）の中の文字を検査していない（要目視。{OCR_OFF_HINT}）"
+        )
     if not ocr.is_available():
         raise Uncheckable(
             f"OCR が使えないため画像（HEIC/AVIF）の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}"
@@ -1056,14 +1070,18 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
     except ValueError as e:
         wic_error = str(e)
         if "画素数が大きすぎる" in wic_error:  # 拡張を入れても直らないので、入れ方を案内しない
-            raise Uncheckable(f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（要目視）: {wic_error}")
+            raise Uncheckable(
+                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {wic_error}"
+            )
         no_codec = _WIC_COMPONENT_NOT_FOUND in wic_error
         detail = _WIN_ERROR.search(wic_error)
         detail = f"（詳細: {detail.group(0)}）" if detail else ""
         try:
             img = _open_heif_with_pillow(data)
         except Image.DecompressionBombError as pe:
-            raise Uncheckable(f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（要目視）: {pe}")
+            raise Uncheckable(
+                f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（{IMAGE_TOO_LARGE_HINT}）: {pe}"
+            )
         except Exception as pe:  # pillow-heif の中の失敗（壊れている・未対応の符号化）
             help_text = f"。{HEIF_HELP}" if no_codec else f"。{IMAGE_BROKEN_HELP}"
             raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）{help_text}: {pe}")

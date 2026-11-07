@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1866,21 +1866,39 @@ _HASH_LIKE = re.compile(
 )
 # _HASH_LIKE に当たる最も短い並び（「0x」＋12文字）。これより短い本文は並びを探さない
 _HASH_LIKE_MIN = 14
+# _HASH_LIKE の並びに入りうる文字（英数字と「-」）。並びはこの文字の続く区間（語）をまたがない
+_HASH_WORD_CHARS = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-")
+_HASH_WORD = re.compile(r"[0-9A-Za-z-]+")
 
 
 def _drop_inside_hash(text: str, hits: list[Hit]) -> list[Hit]:
-    """ハッシュ・UUID の並びの中で見つけた検出を除く（検出があるときだけ呼ばれる）。"""
+    """ハッシュ・UUID の並びの中で見つけた検出を除く（検出があるときだけ呼ばれる）。
+
+    本文全体ではなく、検出を含む語（英数字と「-」の続く区間）の中だけで並びを探す。並びの前後は英数字で
+    ないことが条件なので、語の外の並びが検出を覆うことはなく、本文全体を探したときと結果は同じ
+    （大きなログで本文全体を探すと、検出が数件でも v1.3.0 より 1.4 倍遅くなっていた・2026-11-08）。
+    """
     if len(text) < _HASH_LIKE_MIN:
         return hits  # 16進の並び・UUID の入らない短い本文
-    spans = [m.span() for m in _HASH_LIKE.finditer(text) if not m.group().replace("-", "").isdigit()]
-    if not spans:
-        return hits
-    starts = [s for s, _ in spans]
     out = []
+    word = (-1, -1)  # 前の検出で調べた語の区間と、その中の並び
+    spans: list[tuple[int, int]] = []
+    n = len(text)
     for h in hits:
-        # 並びは位置の順で重ならないので、検出の始まりより前で最後に始まる並びだけを見ればよい
-        i = bisect_right(starts, h.start) - 1
-        if i >= 0 and h.end <= spans[i][1]:
+        if not _HASH_WORD.fullmatch(text, h.start, h.end):
+            out.append(h)  # 英数字と「-」以外を含む検出は、並びの中に収まらない
+            continue
+        if not (word[0] <= h.start and h.end <= word[1]):
+            a, b = h.start, h.end
+            while a > 0 and text[a - 1] in _HASH_WORD_CHARS:
+                a -= 1
+            while b < n and text[b] in _HASH_WORD_CHARS:
+                b += 1
+            word = (a, b)
+            spans = []
+            if b - a >= _HASH_LIKE_MIN:  # 最も短い並びより短い語に並びは無い
+                spans = [m.span() for m in _HASH_LIKE.finditer(text, a, b) if not m.group().replace("-", "").isdigit()]
+        if any(s <= h.start and h.end <= e for s, e in spans):
             continue
         out.append(h)
     return out

@@ -180,7 +180,7 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             item.notes.append("文字の層が無いページを OCR で読んだ: " + _pages_str(ocr_pages))
         if ocr_missing:
             raise Uncheckable(
-                f"画像だけのページ（{_pages_str(ocr_missing)}）を OCR できず検査できていない（要目視）: {ocr_reason}"
+                f"画像だけのページ（{_pages_str(ocr_missing)}）を OCR できず検査できていない（要目視）。{ocr_reason}"
             )
         keep_warnings()
         damage = _damage_warning("\n".join(warnings))

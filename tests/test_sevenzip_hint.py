@@ -22,6 +22,7 @@ from pii_checker.remedy_write import RemedyError  # noqa: E402
 def assert_hint(reason: str) -> None:
     assert "設定で" not in reason, reason
     assert "Program Files" in reason and "--sevenzip" in reason, reason
+    assert "_internal\\7z" in reason, reason  # 配布版は同梱しているので、欠けたときは配布物を置き直す
 
 
 def test_rar_without_7z_names_what_the_user_can_do(tmp_path, monkeypatch):

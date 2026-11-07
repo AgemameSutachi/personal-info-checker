@@ -41,7 +41,10 @@ CREATE_NO_WINDOW = 0x08000000
 
 
 # 7z.exe が見つからないときの次の手。画面・Web の版には 7z.exe の場所の設定が無く、指定できるのはコマンドの版の --sevenzip だけ
-SEVENZIP_HINT = "7-Zip を Program Files に入れてから再検査する。コマンドの版は --sevenzip で 7z.exe の場所も指定できる"
+SEVENZIP_HINT = (
+    "配布版は 7-Zip を同梱しているので、配布物の _internal\\7z が欠けていれば配布物を置き直す。"
+    "ほかは 7-Zip を Program Files に入れてから再検査する。コマンドの版は --sevenzip で 7z.exe の場所も指定できる"
+)
 
 
 def find_7z(configured: str | None) -> str | None:
@@ -436,7 +439,7 @@ def handle_with_7z_exe(
         if blob.head(6) == b"7z\xbc\xaf\x27\x1c":
             return _handle_7z_python(ctx, blob, item, col, depth)
         raise Uncheckable(
-            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない" f"（{SEVENZIP_HINT}）"
+            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）"
         )
     path = ctx.blob_as_path(blob)
     common = ["-sccUTF-8", "-scsUTF-8"]

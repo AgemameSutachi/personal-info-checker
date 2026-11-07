@@ -95,6 +95,7 @@ COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
 # 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
 # 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
+# 先読みは判定が固まる（異なる値が COLUMN_ID_TRACK 個）まで続け、固まった判定を先頭の行から使う。
 # 先読みは行数とセルの文字数の合計で抑える（幅の広い表・長い文の列でメモリを食わないため）
 COLUMN_ORG_PREFETCH_ROWS = 2000
 COLUMN_ORG_PREFETCH_CHARS = 4_000_000
@@ -874,7 +875,9 @@ class Collector:
 
         戻り値は（先読みした行・その行ごとの位置の鍵・先読みの途中の例外・残りの行の反復子）。
         先読みは COLUMN_ORG_PREFETCH_ROWS 行・セルの文字数の合計 COLUMN_ORG_PREFETCH_CHARS までで、
-        どの氏名の列も判定が付いたら（異なる値が COLUMN_ORG_MIN_DISTINCT 個に届いたら）止める。
+        どの氏名の列も判定が固まったら（異なる値が COLUMN_ID_TRACK 個に届いたら）止める。判定が付いた
+        COLUMN_ORG_MIN_DISTINCT 個で止めると、そこでは会社の印が5%を切っていて後で会社名の列に変わる表（株の分売・優待の
+        銘柄の一覧）で、変わる前の行の社名が 中 に残る（2026-11-08）。
         位置の鍵（row_key）は行の反復子が進める「今の行」を読むので、1行読むたびに控える。
         読み取りの例外はここで止め、読めた行を検査してから呼び出し側で出し直す（今までどおり読めた行は検査する）。
         """
@@ -900,15 +903,15 @@ class Collector:
             if row_key is not None:
                 keys.append(row_key(len(head)))
             chars += sum(len(v) for v in row if isinstance(v, (str, bytes)))
-            settled = True
+            decided = True
             for c in name_cols:
                 v = row[c] if c < len(row) else None
                 if v is not None:
                     s = _cell_to_str(v)
                     if s:
                         orgs.cell(c, headers[c], s)
-                settled = settled and orgs.settled(c)
-            if settled:
+                decided = decided and orgs.decided(c)
+            if decided:
                 break
         return head, keys, error, rest
 
@@ -1003,14 +1006,12 @@ class _ColumnOrgs:
                 del self._values[c_idx]
         return self.verdict.get(c_idx, False)
 
-    def settled(self, c_idx: int) -> bool:
-        """この列の判定が付いたか（異なる値が COLUMN_ORG_MIN_DISTINCT 個に届いたか・氏名の列でなければ常に付いている）。
+    def decided(self, c_idx: int) -> bool:
+        """この列の判定が固まったか（異なる値が COLUMN_ID_TRACK 個に届いたか・氏名の列でなければ常に固まっている）。
 
-        まだ値を1つも見ていない列は付いていない（見出しが氏名かを調べる前なので）。
+        まだ値を1つも見ていない列は固まっていない（見出しが氏名かを調べる前なので）。
         """
-        if self._is_name.get(c_idx) is False or c_idx in self._decided:
-            return True
-        return len(self._values.get(c_idx, ())) >= COLUMN_ORG_MIN_DISTINCT
+        return self._is_name.get(c_idx) is False or c_idx in self._decided
 
 
 class _ColumnDigits:

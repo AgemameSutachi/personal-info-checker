@@ -5,6 +5,7 @@
 
 import errno
 import os
+from pathlib import Path
 
 import pytest
 
@@ -151,7 +152,7 @@ def test_large_nested_item_is_spilled_to_temp_file(tmp_path, monkeypatch):
         assert item.status == Status.SCANNED, item.reason
         assert "phone" in item.finding_counts
         spilled = [os.path.join(ctx.tmpdir, n) for n in os.listdir(ctx.tmpdir) if n != engine.OWNER_MARK]
-        assert [open(p, "rb").read() for p in spilled] == [data]
+        assert [Path(p).read_bytes() for p in spilled] == [data]
     finally:
         ctx.cleanup()
 
@@ -182,7 +183,7 @@ def test_blob_as_path_writes_memory_blob_with_extension(tmp_path):
         blob = engine.Blob(display="outer.zip!db/顧客.MDB", data=b"\x00\x01Standard Jet DB")
         p = ctx.blob_as_path(blob)
         assert p.endswith(".mdb") and os.path.dirname(p) == ctx.tmpdir
-        assert open(p, "rb").read() == blob.data
+        assert Path(p).read_bytes() == blob.data
         assert ctx.blob_as_path(blob, suffix=".accdb").endswith(".accdb")
     finally:
         ctx.cleanup()

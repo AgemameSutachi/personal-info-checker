@@ -12,12 +12,80 @@ from typing import Iterator
 _GOOD = r"0-9A-Za-z　-ヿ一-鿿！-ﾟ@._%+\-:/()（）〒・、。 "
 RE_GOOD_RUN = re.compile(rf"[{_GOOD}]{{4,}}")
 RE_HAS_SIGNAL = re.compile(r"[0-9@぀-ヿ一-鿿]")
+# BOM も ASCII の間の 0x00 も無い UTF-16 の見分け（utf16_without_bom）で見る長さ・文字の数・割合
+UTF16_STRICT_SAMPLE = 8192
+UTF16_STRICT_MIN_CHARS = 32
+UTF16_STRICT_RATIO = 0.98
+UTF16_STRICT_SWAPPED_RATIO = 0.9
+UTF16_STRICT_KANA_RATIO = 0.2
+UTF16_STRICT_JA_RATIO = 0.05
+
+
+# BOM の無い UTF-16 の厳しい見分けで、ふつうの文字とみなさない文字。ふつうの文字は、印字できる ASCII・改行とタブ・
+# ラテン1の記号・一般の記号から罫線と記号まで（U+2000〜U+2BFF）・日本語の記号とかなと漢字（U+3000〜U+9FFF）・
+# 全角（U+FF00〜U+FFEF）・絵文字などの補助面の文字（正しいサロゲートの対）。16bit の数の表（上位が 0 の制御文字になる）や
+# 圧縮した中身（どの文字にもなる）は、ほとんど入らない。数えるのはファイルごとに数千字なので、正規表現でまとめて数える
+_RE_UTF16_ODD_CHAR = re.compile(r"[^\t\n\r\x20-\x7e\xa0-\xff -⯿　-鿿＀-￯\U00010000-\U0010ffff]")
+_RE_KANA = re.compile(r"[ぁ-ヺ]")
+# かな・漢字・日本語の句読点（U+3030 の「〰」は数字の「00」を2バイトずつ読んだ形なので除く）
+_RE_JA_CHAR = re.compile(r"[　-〯〱-ヿ一-鿿]")
+
+
+def _is_utf8(sample: bytes) -> bool:
+    """UTF-8 として厳密に読めるか（見本の末尾で切れた1文字は許す）。"""
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return e.start >= len(sample) - 3 and e.reason == "unexpected end of data"
+    return True
+
+
+def utf16_without_bom(sample: bytes) -> str | None:
+    """BOM も ASCII の間の 0x00 も無い UTF-16 なら、その文字コード（"utf-16-le" か "utf-16-be"）を返す。違えば None。
+
+    ASCII をほとんど含まない日本語だけの文や、上位と下位の両方に 0x00 が出る罫線（U+2500 など）の多い表は、
+    0x00 の偏りでは見分けられない（2026-11-08 まで「簡易検査」の生データ走査になり、ビッグエンディアンでは
+    何も拾えなかった）。先頭 UTF16_STRICT_SAMPLE バイトを2バイトずつの文字として読み、次のすべてを満たすときだけ
+    UTF-16 とみなす。
+    - UTF16_STRICT_RATIO 以上がふつうの文字（_RE_UTF16_ODD_CHAR に当たらない文字）
+    - 逆の向き（バイトの順を入れ替えた読み方）では UTF16_STRICT_SWAPPED_RATIO 未満しかふつうの文字にならない。
+      ASCII の2バイトはどちらの向きに読んでも漢字などの文字（"AB" → U+4142）になるので、ASCII の多いバイナリ
+      （Python の .pyc）を UTF-16 と誤らないための見分け
+    - 改行の文字（U+000A）がある
+    - かな・漢字・日本語の句読点（_RE_JA_CHAR）が UTF16_STRICT_JA_RATIO 以上
+    UTF-8 として読めるもの（ASCII だけの文を含む）と、両方の向きで通るもの（向きを決められない）は UTF-16 にしない。
+    """
+    sample = sample[:UTF16_STRICT_SAMPLE]
+    n = len(sample) - len(sample) % 2
+    if n < UTF16_STRICT_MIN_CHARS * 2 or _is_utf8(sample):
+        return None
+    texts = {enc: sample[:n].decode(enc, errors="replace") for enc in ("utf-16-le", "utf-16-be")}
+    ratios = {enc: 1 - len(_RE_UTF16_ODD_CHAR.findall(t)) / len(t) for enc, t in texts.items()}
+    if max(ratios.values()) < UTF16_STRICT_RATIO:
+        return None  # バイナリの大半はここで終わる
+    kana = {enc: len(_RE_KANA.findall(t)) / len(t) for enc, t in texts.items()}
+    found = []
+    for enc, other in (("utf-16-le", "utf-16-be"), ("utf-16-be", "utf-16-le")):
+        text = texts[enc]
+        if ratios[enc] < UTF16_STRICT_RATIO or "\n" not in text:
+            continue
+        # ひらがなは逆の向きに読んでも漢字（U+3042 → U+4230）になるので、かなの多い文は、この向きにだけかなが多いことで見る
+        # （ASCII の多いバイナリは、どちらの向きに読んでもかなは同じくらいしか出ない）
+        hiragana_text = kana[enc] >= UTF16_STRICT_KANA_RATIO and kana[other] < kana[enc] * 0.1
+        if ratios[other] >= UTF16_STRICT_SWAPPED_RATIO and not hiragana_text:
+            continue
+        if len(_RE_JA_CHAR.findall(text)) >= len(text) * UTF16_STRICT_JA_RATIO:
+            found.append(enc)
+    # 両方の向きで通るもの（40〜60字ほどの短い文で起きる）は向きを決められないので、取り違えて化けたまま
+    # 「検査済み」にせず、今までどおり簡易検査に回す
+    return found[0] if len(found) == 1 else None
 
 
 def decode_text(data: bytes) -> tuple[str, str]:
     """テキストファイルのバイト列を文字列にする。戻り値は（文字列, 使った文字コード）。
 
-    BOM → UTF-8 → ISO-2022-JP（エスケープがあるとき）→ cp932 → EUC-JP → chardet の順に試し、
+    BOM → BOM の無い UTF-16（0x00 の偏り）→ ISO-2022-JP（エスケープがあるとき）→ UTF-8 →
+    BOM も 0x00 の偏りも無い UTF-16（utf16_without_bom）→ cp932 → EUC-JP → chardet の順に試し、
     どれも厳密に通らなければ cp932 で置換しながら読む（読めた部分は検査する）。
     """
     if data.startswith(codecs.BOM_UTF8):
@@ -39,7 +107,15 @@ def decode_text(data: bytes) -> tuple[str, str]:
             return data.decode("iso2022_jp"), "iso-2022-jp"
         except UnicodeDecodeError:
             pass
-    for enc in ("utf-8", "cp932", "euc_jp"):
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    # 日本語だけの文・罫線の多い表の、BOM も 0x00 の偏りも無い UTF-16（cp932 として偶然読めることがあるので先に見る）
+    enc16 = utf16_without_bom(sample)
+    if enc16:
+        return data.decode(enc16, errors="replace"), enc16
+    for enc in ("cp932", "euc_jp"):
         try:
             return data.decode(enc), enc
         except UnicodeDecodeError:

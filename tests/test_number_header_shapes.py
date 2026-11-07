@@ -39,7 +39,8 @@ def _types(value: str, header: str | None = None) -> set[str]:
         ("bank_account", "www.example.jp/123456"),
         ("phone", "E31640"),
         ("phone", "S100ETEL"),
-        ("postal_code", "AB12345"),
+        ("phone", "ABCD1234"),
+        ("postal_code", "https://example.jp/1000005"),
         ("credit_card", "https://example.com/card/4111111111111111"),
     ],
 )
@@ -58,6 +59,10 @@ def test_impossible_number_values_dropped(category, value):
         ("phone", "fax.0312345678"),
         ("phone", "No123456"),
         ("postal_code", "100-0005"),
+        # 〒を T と書いたもの・国の頭つき（英字の頭のコードの判定は電話だけ）
+        ("postal_code", "T1000005"),
+        ("postal_code", "JP1000005"),
+        ("bank_account", "A1234567"),
         ("credit_card", "4111 1111 1111 1111"),
     ],
 )
@@ -112,6 +117,26 @@ def test_card_digits_in_decimal_dropped(text):
 @pytest.mark.parametrize("text", ["4111111111111111", "カード番号 4111111111111111", "4111-1111-1111-1111"])
 def test_card_digits_outside_decimal_kept(text):
     assert "credit_card" in _types(text)
+
+
+@pytest.mark.parametrize(
+    "value,header",
+    [
+        ("JASDAQ スタンダード", "パスポート"),
+        ("https://example.jp/bunbai/123456.html", "当選口座: SBI1枚"),
+        ("E31640", "S100ETEL"),
+        ("0.4111111111111111", None),
+        ("T1000005", "郵便番号"),
+        ("TEL0312345678", "電話番号"),
+    ],
+)
+def test_python_and_rust_agree(monkeypatch, value, header):
+    # Rust 拡張がある環境では、Python 版だけで検出したときと同じ結果になること
+    text = detectors.normalize(value)
+    got = [(h.pii_type, h.confidence, h.rule) for h in detectors._detect_uncached(text, header)]
+    monkeypatch.setattr(detectors, "_RUST", None)
+    want = [(h.pii_type, h.confidence, h.rule) for h in detectors._detect_uncached(text, header)]
+    assert got == want
 
 
 def test_card_in_decimal_with_card_header_kept():

@@ -727,7 +727,7 @@ def en_header_word_backed(core: str) -> bool:
 
 # 番号の列の値として、ありえない形（2026-11-07・株のデータの検査）。横持ちの表で左隣のセルを見出しに読むと、
 # 社名「パスポート」・備考「…当選口座: …」・書類番号「S100ETEL」の右隣の、市場名・URL・コード「E31640」を番号にしていた。
-# 英字の頭に数字が続くだけの値はコード（TEL・FAX・No の頭の電話番号は残す）
+# 電話の列で、英字の頭に数字が続くだけの値はコード（TEL・FAX・No の頭の電話番号は残す）
 _RE_URL_LIKE = re.compile(r"://|www\.", re.I)
 _RE_LETTER_CODE = re.compile(r"(?!(?:tel|fax|no)[.:]?[0-9])[A-Za-z]{1,4}[0-9]{3,}", re.I)
 
@@ -765,7 +765,10 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         else:
             return None
     elif category in ("phone", "postal_code", "bank_account", "credit_card", "pension"):
-        if len(digits) < 5 or _RE_URL_LIKE.search(v) or _RE_LETTER_CODE.fullmatch(v):
+        if len(digits) < 5 or _RE_URL_LIKE.search(v):
+            return None
+        # 英字の頭のコードは電話だけで見る（郵便番号の「T1000005」「JP1000005」は〒・国の頭として残す）
+        if category == "phone" and _RE_LETTER_CODE.fullmatch(v):
             return None
         if category == "postal_code" and len(digits) not in (6, 7):
             return None  # 6桁は数値として先頭の0が落ちたもの

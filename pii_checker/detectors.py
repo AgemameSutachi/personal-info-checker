@@ -323,7 +323,8 @@ HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(雇用保険.{0,6}番号)"), "employment_insurance"),
     (re.compile(r"(住民票コード)"), "resident_code"),
     (re.compile(r"(マイナンバー|個人番号|mynumber|individualnumber)", re.I), "my_number"),
-    (re.compile(r"(カード番号|クレジット|cardno|cardnumber|creditcard|ccnumber)", re.I), "credit_card"),
+    # 「Acc Number」（口座の略）の途中の ccnumber はカード番号にしない
+    (re.compile(r"(カード番号|クレジット|cardno|cardnumber|creditcard|(?<![a-z])ccnumber)", re.I), "credit_card"),
     (re.compile(r"(口座番号|口座no|口座)", re.I), "bank_account"),
     (re.compile(r"(免許証番号|免許番号|免許証|drivers?'?s?license)", re.I), "drivers_license"),
     (re.compile(r"(旅券|パスポート|passport)", re.I), "passport"),

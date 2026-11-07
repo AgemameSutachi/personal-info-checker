@@ -468,7 +468,7 @@ def test_english_header_categories(header, category):
     assert header_category(header) == category
 
 
-@pytest.mark.parametrize("header", ["Kana", "Kana Input", "File Name", "Cell", "City", "Account No"])
+@pytest.mark.parametrize("header", ["Kana", "Kana Input", "File Name", "Cell", "City", "Account No", "Acc Number"])
 def test_english_headers_that_are_not_pii_columns(header):
     """足した語の近くの見出しで、個人情報の列としないもの（「Kana」はローマ字の名前（佳奈）にもあるので見出しにしない）。"""
     assert header_category(header) is None, header

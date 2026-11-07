@@ -80,6 +80,7 @@ def test_truncated_image_reason_names_next_step(tmp_path, fmt):
     assert item.reason.startswith("画像を読み込めなかった（途中で切れているか壊れている可能性"), item.reason
     assert "PNG か JPEG で別名で保存した写しを検査してください" in item.reason, item.reason
     assert "読み取り中にエラー" not in item.reason, item.reason
+    assert "読み込めませんでした" not in item.reason, item.reason  # OCR 側の同じ言い回しを重ねない
 
 
 def test_unopenable_image_reason_names_next_step(tmp_path):

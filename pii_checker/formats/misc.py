@@ -961,7 +961,12 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
     except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）
         if "画素数が大きすぎる" in str(e):
             raise Uncheckable(f"画像の画素数が大きすぎるため検査していない（要目視）: {e}")
-        raise Uncheckable(f"画像を読み込めなかった（途中で切れているか壊れている可能性。{IMAGE_BROKEN_HELP}）: {e}")
+        detail = str(e).removeprefix(
+            "画像を読み込めませんでした（壊れている可能性があります）: "
+        )  # 同じ言い回しを重ねない
+        raise Uncheckable(
+            f"画像を読み込めなかった（途中で切れているか壊れている可能性。{IMAGE_BROKEN_HELP}）: {detail}"
+        )
     item.method = f"OCR（{w}×{h}px・{frames}ページ）"
     item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
     col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)

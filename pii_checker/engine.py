@@ -17,6 +17,7 @@ import tempfile
 import time
 import traceback
 from array import array
+from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -95,6 +96,7 @@ COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
 # 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
 # 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
+# 流しながら読む表（add_table・CSV と xlsx）も、見出しを決めた直後と空行の直後に、次の空行か見出し語のある行まで先読みする。
 # 先読みは判定が固まる（異なる値が COLUMN_ID_TRACK 個）まで続け、固まった判定を先頭の行から使う。
 # 先読みは行数とセルの文字数の合計で抑える（幅の広い表・長い文の列でメモリを食わないため）
 COLUMN_ORG_PREFETCH_ROWS = 2000
@@ -813,6 +815,8 @@ class Collector:
         - 見出しを切り替えるのは、まだ見出しが無いとき・空行の直後・今の見出しより見出し語が多い行だけ
           （データ行の中の「住所」「電話」などの語で切り替えない）
         - 左隣のセルが見出し語なら、その値の見出しとして使う（横持ちの申込書）
+        - 見出しに氏名の列があれば、見出しを決めた直後と空行の直後に先の行を先読みし、会社名の列かの判定を
+          付けてから検査する（_prefetch_table_orgs）
         戻り値は処理した行数。
         """
         self._skip_seen = skip_seen
@@ -823,13 +827,28 @@ class Collector:
         cur_cells = 0
         prev_blank = True
         n = 0
-        for r_idx, row in enumerate(rows, start=1):
+        src = iter(rows)
+        pending: deque[list[str]] = deque()  # 会社名の列の判定のために先読みした行（文字列にした値）
+        error: Exception | None = None
+        while True:
+            if pending:
+                values = pending.popleft()
+            elif error is not None:
+                raise error  # 先読みの途中で読み取りが失敗した（読めた行は上で検査した）
+            else:
+                try:
+                    row = next(src)
+                except StopIteration:
+                    break
+                values = ["" if v is None else _cell_to_str(v) for v in row]
             n += 1
-            values = ["" if v is None else _cell_to_str(v) for v in row]
+            r_idx = n
             if not any(values):
                 prev_blank = True
                 if headers and cur_score == 0:
                     headers = []  # 品番などの番号の見出しは、空行の後の別の表へ持ち越さない
+                elif headers and not pending and error is None:
+                    error = self._prefetch_table_orgs(headers, src, pending)
                 continue
             score, headerish = _header_row_score(values)
             cells = sum(1 for v in values if v)
@@ -852,10 +871,47 @@ class Collector:
                 cur_cells = cells
                 # 見出し行自体も検査（見出しなしで）
                 self._table_row(values, r_idx, [], location_fn, method, header_row=True)
+                if not pending and error is None:
+                    error = self._prefetch_table_orgs(headers, src, pending)
             else:
                 self._table_row(values, r_idx, headers, location_fn, method)
             prev_blank = False
         return n
+
+    def _prefetch_table_orgs(self, headers: list[str | None], src, pending: deque) -> Exception | None:
+        """流しながら読む表（add_table）で、今の見出しに氏名の列があれば先の行を先読みし、会社名の列かの判定を付けておく。
+
+        先読みした行（文字列にした値）は pending に積み、呼び出し側が順に検査する。今の見出しのまま検査されると
+        決まっている行だけを数えるため、空行と、見出し語を含む行（見出しが切り替わりうる行）に当たったら、
+        その行を積んで止める（その行は数えない）。上限と、判定が固まったら止めるのは _prefetch_org_columns と同じ。
+        読み取りの例外は返し、積んだ行を検査してから呼び出し側で出し直す。
+        """
+        name_cols = [i for i, h in enumerate(headers) if h and detectors.header_category(h) == "name"]
+        orgs = self._col_orgs
+        if not name_cols or all(orgs.decided(c) for c in name_cols):
+            return None
+        chars = 0
+        while len(pending) < COLUMN_ORG_PREFETCH_ROWS and chars < COLUMN_ORG_PREFETCH_CHARS:
+            try:
+                row = next(src)
+            except StopIteration:
+                break
+            except Exception as e:  # noqa: BLE001 - 読めた行を検査してから出し直す
+                return e
+            values = ["" if v is None else _cell_to_str(v) for v in row]
+            pending.append(values)
+            if not any(values) or _header_row_score(values)[0]:
+                break
+            # 空のセルも1字と数える（列の多い xlsx の空の行が 2,000 行積まれても上限を超えないように）
+            chars += sum(len(v) or 1 for v in values)
+            decided = True
+            for c in name_cols:
+                if c < len(values) and values[c]:
+                    orgs.cell(c, headers[c], values[c])
+                decided = decided and orgs.decided(c)
+            if decided:
+                break
+        return None
 
     def add_records(self, columns: list[str], rows, location_fn: Callable[[int, int], str], method: str = "") -> int:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""

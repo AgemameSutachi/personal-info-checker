@@ -1,10 +1,12 @@
 """engine の網羅で通っていなかった分岐の試験（T4・2026-11-07）。
 
 読み取りの失敗を「検査不能」に振り分ける分岐・大きすぎて簡易検査に回したあとの失敗・NTFS の隠しストリーム（代替データストリーム）の検査。
+大きな内側のファイルの書き出し・外部の道具に渡すパス・FTP の接続先の設定が無いとき・分割アーカイブの続きの集め方。
 """
 
 import errno
 import os
+from pathlib import Path
 
 import pytest
 
@@ -133,3 +135,129 @@ def test_alternate_stream_copy_failure_is_kept(tmp_path, monkeypatch):
     failed = by_path[str(src) + ":probe"]
     assert failed.depth == 1 and failed.status == Status.UNCHECKABLE
     assert not res.network_lost
+
+
+def _context(tmp_path):
+    top = tmp_path / "outer.zip"
+    top.write_bytes(b"")
+    return engine.ScanContext(str(top), ScanOptions(temp_dir=str(tmp_path)), [])
+
+
+def test_large_nested_item_is_spilled_to_temp_file(tmp_path, monkeypatch):
+    """メモリに置くには大きい内側のファイルは、一時フォルダへ書き出してから検査する（中身は同じに読める）。"""
+    monkeypatch.setattr(engine, "IN_MEMORY_LIMIT", 10)
+    data = f"電話 {PHONE}\n".encode("utf-8")
+    ctx = _context(tmp_path)
+    try:
+        item = ctx.scan_nested("outer.zip!inner.txt", data=data)
+        assert item.status == Status.SCANNED, item.reason
+        assert "phone" in item.finding_counts
+        spilled = [os.path.join(ctx.tmpdir, n) for n in os.listdir(ctx.tmpdir) if n != engine.OWNER_MARK]
+        assert [Path(p).read_bytes() for p in spilled] == [data]
+    finally:
+        ctx.cleanup()
+
+
+def test_large_nested_item_without_temp_space_is_uncheckable(tmp_path, monkeypatch):
+    """書き出す空きが無ければ、その1件だけを理由つきの「検査不能」で残し、例外で残りの中身を止めない。"""
+    monkeypatch.setattr(engine, "IN_MEMORY_LIMIT", 10)
+
+    def short(folder, need, what="一時フォルダ"):
+        raise safeio.TempSpaceShort("一時フォルダの空きが足りない")
+
+    monkeypatch.setattr(safeio, "ensure_free", short)
+    ctx = _context(tmp_path)
+    try:
+        item = ctx.scan_nested("outer.zip!inner.txt", data=b"x" * 20, depth=2)
+        assert item.status == Status.UNCHECKABLE
+        assert "空きが足りない" in item.reason
+        assert (item.size, item.depth) == (20, 2)
+        assert ctx.items == [item]
+    finally:
+        ctx.cleanup()
+
+
+def test_blob_as_path_writes_memory_blob_with_extension(tmp_path):
+    """外部の道具に渡すため、メモリ上の中身は拡張子つきの一時ファイルに書き出す（suffix の指定が優先）。"""
+    ctx = _context(tmp_path)
+    try:
+        blob = engine.Blob(display="outer.zip!db/顧客.MDB", data=b"\x00\x01Standard Jet DB")
+        p = ctx.blob_as_path(blob)
+        assert p.endswith(".mdb") and os.path.dirname(p) == ctx.tmpdir
+        assert Path(p).read_bytes() == blob.data
+        assert ctx.blob_as_path(blob, suffix=".accdb").endswith(".accdb")
+    finally:
+        ctx.cleanup()
+
+
+def test_blob_as_path_returns_real_file_path(tmp_path):
+    """実ファイルならそのパスを返す（書き出さない）。240文字以上なら Windows の長いパスの形にする。"""
+    ctx = _context(tmp_path)
+    short_path = str(tmp_path / "a.mdb")
+    assert ctx.blob_as_path(engine.Blob(display=short_path, path=short_path)) == short_path
+    long = str(tmp_path / ("d" * 120) / ("e" * 120) / "a.mdb")
+    got = ctx.blob_as_path(engine.Blob(display=long, path=long))
+    assert got == engine.long_path(long)
+    if os.name == "nt":
+        assert got.startswith("\\\\?\\")
+    assert ctx._tmp is None  # 一時フォルダも作らない
+
+
+def test_ftp_path_without_connection_is_uncheckable(tmp_path):
+    """FTP のパスを接続先の設定なしで検査すると、繋ぎに行かずに理由つきの「検査不能」にする（再開のしかたを出す）。"""
+    res = engine.scan_file("ftp://192.0.2.10/share/a.txt", ScanOptions(temp_dir=str(tmp_path)))
+    top = res.items[0]
+    assert top.status == Status.UNCHECKABLE
+    assert "FTP の接続先の設定が無い" in top.reason
+    assert res.network_lost is False
+
+
+def _touch(folder, *names):
+    for n in names:
+        (folder / n).write_bytes(b"x")
+
+
+@pytest.mark.parametrize(
+    "first, rest",
+    [
+        ("a.7z.001", ["a.7z.002", "a.7z.003"]),
+        ("a.7z.1", ["a.7z.2"]),
+        ("a.part1.rar", ["a.part2.rar", "a.part3.rar"]),
+        ("a.part01.rar", ["a.part02.rar"]),
+        ("a.zip", ["a.z01", "a.z02"]),
+        ("a.rar", ["a.r00", "a.r01"]),
+        ("A.7Z.001", ["A.7Z.002"]),  # 大文字の拡張子も1つ目とみなす
+    ],
+)
+def test_split_siblings_lists_following_volumes(tmp_path, first, rest):
+    """分割アーカイブの1つ目から、続きのファイルを番号の桁数を保って順に集める（7-Zip が同じフォルダから読むため一緒に写す）。"""
+    _touch(tmp_path, first, *rest)
+    assert engine.split_siblings(str(tmp_path / first)) == [str(tmp_path / n) for n in rest]
+
+
+def test_split_siblings_stops_at_first_gap(tmp_path):
+    """番号が途切れたらそこで止める（.004 があっても .003 が無ければ .002 まで）。"""
+    _touch(tmp_path, "a.7z.001", "a.7z.002", "a.7z.004")
+    assert engine.split_siblings(str(tmp_path / "a.7z.001")) == [str(tmp_path / "a.7z.002")]
+
+
+def test_split_siblings_ignores_other_archives_in_same_folder(tmp_path):
+    """同じフォルダにある別の名前の分割アーカイブの続きは拾わない（名前の幹が同じものだけ）。"""
+    _touch(tmp_path, "a.7z.001", "a.7z.002", "b.7z.001", "b.7z.002", "ab.7z.002")
+    assert engine.split_siblings(str(tmp_path / "a.7z.001")) == [str(tmp_path / "a.7z.002")]
+
+
+@pytest.mark.parametrize(
+    "name, others",
+    [
+        ("a.7z.002", ["a.7z.003"]),
+        ("a.part2.rar", ["a.part3.rar"]),
+        ("a.zip", []),
+        ("a.rar", []),
+        ("a.txt", []),
+    ],
+)
+def test_split_siblings_returns_nothing(tmp_path, name, others):
+    """2つ目以降（.002・.part2.rar）・続きの無いふつうの zip と rar・書庫でないファイルは、続きを返さない。"""
+    _touch(tmp_path, name, *others)
+    assert engine.split_siblings(str(tmp_path / name)) == []

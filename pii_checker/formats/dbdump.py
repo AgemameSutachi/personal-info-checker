@@ -505,7 +505,9 @@ def _pg_int(data: bytes, pos: int, int_size: int) -> tuple[int, int]:
 def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None:
     """custom 形式のデータ部（BLK_DATA）を探して展開し、COPY の列名と対応づけて読む。"""
     if not data.startswith(b"PGDMP"):
-        raise Uncheckable("PostgreSQL の custom 形式の見出しが読めない")
+        raise Uncheckable(
+            "PostgreSQL の custom 形式の見出しが読めない（壊れているか途中で切れている可能性。元のファイルを取り直してください）"
+        )
     int_size = data[8] if len(data) > 8 else 4
     copies = [
         (
@@ -593,7 +595,7 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
         if copies or failed:
             raise Uncheckable(
                 f"PostgreSQL の custom 形式のデータ部を見つけられず、表 {len(copies)} 個の中身を検査していない。"
-                "pg_restore を入れて再検査する"
+                "PostgreSQL を入れて再検査してください（その pg_restore を PATH か C:\\Program Files\\PostgreSQL の下から自動で探します）"
             )
         raise PartialScan(
             "データ部が見つからなかった（表の定義だけのダンプの可能性）。文字として読める部分だけを検査した"

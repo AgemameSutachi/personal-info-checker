@@ -45,7 +45,10 @@ def handle_pst(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             "「強い暗号化」の PST のため中身を読めない（Outlook で開いてエクスポートするか、暗号化なしの PST に移して再検査）"
         )
     if crypt not in (0, 1):
-        raise Uncheckable(f"未対応の暗号化方式（{crypt:#x}。Windows 情報保護など）の PST のため中身を読めない")
+        raise Uncheckable(
+            f"未対応の暗号化方式（{crypt:#x}。Windows 情報保護など）の PST のため中身を読めない。"
+            "Outlook で開いてメールを書き出したもの（msg・eml）を検査するか、持ち主に中身を確かめてもらってください"
+        )
     table = _COMPRESSIBLE if crypt == 1 else None
     with blob.open() as f:
 

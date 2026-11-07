@@ -508,7 +508,8 @@ def handle_ole(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             if not was_encrypted and "EncryptedPackage" in top:
                 raise Uncheckable(
                     "暗号化された Office 文書だが、暗号化の方式を判別できず復号できなかった"
-                    "（Office で開いてパスワードを外し、別名で保存した写しを検査してください）"
+                    "（Office で開いてパスワードを外し、別名で保存した写しを検査してください。"
+                    "パスワードが分からなければ持ち主に中身を確かめてもらってください）"
                 )
             if was_encrypted:
                 item.method = "暗号化を解除して中身を検査"

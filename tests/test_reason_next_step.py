@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import gzip
 import sys
 from pathlib import Path
 
@@ -25,7 +26,14 @@ from pii_checker.models import ScanOptions, Status  # noqa: E402
             "app.sqlite",
             b"SQLite format 3\x00" + b"\xff" * 4096,
             "SQLite の表を読めなかった",
-            "暗号を外した写しを作れるなら、その写しを検査してください",
+            "壊れているなら元のファイルを取り直し",
+        ),
+        # 署名だけ PDF で中身が壊れている
+        (
+            "broken.pdf",
+            b"%PDF-1.7\n" + b"\x00\xff" * 64,
+            "PDF を開けなかった",
+            "別名で保存した写しを検査してください",
         ),
         # 署名だけ OLE 複合文書（Office97-2003）で中身が壊れている
         (
@@ -42,3 +50,20 @@ def test_broken_file_reason_names_next_step(tmp_path, name, data, start, hint):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     assert item.status == Status.UNCHECKABLE, item.reason
     assert start in item.reason and hint in item.reason, item.reason
+
+
+def test_too_deep_nesting_names_embedded_case(tmp_path):
+    """入れ子の上限は文書の埋め込み・メールの添付でも起きるので、取り出したファイルを検査する手も出す。"""
+    p = tmp_path / "a.txt"
+    p.write_text("会議の議題\n", encoding="utf-8")
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), max_depth=-1)).items[0]
+    assert "外側から取り出したファイルを検査してください" in item.reason, item.reason
+
+
+def test_single_compressed_over_limit_names_extracted_file(tmp_path):
+    """gz の展開がフォルダにならないので、「出てきたファイルを検査」と案内する。"""
+    p = tmp_path / "big.txt.gz"
+    p.write_bytes(gzip.compress(b"a" * 200_000))
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), max_expand_bytes=1000))
+    reasons = [i.reason for i in res.items if i.status == Status.UNCHECKABLE]
+    assert any("展開してから出てきたファイルを検査してください" in r for r in reasons), reasons

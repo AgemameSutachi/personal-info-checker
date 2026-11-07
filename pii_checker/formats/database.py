@@ -683,7 +683,7 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             ),
         )
     raise Uncheckable(
-        "Access の表を読めなかった（生データ走査のみ。数値型の列は検査できていない。"
+        "Access の表を読めなかった（生データ走査のみ。数値型の列は検査できていない。壊れている可能性があり、"
         "Access で開けるなら「データベースの最適化/修復」をかけた写しを検査してください）: " + " / ".join(attempts)
     )
 
@@ -753,8 +753,8 @@ def handle_sqlite(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
     item.method = ("全テーブル＋" if ok else "") + "ファイル全体の生データ走査（空き領域の残留を含む）"
     if not ok:
         raise Uncheckable(
-            "SQLite の表を読めなかった（暗号化の可能性。生データ走査のみ。"
-            "作ったアプリで暗号を外した写しを作れるなら、その写しを検査してください）"
+            "SQLite の表を読めなかった（暗号化か壊れている可能性。生データ走査のみ。"
+            "壊れているなら元のファイルを取り直し、暗号化なら持ち主に中身を確かめてもらってください）"
         )
 
 

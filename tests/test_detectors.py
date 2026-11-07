@@ -331,6 +331,11 @@ def test_email_column_needs_at_mark():
         "\x00x@builtins.BaseExceptionl\x01",  # 末尾の1文字を外しても TLD にならない
         "icon@2x.png",  # 画像の名前（.pn は国の TLD だが、拡張子の .png から1文字を外したもの）
         "logo@3x.zip",  # 倍率つきの名前（.zip は実在の TLD）
+        # mypy のキャッシュ（.mypy_cache の *.db）の型・モジュールの名前の並び
+        "click.utils(click.core@click.shell_completion(__future",  # 識別子の途中で .shell が切れる
+        "\x04j_pytest.debugging.PytestPdbWrapper@151.do_continue\x03",  # 同じく .do
+        "pandas._libs.missing:pandas._libs.tslibs@pandas.tseries.offsets2collections.abc,",  # ローカル部に「._」
+        "tarfile.FilterError4tarfile.TarError8builtins.Exception@builtins.Ba\x01",  # 頭文字の大文字の TLD＋CamelCase
     ],
 )
 def test_email_needs_real_tld(text):
@@ -347,6 +352,11 @@ def test_email_needs_real_tld(text):
         "hanako@example.tokyo",
         "admin@corp.local",  # 社内の .local
         "Taro@Example.Org",
+        "見積_taro@example.com_memo.txt",  # アドレス入りのファイル名（よく使う TLD は「_」が続いても残す）
+        "taro@example.co.jp_2024.pdf",
+        "hanako@example.tokyo_2024.pdf",  # 「_」の後が数字なら識別子の続きとみなさない
+        "taro_yamada@example.shop",  # ローカル部の「_」だけなら残す
+        "Taro.Yamada@gmail.Com",  # 頭文字の大文字の並びは CamelCase ではない
     ],
 )
 def test_email_with_real_tld_kept(text):

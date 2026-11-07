@@ -1392,6 +1392,11 @@ _PRIVATE_TLDS = frozenset({"local", "localdomain", "internal", "lan", "corp", "h
 # 画像の倍率つきの名前の「@2x」「@3x」の部分（_email_domain_plausible）
 _RE_SCALE_LABEL = re.compile(r"[0-9]x")
 _TRIM_TLDS = frozenset({"com", "org", "net", "edu", "gov", "mil", "info", "io"})
+# 直後に「_＋小文字」が続いても残す TLD（_email_before_identifier）。アドレス入りのファイル名
+# 「taro@example.com_memo.txt」を見落とさないため、人のアドレスでよく使うものは落とさない
+_UNDERSCORE_KEEP_TLDS = _TRIM_TLDS | {"jp"}
+# ローカル部の CamelCase（小文字の直後の大文字）。「FilterError4tarfile.TarError」のような型の名前の並び
+_RE_CAMEL = re.compile(r"[a-z][A-Z]")
 
 
 def _email_domain_plausible(value: str) -> bool:
@@ -1406,8 +1411,12 @@ def _email_domain_plausible(value: str) -> bool:
     - 2つ目のラベルが1文字で、TLD が小文字だけでない: バイナリの断片「x@r.JO」「x@H.Se」（「x@q.com」は残す）
     - 2つ目のラベルが「2x」「3x」: 画像・動画の倍率つきの名前「icon@2x.mov」「logo@3x.zip」（.mov・.zip は実在の TLD。
       実在のドメイン「x@3x.com」も見落とすが、画像の名前のほうがずっと多い）
+    以下は 2026-11-07 に株のデータの mypy のキャッシュ（.mypy_cache の *.db）から足したもの:
+    - ローカル部に「._」: Python の非公開のモジュールの名前「pandas._libs.tslibs@pandas.tseries…abc」
+    - TLD が頭文字だけの大文字で、ローカル部が CamelCase: 型の名前の並び「…TarError8builtins.Exception@builtins.Ba」
+      （「TaroYamada@gmail.Com」も見落とすが、頭文字の大文字の TLD はもともと人の書き方として少ない）
     """
-    domain = value.rpartition("@")[2]
+    local, _, domain = value.rpartition("@")
     head, _, tld = domain.rpartition(".")
     if not (tld.islower() or tld.isupper() or tld.istitle()):
         return False
@@ -1418,7 +1427,23 @@ def _email_domain_plausible(value: str) -> bool:
         return False
     if _RE_SCALE_LABEL.fullmatch(label):
         return False
+    if "._" in local:
+        return False
+    if tld.istitle() and len(tld) > 1 and _RE_CAMEL.search(local):
+        return False
     return not (tld.istitle() and "." in head and head == head.lower())
+
+
+def _email_before_identifier(text: str, h: Hit) -> bool:
+    """アドレスの形の直後に「_＋小文字」が続き、識別子の途中で TLD が切れたものか。
+
+    mypy のキャッシュの「click.core@click.shell_completion」「PytestPdbWrapper@151.do_continue」のように、
+    式は「_」を TLD に含めないので、識別子の「.shell」「.do」で切れて実在の TLD に当たる。
+    人のアドレスでよく使う TLD（_UNDERSCORE_KEEP_TLDS）は、アドレス入りのファイル名もあるので落とさない。
+    """
+    tld = h.value.rpartition(".")[2]
+    after = text[h.end : h.end + 2]
+    return len(after) == 2 and after[0] == "_" and "a" <= after[1] <= "z" and tld.lower() not in _UNDERSCORE_KEEP_TLDS
 
 
 def _email_trim_tail(h: Hit) -> Hit | None:
@@ -1603,7 +1628,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
     16進のダンプの行と OBJ の要素の行の中のもの。マイナンバー（手がかり語なし）のすぐ隣が20桁以上の数字の連続のもの
     （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）。
-    カード番号（確度 高 でないもの）の小数の途中のもの
+    カード番号（確度 高 でないもの）の小数の途中のもの。メールアドレスの形の直後に「_＋小文字」が続くもの
+    （識別子の途中で TLD が切れた形・_email_before_identifier）
     """
     out = []
     for h in hits:
@@ -1636,6 +1662,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 h = _email_trim_tail(h)
                 if h is None:
                     continue
+            if _email_before_identifier(text, h):
+                continue
         elif h.pii_type == "credit_card":
             if (
                 h.confidence != Confidence.HIGH

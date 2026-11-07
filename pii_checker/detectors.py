@@ -1437,9 +1437,12 @@ _URL_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 _RE_ARN_ACCOUNT_BEFORE = re.compile(r"(?<![0-9A-Za-z])arn:aws(?:-[a-z]+)*:[a-z0-9-]{1,64}:[a-z0-9-]{0,32}:\Z")
 _ARN_PREFIX_MAX = 120
 # Google Cloud のプロジェクト番号の手前（_in_gcp_project_number）: 資源の名前の「projects/」・
-# JSON や設定の「project_number」「projectNumber」のキー
+# JSON や設定の「project_number」「projectNumber」・Firebase の送信者 ID（中身はプロジェクト番号）の
+# 「messagingSenderId」「gcm_defaultSenderId」（Android の values.xml の「name="…">」）のキー。
+# 文字列に入れた JSON の「\"」も許す
 _RE_GCP_NUMBER_BEFORE = re.compile(
-    r"(?<![0-9A-Za-z_])(?:projects/|project_?number[\"']?[ \t]*[:=][ \t]*[\"']?)\Z",
+    r"(?<![0-9A-Za-z_])(?:projects/"
+    r"|(?:project_?number|messaging_?sender_?id|gcm_default_?sender_?id)\\?[\"']?[ \t]*[:=>][ \t]*\\?[\"']?)\Z",
     re.IGNORECASE,
 )
 # Google Cloud のプロジェクト番号の後ろ: Firebase のアプリ ID の「:android:」「:ios:」「:web:」・
@@ -1447,7 +1450,8 @@ _RE_GCP_NUMBER_BEFORE = re.compile(
 # （「-compute@developer.gserviceaccount.com」「@cloudservices.gserviceaccount.com」）
 _RE_GCP_NUMBER_AFTER = re.compile(
     r":(?:android|ios|web):[0-9a-f]"
-    r"|[-@](?:[0-9a-z.-]{0,40}@)?[0-9a-z.-]{0,80}\.(?:googleusercontent|gserviceaccount)\.com(?![0-9A-Za-z.-])"
+    r"|[-@](?:[0-9a-z.-]{0,40}@)?[0-9a-z.-]{0,80}\.(?:googleusercontent|gserviceaccount)\.com(?![0-9A-Za-z.-])",
+    re.IGNORECASE,
 )
 _GCP_PREFIX_MAX = 40
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
@@ -1662,11 +1666,13 @@ def _in_arn_account(text: str, start: int, end: int) -> bool:
 
 
 def _in_gcp_project_number(text: str, start: int, end: int) -> bool:
-    """検出が Google Cloud のプロジェクト番号（必ず12桁）の置き場か。
+    """検出（12桁）が Google Cloud のプロジェクト番号の置き場か。
 
     資源の名前の「projects/123456789012/…」・Firebase のアプリ ID「1:123456789012:android:…」・
     OAuth のクライアント ID「123456789012-abc.apps.googleusercontent.com」・サービスアカウントの
-    「service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com」・「"project_number": "123456789012"」。
+    「service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com」・「"project_number": "123456789012"」・
+    Firebase の送信者 ID「"messagingSenderId": "123456789012"」。
+    gcloud の表の出力（「PROJECT_ID  NAME  PROJECT_NUMBER」の次の行）は形で分けられないので扱わない。
     設定のファイル（google-services.json・サービスアカウントの鍵）やログに多く、検査数字が合うと
     マイナンバーの形に見える（2026-11-08 に確かめた）。アプリ ID は頭の「1:」だけでは項目の番号の
     「1:<12桁>」と分けられないので、後ろの「:android:」「:ios:」「:web:」で決める。

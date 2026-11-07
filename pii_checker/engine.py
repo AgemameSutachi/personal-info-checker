@@ -55,6 +55,15 @@ DEEP_SWEEP_HINT = (
 )
 # 画素数が大きすぎる画像の次の手
 IMAGE_TOO_LARGE_HINT = "画像を縮小した写しを検査するか、目視で確かめてください"
+# 想定外の失敗の次の手（中身が壊れているかを作ったアプリで確かめ、それでも分からなければ報告してもらう）
+UNEXPECTED_HINT = (
+    "作ったアプリで開けるなら、別名で保存し直した写しを検査してください。開けなければ壊れている可能性があるので"
+    "元のファイルを取り直してください。開けるのに写しでも同じなら、この文のまま報告してください"
+)
+# 権限がなくて開けなかったときの次の手
+ACCESS_DENIED_HINT = "読む権限のあるアカウントで再検査するか、そのファイルの権限を持つ人に頼んでください"
+# 検査の途中で見えなくなったときの次の手
+NOT_FOUND_HINT = "置き場所を確かめ、ファイルがあれば再検査してください"
 # 検査の途中経過（それまでの検出）を書き出す最短の間隔。時間切れで打ち切られても、ここまでの分は残る。
 # 書き出しに時間がかかる（内側の項目が多い書庫など）ときは、検査の時間の 2% 以下に収まるよう間隔を広げる
 CHECKPOINT_SECONDS = 10
@@ -1156,10 +1165,10 @@ class ScanContext:
             item.reason = str(e)
         except PermissionError as e:
             item.status = Status.UNCHECKABLE
-            item.reason = f"アクセスが拒否された（権限がない・他のプログラムが使用中）: {e}"
+            item.reason = access_denied_reason(e)
         except FileNotFoundError as e:
             item.status = Status.UNCHECKABLE
-            item.reason = f"ファイルが見つからない（検査中に移動・削除された可能性）: {e}"
+            item.reason = f"ファイルが見つからない（検査中に移動・削除された可能性）。{NOT_FOUND_HINT}（詳細: {e}）"
         except (TooLargeForMemory, MemoryError) as e:
             self._sweep_instead(blob, item, collector, e)
         except Exception as e:  # 想定外の失敗も「検査不能」として必ず残す
@@ -1169,9 +1178,9 @@ class ScanContext:
             if is_disk_full(e):
                 item.reason = "一時フォルダのドライブが満杯になり、展開・書き出しができなかった。" + TEMP_DIR_HINT
                 return item
-            tb = traceback.extract_tb(e.__traceback__)
-            where = f"{Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else ""
-            item.reason = f"読み取り中にエラー（{type(e).__name__}: {str(e)[:300]}）{where}"
+            item.reason = (
+                "読み取りの途中で想定外のエラーになり、検査できなかった（要目視）。" + UNEXPECTED_HINT + error_detail(e)
+            )
         finally:
             collector.finish()  # 途中で止まっても、それまでに見た住所の確度を決める
         return item
@@ -1200,7 +1209,7 @@ class ScanContext:
             return
         except Exception as e:
             item.status = Status.UNCHECKABLE
-            item.reason = f"{why}ため形式どおりに読めず、文字列だけを拾う走査も失敗した（{type(e).__name__}: {e}）"
+            item.reason = f"{why}ため形式どおりに読めず、文字列だけを拾う走査も失敗した（要目視）。{UNEXPECTED_HINT}{error_detail(e)}"
             return
         item.status = Status.PARTIAL
         item.reason = f"{why}ため形式どおりには読めず、文字として読める部分だけを少しずつ検査した"
@@ -1394,6 +1403,43 @@ def split_siblings(path: str) -> list[str]:
     return out
 
 
+def error_detail(e: BaseException) -> str:
+    """想定外の例外の詳細（型・文・起きた場所）を、理由の文の末尾に添える形にする。
+
+    使い手が読む次の手を先に出し、直す側が要る詳細は後ろの括弧へ回す（報告から直せるように場所は残す）。
+    """
+    tb = traceback.extract_tb(e.__traceback__)
+    where = f"・{Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else ""
+    return f"（詳細: {type(e).__name__}: {str(e)[:300]}{where}）"
+
+
+def access_denied_reason(e: OSError) -> str:
+    """開けなかったときの理由の文。他のプログラムが使用中なのか、権限がないのかで次の手を分ける。
+
+    Windows ではどちらも PermissionError になる。使用中なのに「権限がない」と出すと、権限を直しに行かせてしまう。
+    組み込みの open() は使用中でも番号（winerror）を持たない [Errno 13] になるので、番号が無ければ両方を挙げる。
+    """
+    from . import safeio
+
+    if isinstance(e, safeio.SourceError):  # 使用中（SourceInUse）など、理由の文を持っているもの
+        return str(e)
+    winerror = getattr(e, "winerror", None)
+    if winerror in (safeio.WINERR_SHARING_VIOLATION, safeio.WINERR_LOCK_VIOLATION):
+        return f"{safeio.IN_USE_OPEN_MSG}（詳細: {e}）"
+    if winerror == 5:  # ERROR_ACCESS_DENIED
+        return f"アクセスが拒否された（読む権限がない）。{ACCESS_DENIED_HINT}（詳細: {e}）"
+    if winerror is not None:  # CRC の誤り・読み取りの失敗など、装置の誤りも PermissionError に振られる
+        return (
+            "ディスクから読めなかった（ディスク・記録媒体の不具合の可能性。権限の問題ではない）。"
+            "エクスプローラーで手元の別のドライブへ写せるかを確かめ、写せたらその写しを検査してください。"
+            f"写せなければ、別の写し（バックアップ等）を検査してください（詳細: {e}）"
+        )
+    return (
+        "アクセスが拒否された（読む権限がないか、他のプログラムが使用中）。そのファイルを開いているアプリを閉じるか、"
+        f"{ACCESS_DENIED_HINT}（詳細: {e}）"
+    )
+
+
 def _source_failure(path: str, e: BaseException) -> ItemResult:
     """元のファイルを写せなかったときの項目（理由つきの検査不能）。"""
     from . import safeio
@@ -1405,15 +1451,16 @@ def _source_failure(path: str, e: BaseException) -> ItemResult:
     elif isinstance(e, safeio.SourceError):
         item.reason = str(e)
     elif isinstance(e, PermissionError):
-        item.reason = f"アクセスが拒否された（権限がない）: {e}"
+        item.reason = access_denied_reason(e)
     elif isinstance(e, FileNotFoundError):
-        item.reason = f"ファイルが見つからない（検査中に移動・削除された可能性）: {e}"
+        item.reason = f"ファイルが見つからない（検査中に移動・削除された可能性）。{NOT_FOUND_HINT}（詳細: {e}）"
     elif safeio.is_disk_full(e):
-        item.reason = (
-            "一時フォルダのドライブが満杯になった。空きの多いドライブを「展開に使う一時フォルダ」に指定して再検査する"
-        )
+        item.reason = "一時フォルダのドライブが満杯になった。" + TEMP_DIR_HINT
     else:
-        item.reason = f"元のファイルを読めなかった（{type(e).__name__}: {str(e)[:300]}）"
+        item.reason = (
+            "元のファイルを読めなかった。エクスプローラーで開けるかを確かめ、開けるなら手元のドライブへ写して"
+            "その写しを検査してください" + error_detail(e)
+        )
     return item
 
 

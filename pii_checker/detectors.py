@@ -144,9 +144,11 @@ MODEL_KW = re.compile(
     re.I,
 )
 # 値のすぐ前が ID の項目のキー（ログの「id=…」・JSON の「"user_id": "…"」・「requestId:」）。識別番号の数がカード番号の
-# 形に偶然合ったものとみなす（2026-11-08・ログ 1600 行の「id=<14桁>」で 中 35件）。「paid=」「valid:」は ID のキーにしない
+# 形に偶然合ったものとみなす（2026-11-08・ログ 1600 行の「id=<14桁>」で 中 35件）。「paid=」「valid:」は ID のキーにしない。
+# キーと値の間に改行をはさむものは見ない。日本語の項目名の「会員ID:」「支払い ID:」はカード番号を書く欄でもあるので、
+# キーの前（空白を除く）が日本語などの ASCII でない文字なら下げない（_id_key_before）
 RE_ID_KEY_BEFORE = re.compile(
-    r"""(?<![A-Za-z0-9])["']?(?:id|ID|[A-Za-z0-9]+[_\-.](?:id|ID)|[a-z0-9]+(?:Id|ID))["']?\s*[=:]\s*["']?\Z"""
+    r"""(?<![A-Za-z0-9])["']?(?:id|ID|Id|[A-Za-z0-9]+[_\-.](?:id|ID|Id)|[a-z0-9]+(?:Id|ID))["']?[ \t]*[=:][ \t]*["']?\Z"""
 )
 ID_KEY_NOTE = "（すぐ前が ID の項目のキーで、識別番号とみなした）"
 # 語が無ければ拾わない番号（クレジットカードの Luhn が合わないものを、打ち間違いとして 低 で残すときの語）
@@ -1899,6 +1901,15 @@ def _name_label_code_shape(text: str, h: Hit) -> str:
     return ""
 
 
+def _id_key_before(text: str, start: int) -> bool:
+    """start のすぐ前が ASCII の ID の項目のキー（「id=」「"user_id": "」）か。キーの前が日本語の項目名なら False。"""
+    m = RE_ID_KEY_BEFORE.search(text, max(0, start - 40), start)
+    if m is None:
+        return False
+    head = text[max(0, m.start() - 20) : m.start()].rstrip(" \t　")
+    return not head or head[-1].isascii()
+
+
 def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     """実物の検査（2026-10-21・ドライブ全体）で多かった、形だけ当たる誤検出を除く。
 
@@ -1975,7 +1986,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if (
                 h.confidence == Confidence.MEDIUM
                 and h.rule == "Luhn一致・ブランド番号体系一致"
-                and RE_ID_KEY_BEFORE.search(text, max(0, h.start - 40), h.start)
+                and _id_key_before(text, h.start)
             ):
                 h = replace(h, confidence=Confidence.LOW, rule=h.rule + ID_KEY_NOTE)
         elif h.pii_type == "phone" and h.confidence == Confidence.LOW:

@@ -1634,7 +1634,7 @@ def _in_url_path(text: str, start: int, end: int) -> bool:
 
 
 def _in_arn_account(text: str, start: int, end: int) -> bool:
-    """検出が AWS の ARN のアカウント番号の欄（「arn:aws:iam::123456789012:role/x」の12桁）か。
+    """検出が AWS の ARN のアカウント番号の欄（「arn:aws:iam::123456789012:role/x」の12桁・すぐ後ろが「:」）か。
 
     アカウント番号は必ず12桁で、ARN の4つ目の「:」と5つ目の「:」の間に来る。IAM のポリシー・CloudFormation の
     テンプレート・ログの JSON に多く、検査数字が合うとマイナンバーの形に見える（2026-11-08 に確かめた・

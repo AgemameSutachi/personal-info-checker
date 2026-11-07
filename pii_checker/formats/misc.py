@@ -928,6 +928,10 @@ IMAGE_BROKEN_HELP = (
     "画像を表示できるソフトで開けるなら、PNG か JPEG で別名で保存した写しを検査してください。"
     "開けなければ元のファイルを取り直してください"
 )
+# このツールでは開けない暗号化（鍵と証明書・暗号化メール）の次の手
+ENCRYPTED_DATA_HINT = (
+    "作ったアプリ（証明書の管理・メールのソフト）で開いて中身を確かめるか、要らなければ削除・移動してください"
+)
 
 
 def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
@@ -1272,9 +1276,13 @@ def handle_der(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     if inner.startswith(b"\x02\x01\x03"):  # PFX の版 3
         raise Uncheckable(
             "パスワードで守られた鍵と証明書のファイル（.pfx・.p12）で、中身が暗号化されているため検査できない"
+            f"（要目視）。{ENCRYPTED_DATA_HINT}"
         )
     if DER_OID_ENVELOPED in head or DER_OID_ENCRYPTED in head:
-        raise Uncheckable("暗号化されたデータ（暗号化メールの .p7m など）で、中身が暗号化されているため検査できない")
+        raise Uncheckable(
+            "暗号化されたデータ（暗号化メールの .p7m など）で、中身が暗号化されているため検査できない"
+            f"（要目視）。{ENCRYPTED_DATA_HINT}"
+        )
     with blob.open() as f:
         for s in iter_strings_chunked(f.read):
             col.add_text(s, "証明書・署名の文字", method="DER の文字の部分")
@@ -1509,7 +1517,10 @@ def handle_split_volume(ctx: ScanContext, blob: Blob, item: ItemResult, col: Col
         ]
         firsts += _glob.glob(_glob.escape(stem) + ".part*1.rar")
         if not any(_os.path.exists(p) for p in firsts if p != base):
-            raise Uncheckable("分割アーカイブの続きだが、1つ目のファイルが同じフォルダに無いため中身を検査できない")
+            raise Uncheckable(
+                "分割アーカイブの続きだが、1つ目のファイルが同じフォルダに無いため中身を検査できない。"
+                "1つ目（.001・.zip・.part1.rar 等）を同じフォルダに置いて再検査してください"
+            )
     raise OutOfScope(
         "分割アーカイブの2つ目以降。中身は1つ目（.001・.zip・.part1.rar 等）を展開するときに一緒に検査する"
     )

@@ -41,7 +41,7 @@ def _raising_handler(monkeypatch, error):
         (PermissionError(13, "拒否"), "アクセスが拒否された"),
         (FileNotFoundError(2, "無い"), "ファイルが見つからない"),
         (OSError(errno.ENOSPC, "No space left on device"), "ドライブが満杯"),
-        (ValueError("想定外の中身"), "読み取り中にエラー（ValueError: 想定外の中身）"),
+        (ValueError("想定外の中身"), "（詳細: ValueError: 想定外の中身・"),
     ],
 )
 def test_read_failures_are_uncheckable_with_reason(tmp_path, monkeypatch, error, words):
@@ -68,10 +68,17 @@ def test_too_deep_nesting_is_uncheckable(tmp_path):
 
 def test_sweep_failure_after_too_large_is_uncheckable(tmp_path, monkeypatch):
     """大きすぎて簡易検査（文字列の走査）に回したのに、その走査も失敗したら「簡易検査」ではなく「検査不能」。"""
-    from pii_checker import textdecode
+    import importlib
+    import pkgutil
 
+    from pii_checker import formats, textdecode
+
+    # 形式のモジュールは頭で iter_strings_chunked を取り込む。差し替えの間に初めて読み込まれると、壊れた版を
+    # 掴んだまま後の試験に残る（この試験の後の SQLite の試験がメモリ不足の扱いになっていた）ので、先に全部読み込む
+    for mod in pkgutil.iter_modules(formats.__path__):
+        importlib.import_module(f"{formats.__name__}.{mod.name}")
     monkeypatch.setattr(engine, "READ_ALL_LIMIT", 10)
-    for error, words in ((MemoryError(), "メモリ不足で失敗した"), (OSError("壊れた"), "走査も失敗した（OSError")):
+    for error, words in ((MemoryError(), "メモリ不足で失敗した"), (OSError("壊れた"), "走査も失敗した（要目視）")):
 
         def broken(read, error=error):
             raise error

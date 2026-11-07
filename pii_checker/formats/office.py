@@ -206,7 +206,10 @@ def handle_xlsb(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
         n = sweep_zip_parts(ctx, z, blob, col, depth, raw_parts=lambda name: sheets_done and name.endswith(".bin"))
     item.method = ("pyxlsb で全シート＋" if sheets_done else "") + f"zip 内の全部品 {n} 個"
     if not sheets_done:
-        raise Uncheckable("xlsb のセルを構造として読めず、生データ走査のみ（数値のセルは検査できていない）")
+        raise Uncheckable(
+            "xlsb のセルを構造として読めず、生データ走査のみ（数値のセルは検査できていない。"
+            "Excel で開けるなら xlsx で別名で保存した写しを検査してください）"
+        )
 
 
 # ------------------------------------------------------------------ docx
@@ -810,7 +813,10 @@ def handle_xls_legacy(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         col.add_text(text, "生データ", method="生データ走査", raw=ok)
     item.method = ("xlrd でセル＋" if ok else "") + "生データ走査"
     if not ok:
-        raise Uncheckable("古い Excel 形式のセルを構造として読めず、生データ走査のみ（数値のセルは検査できていない）")
+        raise Uncheckable(
+            "古い Excel 形式のセルを構造として読めず、生データ走査のみ（数値のセルは検査できていない。"
+            "Excel で開けるなら xlsx で別名で保存した写しを検査してください）"
+        )
 
 
 def _scan_msg(ctx: ScanContext, blob: Blob, col: Collector, depth: int) -> None:

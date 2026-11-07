@@ -496,7 +496,7 @@ def handle_with_7z_exe(
                     f"{blob.display}!{e['Path']}",
                     Status.UNCHECKABLE,
                     f"一時領域の空きが足りず展開できない（必要 {batch_size / 1024**3:.1f}GB・空き {free / 1024**3:.1f}GB）。"
-                    "設定で一時フォルダを空きの多いドライブにして再検査",
+                    "「展開に使う一時フォルダ」（コマンドの版は --temp-dir）を空きの多いドライブにして再検査してください",
                     depth + 1,
                     size=int(e.get("Size") or 0),
                 )
@@ -640,7 +640,8 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
             raise Uncheckable(f"ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）")
         handle_with_7z_exe(ctx, blob, item, col, depth, kind="image")
         item.notes.append(
-            "ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外。必要なら「イメージの未使用領域も走査」を有効に）"
+            "ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外。必要なら「ディスクイメージの空き領域（削除されたファイル）も調べる」"
+            "（コマンドの版は --deep-image-sweep）をオンにして再検査してください）"
         )
         if ctx.options.deep_image_sweep:
             with blob.open() as f:

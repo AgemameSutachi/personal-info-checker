@@ -34,6 +34,15 @@ GIT_PACK_TIMEOUT_FACTOR = 4  # git の pack は過去の全版を検査するの
 # 巨大なファイルは、この速さ（遅めに見積もった読み取り速度）で読み切れるだけの時間を最低限あげる。
 # 一律 30 分では、数 GB の DB のダンプが読み切れずに時間切れになっていた（3.3GB の Oracle ダンプで実測）
 TIMEOUT_MIN_BYTES_PER_SEC = 512 * 1024
+# 時間切れの次の手。画面・Web と、コマンドの版（秒で指定）とで設定の名前が違うので両方書く
+TIMEOUT_HINT = (
+    "巨大なファイルは「1ファイルの時間制限（分）」（コマンドの版は --timeout・秒）を延ばして再検査してください"
+)
+# 異常終了の次の手。1プロセスのメモリ上限は物理メモリから決まり、設定では変えられない
+CRASH_HINT = (
+    "作ったアプリで開けるなら、小さく分けた写しを検査するか、中身を目視で確かめてください。"
+    "開けなければ壊れている可能性があるので元のファイルを取り直してください"
+)
 HEARTBEAT_SECONDS = 10  # 生存記録の間隔（Store.reconcile_running の既定 120 秒より十分短く）
 DB_MIN_FREE = 256 * 1024**2  # 結果の保存先のドライブにこれだけ空きが無くなったら、満杯になる前に止める
 DISK_FULL_MESSAGE = (
@@ -549,13 +558,12 @@ class JobRunner:
             self._cleanup.request([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダを（裏で）すぐ片付ける
             limit = self._timeout_for(path)
             minutes = f"{limit // 60}分" if limit >= 60 else f"{limit}秒"  # 1分未満を「0分」と出さない
-            if partial and any(i.finding_counts for i in partial):
-                reason = (
-                    f"時間切れ（{minutes}）で打ち切った。途中までに見つけた分は記録した（残りは未検査）。"
-                    "巨大なファイルは設定で時間制限を延ばして再検査"
-                )
-            else:
-                reason = f"時間切れ（{minutes}）で打ち切った。巨大なファイルは設定で時間制限を延ばして再検査"
+            kept = (
+                "途中までに見つけた分は記録した（残りは未検査）。"
+                if partial and any(i.finding_counts for i in partial)
+                else ""
+            )
+            reason = f"時間切れ（{minutes}）で打ち切った。{kept}{TIMEOUT_HINT}"
             self.store.save_failure(self.job_id, path, reason, elapsed, partial=partial)
         except process_expired as e:
             partial = read_checkpoint(checkpoint_path(self.options, path))
@@ -570,7 +578,7 @@ class JobRunner:
                 self.job_id,
                 path,
                 f"読み取り中に検査プロセスが異常終了した（1プロセスのメモリ上限 {limit_gb:.1f}GB を超えた・"
-                f"壊れたファイルの可能性）。{kept}{e}",
+                f"壊れたファイルの可能性）。{kept}{CRASH_HINT}（{e}）",
                 elapsed,
                 partial=partial,
             )

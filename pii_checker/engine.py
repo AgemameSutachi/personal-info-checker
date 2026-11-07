@@ -40,6 +40,12 @@ IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは
 READ_ALL_LIMIT = 256 * 1024 * 1024
 TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目印）
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
+# OCR を切って検査したときの次の手（画面の項目名と、コマンドの版の引数）
+OCR_OFF_HINT = (
+    "「画像とスキャンした PDF の文字を OCR で読む」をオンにして（コマンドの版は --no-ocr を外して）再検査してください"
+)
+# 画素数が大きすぎる画像の次の手
+IMAGE_TOO_LARGE_HINT = "画像を縮小した写しを検査するか、目視で確かめてください"
 # 検査の途中経過（それまでの検出）を書き出す最短の間隔。時間切れで打ち切られても、ここまでの分は残る。
 # 書き出しに時間がかかる（内側の項目が多い書庫など）ときは、検査の時間の 2% 以下に収まるよう間隔を広げる
 CHECKPOINT_SECONDS = 10
@@ -1180,7 +1186,10 @@ class ScanContext:
                     collector.add_text(s, "文字列走査", method="文字列走査（大きすぎて形式どおりに読めないため）")
         except MemoryError:
             item.status = Status.UNCHECKABLE
-            item.reason = f"{why}ため形式どおりに読めず、文字列だけを拾う走査もメモリ不足で失敗した"
+            item.reason = (
+                f"{why}ため形式どおりに読めず、文字列だけを拾う走査もメモリ不足で失敗した。"
+                "作ったアプリで開けるなら、小さく分けた写しを検査するか、中身を目視で確かめてください"
+            )
             return
         except Exception as e:
             item.status = Status.UNCHECKABLE

@@ -1427,6 +1427,12 @@ _RE_DUMP_LINE = re.compile(
     r"[ \t]*(?:[0-9A-Fa-f]{6,7}0(?:[ \t]+[0-9A-Fa-f]{2}){8,}|[0-9A-Fa-f]{5}0(?:[ \t]+[0-9A-Fa-f]{2}){12,}"
     r"|[0-9A-Fa-f]{7}0:(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
 )
+# 途中の番地から出したダンプ（`hexdump -s 5`・`xxd -s 7` の「0000005  …」）の行。番地の末尾を問わない代わりに、
+# 前か後ろの行も同じ形で番地がちょうど1行分（16進の 0x10・od の既定の8進の 020）ずれているときだけダンプとみなす
+_RE_DUMP_LINE_ANY = re.compile(
+    r"[ \t]*(?:(?P<a>[0-9A-Fa-f]{7,8})(?:[ \t]+[0-9A-Fa-f]{2}){8,}|(?P<b>[0-9A-Fa-f]{6})(?:[ \t]+[0-9A-Fa-f]{2}){12,}"
+    r"|(?P<c>[0-9A-Fa-f]{8}):(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
+)
 _DUMP_LINE_MAX = 200
 # URL のパスの中の検出（_in_url_path）。手前の「scheme://」を探す幅と、パスとみなす文字
 # （ASCII の英数字と「-._~/%:@+=」だけ。「?」「#」「;」「&」「,」・空白・引用符・日本語の文字などが来たら URL の外とみなす）
@@ -1656,7 +1662,8 @@ def _in_dump_or_mesh_line(text: str, start: int) -> bool:
     """検出の始まる行が、16進のダンプの行か Wavefront OBJ の要素の行か。
 
     - ダンプ（od・hexdump・xxd の出力をログに貼ったもの）: 右の文字の欄「624K000135004120」に数字が並ぶと、
-      左の16進の欄と同じ中身が12桁の番号の形に見える（見本のダンプの貼られたログ1つで 106 件）
+      左の16進の欄と同じ中身が12桁の番号の形に見える（見本のダンプの貼られたログ1つで 106 件）。
+      途中の番地から出したダンプは _dump_line_from_offset で前後の行の番地を見る
     - OBJ の面・頂点の行「f 1074 1076 1075」: 4桁の数が3つ空白で並ぶと、区切りつきの12桁の形になる
     どちらの行も短いので、前後 _DUMP_LINE_MAX 文字の中に行の端が無い行は見ない
     （改行の無い長い本文で、検出ごとに行全体をなめて二乗の遅さにならないため）。
@@ -1671,11 +1678,54 @@ def _in_dump_or_mesh_line(text: str, start: int) -> bool:
         line_end = len(text)
     if _RE_DUMP_LINE.match(text, line_start, line_end):
         return True
+    if _dump_line_from_offset(text, line_start, line_end):
+        return True
     while line_start < line_end and text[line_start] in " \t":
         line_start += 1
     while line_end > line_start and text[line_end - 1] in " \t\r":
         line_end -= 1
     return bool(_RE_OBJ_LINE.fullmatch(text, line_start, line_end))
+
+
+def _dump_address(text: str, start: int, end: int) -> str | None:
+    """text[start:end] の行が _RE_DUMP_LINE_ANY の形なら番地の文字列を、そうでなければ None を返す。"""
+    m = _RE_DUMP_LINE_ANY.match(text, start, end)
+    if not m:
+        return None
+    return m.group("a") or m.group("b") or m.group("c")
+
+
+def _dump_line_from_offset(text: str, line_start: int, line_end: int) -> bool:
+    """途中の番地から出したダンプの行か（番地の末尾が0でない「0000005  61 62 3a …」）。
+
+    _RE_DUMP_LINE は番地の末尾が0の行だけを見るので、`hexdump -s 5`・`xxd -s 7` のように途中から出した
+    ダンプでは、右の文字の欄の12桁・16桁を拾っていた。前か後ろの行（どちらも _DUMP_LINE_MAX 文字まで）も
+    同じ形で、番地の桁の数が同じで、ちょうど1行分（16進で 0x10。番地がどちらも8進の数字だけなら、od の既定の
+    8進の 020 も）ずれているときだけダンプとみなす（1行だけの数の並び・年と2桁の数の並びには当たらない）。
+    """
+    addr = _dump_address(text, line_start, line_end)
+    if addr is None:
+        return False
+    neighbors = []
+    if line_start > 0:
+        prev_start = text.rfind("\n", max(0, line_start - 1 - _DUMP_LINE_MAX), line_start - 1) + 1
+        if prev_start > 0 or line_start - 1 <= _DUMP_LINE_MAX:
+            neighbors.append((_dump_address(text, prev_start, line_start - 1), 1))
+    if line_end < len(text):
+        next_end = text.find("\n", line_end + 1, line_end + 1 + _DUMP_LINE_MAX)
+        if next_end < 0 and len(text) <= line_end + 1 + _DUMP_LINE_MAX:
+            next_end = len(text)
+        if next_end >= 0:
+            neighbors.append((_dump_address(text, line_end + 1, next_end), -1))
+    for other, sign in neighbors:
+        if other is None or len(other) != len(addr):
+            continue
+        if (int(addr, 16) - int(other, 16)) * sign == 0x10:
+            return True
+        octal = set("01234567")
+        if set(addr) <= octal and set(other) <= octal and (int(addr, 8) - int(other, 8)) * sign == 0o20:
+            return True
+    return False
 
 
 def _era_date_is_broken(text: str, h: Hit) -> bool:

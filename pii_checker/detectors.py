@@ -767,8 +767,9 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
     elif category in ("phone", "postal_code", "bank_account", "credit_card", "pension"):
         if len(digits) < 5 or _RE_URL_LIKE.search(v):
             return None
-        # 英字の頭のコードは電話だけで見る（郵便番号の「T1000005」「JP1000005」は〒・国の頭として残す）
-        if category == "phone" and _RE_LETTER_CODE.fullmatch(v):
+        # 英字の頭のコード。電話は桁を問わず、口座・カード・年金は数字が7桁未満のもの（「E31640」）だけ落とす
+        # （口座の「A1234567」は残す）。郵便番号は桁数で見る（「T1000005」「JP1000005」は〒・国の頭として残す）
+        if category != "postal_code" and (category == "phone" or len(digits) < 7) and _RE_LETTER_CODE.fullmatch(v):
             return None
         if category == "postal_code" and len(digits) not in (6, 7):
             return None  # 6桁は数値として先頭の0が落ちたもの

@@ -629,11 +629,31 @@ _RE_DATE_SERIAL = re.compile(r"[0-9]{4,5}(\.0+)?")
 _RE_PLAIN_NUMBER = re.compile(r"[0-9]{1,9}(\.[0-9]+)?")
 _RE_AT_WORD = re.compile(r"[\[(（]\s*at\s*[\])）]|\sat\s|アットマーク", re.I)
 # プログラムの識別子・コードの断片（見出しが住所・氏名の列に入っていても、人の住所・名前ではない）。ASCII の値だけに使う。
-# 空白の無い語で、こぶ（小文字の後の大文字）が2つ以上の AddressBookType・「_」でつないだ user_name・a.b.c の形。
-# こぶ1つの McDonald・DeVito は名前にあるので外さない
-_RE_IDENT_WORD = re.compile(r"(?:\w*[a-z][A-Z]){2}\w*|\w*[A-Za-z0-9]_[A-Za-z0-9]\w*|\w+\.\w+\.\w+")
-# 文の記号（=・;・{}・::・->・識別子のすぐ後の括弧）か、引用符・括弧で始まる断片
-_RE_CODE_MARK = re.compile(r"[=;{}]|::|->|\w\(|^['\"(\[<]")
+# 人の名前・地名も空白なしにつなぐと識別子の形になる（MacDonaldSmith・Taro_Yamada・Bldg(3F)・Oak St.; Apt 4）ので、
+# 形だけでは外さず、次の2つに限る:
+# (1) 空白の無い語を、こぶ（小文字の後の大文字）か「_」で語に割ったとき、2つ目より後ろにプログラムでよく使う語がある
+#     （AddressBookType の Type・ContactAddressIndex の Index・user_name の name）。人の名前・地名にこの語はまず続かない
+# (2) 文の記号: 「=」・「{」「}」・「::」・「->」・メソッドの呼び出し（.split( の形）・引数の無い呼び出し（getName()）・
+#     文字列を渡す呼び出し（split('=' の形）
+_RE_IDENT_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+")
+_RE_IDENT_PART = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+_CODE_WORDS = frozenset(
+    "type types index idx id ids name names address addr properties property props flag flags info data list map set "
+    "get value values count kind mode status format class enum book field fields key keys code str num obj ptr ref "
+    "handler callback config options param params attr attrs item items node table row col column entry".split()
+)
+_RE_CODE_MARK = re.compile(r"[={}]|::|->|\.\w+\(|\w\(\s*\)|\w\(\s*['\"]")
+
+
+def _looks_like_code(v: str) -> bool:
+    """ASCII の値が、プログラムの識別子（コードの語を含む）か文の断片か。"""
+    if _RE_CODE_MARK.search(v):
+        return True
+    v = v.strip("'\"[](),")  # コードを表として読んだセルの 'DisplayName', の引用符・括弧・カンマ
+    if not _RE_IDENT_TOKEN.fullmatch(v):
+        return False
+    parts = [p.lower() for p in _RE_IDENT_PART.findall(v)]
+    return len(parts) >= 2 and any(p in _CODE_WORDS for p in parts[1:])
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -645,7 +665,7 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         return None
     if len(v) <= 12 and not cannot_be_header(v) and header_category(v) is not None:
         return None  # 「住所」「電話」などの見出し語そのもの（横持ちの表の項目名）は値ではない
-    if category in ("address", "name") and v.isascii() and (_RE_IDENT_WORD.fullmatch(v) or _RE_CODE_MARK.search(v)):
+    if category in ("address", "name") and v.isascii() and _looks_like_code(v):
         return None  # コードを表として読んだときの識別子・文の断片は、住所・名前ではない
     conf = Confidence.MEDIUM
     digits = _RE_NON_DIGIT.sub("", v)

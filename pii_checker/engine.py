@@ -208,6 +208,18 @@ def _count_by_rank(best: dict[str, dict[int, int]]) -> dict[str, int]:
     return counts
 
 
+def size_text(nbytes: int) -> str:
+    """バイト数を人が読む大きさにする（4TB・1.5GB・300MB）。上限の文言で 1GB 未満が「0GB」にならないように。"""
+    units = (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024))
+    for i, (unit, scale) in enumerate(units):
+        if nbytes >= scale:
+            value = round(nbytes / scale, 1)
+            if value >= 1024 and i > 0:  # 丸めで 1024 に届いたら1つ上の単位で（「1024KB」と出さない）
+                unit, value = units[i - 1][0], round(nbytes / units[i - 1][1], 1)
+            return f"{value:.1f}".removesuffix(".0") + unit
+    return f"{nbytes}B"
+
+
 @dataclass
 class Collector:
     """1項目分の検出を集める。件数は「種類×確度」で全数、明細は種類×確度ごとに上限まで。"""
@@ -1044,11 +1056,14 @@ class ScanContext:
         self.entries += 1
         if self.expanded_bytes > self.options.max_expand_bytes:
             raise Uncheckable(
-                f"展開した合計が上限（{self.options.max_expand_bytes // 1024**3}GB）を超えたため打ち切り"
-                "（zip 爆弾の疑い。上限は設定で変えられる）"
+                f"展開した合計が上限（{size_text(self.options.max_expand_bytes)}）を超えたため打ち切り"
+                "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
             )
         if self.entries > self.options.max_entries:
-            raise Uncheckable(f"内側のファイル数が上限（{self.options.max_entries}件）を超えたため打ち切り")
+            raise Uncheckable(
+                f"内側のファイル数が上限（{self.options.max_entries}件）を超えたため打ち切り"
+                "（本物の書庫なら、展開してからそのフォルダを検査してください）"
+            )
 
     def password_candidates(self) -> list[str]:
         return list(self.passwords)

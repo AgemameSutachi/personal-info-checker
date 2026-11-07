@@ -75,6 +75,16 @@ def table_counts(rows) -> dict[str, int]:
             + [[v] for v in ["Patel", "Raj Patel", "Telford", "Ismail", "Dobson", "Castelli", "Kana"]],
             {"name": 7},
         ),
+        # 英語の名前のセルを横持ちの見出しにしない（前は Patel の右の番号を tel の見出しで読み、電話に数えていた）
+        (
+            [["Name", "Remarks"], ["Patel", "12345678"], ["Raj Patel", "0312345678"], ["Ismail", "abc"]],
+            {"name": 4, "phone": 0, "email": 0},
+        ),
+        # 見出しの語を含む英語の項目名は横持ちの見出しのまま（Guardian Phone・HomePhone・Usermail）
+        (
+            [["Guardian Phone", "0312345678"], ["HomePhone", "0612345678"], ["Usermail", "taro@example.com"]],
+            {"phone": 2, "email": 1},
+        ),
         # 横持ちの申込書
         (
             [["氏名", "鬼瓦権左衛門"], ["住所", "東京都港区六本木6-10-1"], ["電話", "0312345678"]],

@@ -969,6 +969,8 @@ def _short_header_strength(core: str) -> int:
         return HEADER_NONE  # 説明文は見出しではない
     if detectors.header_category(core) is None:
         return HEADER_NONE
+    if not detectors.en_header_word_backed(core):
+        return HEADER_NONE  # 英語の名前（Patel・Ismail）が tel・mail を含むだけでは見出しにしない
     return HEADER_WEAK if detectors.detect(detectors.normalize(core), None) else HEADER_SURE
 
 

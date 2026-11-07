@@ -297,6 +297,21 @@ def test_cell_to_str(value, text):
         ("住所は省略します", engine.HEADER_NONE),
         ("※氏名", engine.HEADER_NONE),  # 注記
         ("会議の議題", engine.HEADER_NONE),  # 個人情報の見出し語が無い
+        # 英語の名前は tel・mail・dob を語の一部に含むだけでは見出しではない
+        ("Patel", engine.HEADER_NONE),
+        ("Raj Patel", engine.HEADER_NONE),
+        ("Ismail", engine.HEADER_NONE),
+        ("Dobson", engine.HEADER_NONE),
+        ("Esmail", engine.HEADER_NONE),  # 1字の語（e・s）はつなぎの部品にしない
+        # 見出しの語そのもの・つなぎ・見出しの語を含む項目名は見出しのまま
+        ("TEL", engine.HEADER_SURE),
+        ("Shipping Address", engine.HEADER_SURE),
+        ("HomePhone", engine.HEADER_SURE),
+        ("usermail", engine.HEADER_SURE),
+        ("Dateofbirth", engine.HEADER_SURE),
+        ("Driver's License", engine.HEADER_SURE),
+        ("E-Mail", engine.HEADER_SURE),
+        ("DoB", engine.HEADER_SURE),  # こぶで割ると Do と B になる略称
     ],
 )
 def test_header_strength_rejects_sentences_and_notes(cell, strength):

@@ -667,7 +667,8 @@ def _looks_like_code(v: str) -> bool:
 
 # 英語の見出しに使う語。英字だけの値は、語がすべてこの中にあるときだけ見出し語そのもの（項目名）とみなす。
 # 見出しの判定は語の一部でも当たる（usermail・homephone を拾うため）ので、値の「Patel」「Ismail」「Dobson」が
-# tel・mail・dob を含むだけで項目名になり、氏名の列から落ちていた（2026-11-07）
+# tel・mail・dob を含むだけで項目名になり、氏名の列から落ちていた（2026-11-07）。
+# 横持ちの表の見出しの側でも使う（en_header_word_backed: この語を1つも含まない英字のセルは見出しにしない）
 _EN_HEADER_WORDS = frozenset(
     "name names full first last given family middle sur surname kana furigana kanji roman "
     "address addr line street city zip code postal postcode zipcode home work office mailing current permanent "
@@ -676,6 +677,7 @@ _EN_HEADER_WORDS = frozenset(
     "card credit cc my individual passport driver drivers s license licence customer client user person".split()
 )
 _RE_EN_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+_RE_ALPHA_RUN = re.compile(r"[a-z]+")
 
 
 def _is_header_word_value(v: str) -> bool:
@@ -686,6 +688,32 @@ def _is_header_word_value(v: str) -> bool:
         return len(v) <= 12
     words = [w.lower() for w in _RE_EN_WORD.findall(v)]
     return bool(words) and all(w in _EN_HEADER_WORDS for w in words)
+
+
+def _is_en_header_compound(word: str) -> bool:
+    """小文字の英語の語が、見出しの語を2字以上ずつつないだもの（usermail・homephone・dateofbirth）か。"""
+    ok = [True] + [False] * len(word)
+    for end in range(2, len(word) + 1):
+        ok[end] = any(ok[start] and word[start:end] in _EN_HEADER_WORDS for start in range(0, end - 1))
+    return ok[-1]
+
+
+@functools.lru_cache(maxsize=4096)
+def en_header_word_backed(core: str) -> bool:
+    """ASCII の見出しの候補に、見出しの語そのもの（またはそのつなぎ）でできた語が1つでもあるか。
+
+    見出しの判定は語の一部でも当たるので、横持ちの表の値の「Patel」「Raj Patel」「Ismail」が tel・mail を含むだけで
+    見出しになり、右隣の値を電話・メールの見出しで読んでいた。「Shipping Address」「Guardian Phone」は Address・Phone の
+    語があるので見出しのまま。英字の語が無いもの・ASCII でないものは判定しない（True）。
+    """
+    if not core.isascii():
+        return True
+    words = [w.lower() for w in _RE_EN_WORD.findall(core)]
+    if not words:
+        return True
+    # こぶで割った語に加え、英字の連なりを丸ごと小文字にしたものも見る（DoB を Do と B に割ると見出しの語が無くなる）
+    words += _RE_ALPHA_RUN.findall(core.lower())
+    return any(w in _EN_HEADER_WORDS or _is_en_header_compound(w) for w in words)
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:

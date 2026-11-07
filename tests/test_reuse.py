@@ -256,6 +256,7 @@ def test_old_style_rar_continuation_finds_first(tmp_path):
     os.remove(tmp_path / "c.rar")
     res = scan_file(str(tmp_path / "c.r00"), ScanOptions(temp_dir=str(tmp_path)))
     assert "1つ目のファイルが同じフォルダに無い" in res.items[0].reason  # 陽性対照
+    assert "同じフォルダに置いて再検査してください" in res.items[0].reason  # 次の手
 
 
 def test_split_continuation_not_declared_clean_after_first_removed(tmp_path):

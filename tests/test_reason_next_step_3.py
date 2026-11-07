@@ -44,14 +44,19 @@ def test_unexpected_error_leads_with_next_step(tmp_path, monkeypatch):
         (32, "他のプログラムがこのファイルを使用中", "権限がない"),
         (33, "他のプログラムがこのファイルを使用中", "権限がない"),
         (5, "アクセスが拒否された（読む権限がない）。読む権限のあるアカウントで再検査するか", "使用中"),
+        (65, "アクセスが拒否された（読む権限がない）。", "使用中"),  # NAS の共有の権限なし
         (23, "ディスクから読めなかった（ディスク・記録媒体の不具合の可能性。権限の問題ではない）", "権限がない"),
+        (30, "ディスクから読めなかった", "権限がない"),
+        (108, "ドライブがロックされていて読めなかった（BitLocker など）", "ディスク・記録媒体の不具合"),
+        (16, "読む権限がないか、他のプログラムが使用中）", "ディスク・記録媒体の不具合"),  # 言い切らない番号
         (None, "読む権限がないか、他のプログラムが使用中）。そのファイルを開いているアプリを閉じるか", None),
     ],
 )
 def test_permission_error_splits_in_use_and_no_right(tmp_path, monkeypatch, winerror, expect, absent):
     """使用中（WinError 32/33）なら権限の話をせず、権限なし（WinError 5）なら使用中の話をしない。
 
-    CRC の誤り（WinError 23）のような装置の誤りも PermissionError になるが、権限の話にしない。番号が無ければ両方を挙げる。
+    CRC の誤り（WinError 23）のような装置の誤りも PermissionError になるが、権限の話にしない。NAS の権限なし（65）は
+    権限の話にし、ドライブのロック（108）はロックの解除を出す。番号が無い・言い切れない番号なら両方を挙げる。
     """
     error = OSError(13, "拒否", None, winerror) if winerror is not None else PermissionError(13, "拒否")
     assert isinstance(error, PermissionError)

@@ -1413,6 +1413,14 @@ def error_detail(e: BaseException) -> str:
     return f"（詳細: {type(e).__name__}: {str(e)[:300]}{where}）"
 
 
+# Python が PermissionError に振る Windows の番号（5・16・19〜36・65・82・83・108・132・158・167）のうちの分け方。
+# 権限が無いことを示すもの（ERROR_ACCESS_DENIED・ERROR_NETWORK_ACCESS_DENIED）
+_NO_RIGHT_WINERRORS = (5, 65)
+# ディスクから読めなかったことを示すもの（未準備・CRC・シーク・セクタが無い・読み書きの失敗・装置の故障）。
+# ここに無い番号は、権限か使用中かを言い切らない
+_DEVICE_WINERRORS = (21, 23, 25, 26, 27, 29, 30, 31)
+
+
 def access_denied_reason(e: OSError) -> str:
     """開けなかったときの理由の文。他のプログラムが使用中なのか、権限がないのかで次の手を分ける。
 
@@ -1426,9 +1434,14 @@ def access_denied_reason(e: OSError) -> str:
     winerror = getattr(e, "winerror", None)
     if winerror in (safeio.WINERR_SHARING_VIOLATION, safeio.WINERR_LOCK_VIOLATION):
         return f"{safeio.IN_USE_OPEN_MSG}（詳細: {e}）"
-    if winerror == 5:  # ERROR_ACCESS_DENIED
+    if winerror in _NO_RIGHT_WINERRORS:
         return f"アクセスが拒否された（読む権限がない）。{ACCESS_DENIED_HINT}（詳細: {e}）"
-    if winerror is not None:  # CRC の誤り・読み取りの失敗など、装置の誤りも PermissionError に振られる
+    if winerror == 108:  # ERROR_DRIVE_LOCKED
+        return (
+            "ドライブがロックされていて読めなかった（BitLocker など）。ドライブのロックを解除してから"
+            f"再検査してください（詳細: {e}）"
+        )
+    if winerror in _DEVICE_WINERRORS:
         return (
             "ディスクから読めなかった（ディスク・記録媒体の不具合の可能性。権限の問題ではない）。"
             "エクスプローラーで手元の別のドライブへ写せるかを確かめ、写せたらその写しを検査してください。"

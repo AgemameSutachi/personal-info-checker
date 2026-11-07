@@ -8,6 +8,7 @@ import os
 from pii_checker import engine, sniff
 from pii_checker.engine import Blob
 from pii_checker.formats.archive import _drop_parent_dirs
+from pii_checker.formats.misc import ENCRYPTED_DATA_HINT
 from pii_checker.models import ScanOptions, Status
 
 
@@ -137,6 +138,7 @@ def test_pfx_is_uncheckable_not_scanned(tmp_path):
     top = _scan(tmp_path, p).items[0]
     assert top.status == Status.UNCHECKABLE, (top.status, top.reason)
     assert ".pfx" in top.reason
+    assert ENCRYPTED_DATA_HINT in top.reason, top.reason  # 作ったアプリで確かめる・要らなければ移す
 
 
 def test_enveloped_data_is_uncheckable(tmp_path):
@@ -145,6 +147,7 @@ def test_enveloped_data_is_uncheckable(tmp_path):
     p.write_bytes(_der(body))
     top = _scan(tmp_path, p).items[0]
     assert top.status == Status.UNCHECKABLE, (top.status, top.reason)
+    assert ".p7m" in top.reason and ENCRYPTED_DATA_HINT in top.reason, top.reason
 
 
 def test_drop_parent_dirs_keeps_sized_entry_with_same_name_as_parent():

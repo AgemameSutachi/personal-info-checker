@@ -1227,9 +1227,11 @@ def handle_npy(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         text = _npy_cell_text(rest, enc)  # 途中で切れた最後の要素も、読める分は検査する
         if text:
             col.add_text(text, f"要素 {index + 1}", method="numpy の文字の配列")
-    item.method = f"numpy の文字の配列（型 {descr}・形 {shape}・{index}件）"
+    item.method = f"numpy の文字の配列（型 {descr}・形 {shape}・{index:,}件）"
     if index < count:
-        raise PartialScan(f"ファイルが途中で切れていた（{count} 件のうち {index} 件まで読めた。読めた分は検査した）")
+        raise PartialScan(
+            f"ファイルが途中で切れていた（{count:,} 件のうち {index:,} 件まで読めた。読めた分は検査した）"
+        )
 
 
 def _npy_cell_text(cell: bytes, enc: str | None) -> str:

@@ -449,7 +449,7 @@ def scan_sql_lines(lines, col: Collector, item: ItemResult, create_cols: dict | 
             continue
         other(ln_no, line)
     flush()
-    item.method += f"・SQL として読み取り（COPY {n_copy} 件・INSERT {n_insert} 文を列名つきで検査）"
+    item.method += f"・SQL として読み取り（COPY {n_copy:,} 件・INSERT {n_insert:,} 文を列名つきで検査）"
 
 
 # ------------------------------------------------------------------ PostgreSQL custom 形式
@@ -585,7 +585,7 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
             )
         else:
             col.add_lines(text, location_prefix=f"{table} ", method="COPY データ")
-    item.method = f"custom 形式を解いてデータ部 {len(blocks)} 個を展開（列名つき {n_with_cols} 個）"
+    item.method = f"custom 形式を解いてデータ部 {len(blocks):,} 個を展開（列名つき {n_with_cols:,} 個）"
     if not blocks:
         # データ部を1つも見つけられなかったものを「検査済み・検出なし」にしない（不具合の修正）。文字だけは拾っておく
         from ..textdecode import iter_strings

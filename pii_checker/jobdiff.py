@@ -45,7 +45,7 @@ _SETTING_NAMES = {
     "custom_rules": "自分で足す規則",
     "ocr": "OCR",
     "raw_sweep": "ファイル全体の文字の走査",
-    "deep_image_sweep": "イメージの空き領域の走査",
+    "deep_image_sweep": "ディスクイメージの空き領域（削除されたファイル）",
 }
 # 結果に効かない設定（場所・道具のパス・展開の区切り方・使い回し・接続先・明細の見本の数）
 _SETTING_IGNORE = {

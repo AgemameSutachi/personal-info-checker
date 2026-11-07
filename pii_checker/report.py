@@ -197,7 +197,10 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
     rows += [
         ("設定: OCR", "する" if opts.get("ocr") else "しない"),
         ("設定: ファイル全体の文字の走査（削除済みの残りも探す）", "する" if opts.get("raw_sweep") else "しない"),
-        ("設定: イメージの未使用領域", "走査する" if opts.get("deep_image_sweep") else "走査しない"),
+        (
+            "設定: ディスクイメージの空き領域（削除されたファイル）",
+            "調べる" if opts.get("deep_image_sweep") else "調べない",
+        ),
         ("設定: 前回の結果の使い回し", "する" if opts.get("reuse", True) else "しない（全部読み直す）"),
     ]
     # 拾わない値そのものは出さない（自社の電話番号などを、レポートの渡し先へ広めないため）。件数だけ

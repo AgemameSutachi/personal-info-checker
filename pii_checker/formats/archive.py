@@ -367,12 +367,7 @@ def _zip_python_encrypted(
 
 
 def _pw_reason(ctx: ScanContext, what: str) -> str:
-    n = len(ctx.password_candidates())
-    return (
-        f"{what}（受け取ったパスワード {n} 個を試したが開けなかった）"
-        if n
-        else f"{what}（パスワードを入力すると再検査できる）"
-    )
+    return ctx.password_reason(what)
 
 
 # ------------------------------------------------------------------ 7-Zip
@@ -644,7 +639,8 @@ def _check_bomb(ctx: ScanContext, total: int, archive_size: int) -> None:
         )
     if total > 10 * 1024**3 and archive_size > 0 and total / archive_size > ctx.options.max_expand_ratio:
         raise Uncheckable(
-            f"圧縮率が異常（{total / archive_size:.0f}倍・展開後 {total / 1024**3:.1f}GB）のため打ち切り"
+            f"圧縮率が異常（{total / archive_size:,.0f}倍・展開後 {size_text(total)}。"
+            f"基準は 10GB を超える展開で {ctx.options.max_expand_ratio:,}倍）のため打ち切り"
             "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
         )
 
@@ -681,7 +677,7 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
             item.method += "＋イメージ全体の生データ走査"
         else:  # オンで検査したときに「オンにして再検査」と案内しない
             item.notes.append(
-                f"ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外）。{DEEP_SWEEP_HINT}"
+                f"ファイルシステムの中のファイルを検査した（削除されたファイル・ディスクイメージの空き領域は対象外）。{DEEP_SWEEP_HINT}"
             )
         return
     except NeedPassword:
@@ -735,7 +731,7 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
                     )
                 outdir = ctx.new_tmp_subdir()
                 z.extractall(path=outdir)
-            item.method = f"py7zr で展開（{len(infos)}件）"
+            item.method = f"py7zr で展開（{len(infos):,}件）"
             for i in infos:
                 p = os.path.join(outdir, i.filename)
                 display = f"{blob.display}!{i.filename}"
@@ -827,7 +823,7 @@ def handle_tar(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                     ctx.scan_nested(display, path=out, depth=depth + 1, name_hint=m.name, mtime=m.mtime)
                 else:
                     ctx.scan_nested(display, data=src.read(), depth=depth + 1, name_hint=m.name, mtime=m.mtime)
-        item.method = f"tar を展開（{n}件）"
+        item.method = f"tar を展開（{n:,}件）"
 
 
 class _GzipStream:
@@ -1033,7 +1029,8 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
                 )
             if written > 10 * 1024**3 and written / max(1, blob.size) > ctx.options.max_expand_ratio:
                 raise Uncheckable(
-                    f"圧縮率が異常（{written / max(1, blob.size):.0f}倍・展開した分 {size_text(written)}）のため打ち切り"
+                    f"圧縮率が異常（{written / max(1, blob.size):,.0f}倍・展開した分 {size_text(written)}。"
+                    f"基準は 10GB を超える展開で {ctx.options.max_expand_ratio:,}倍）のため打ち切り"
                     "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             dst.write(chunk)

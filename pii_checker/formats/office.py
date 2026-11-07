@@ -175,7 +175,7 @@ def handle_xlsx(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
             raw_parts=lambda name: sheets_done
             and (name.startswith("xl/worksheets/sheet") or name == "xl/sharedStrings.xml"),
         )
-    item.method = ("openpyxl で全シートのセル（非表示含む）＋" if sheets_done else "") + f"zip 内の全部品 {n} 個"
+    item.method = ("openpyxl で全シートのセル（非表示含む）＋" if sheets_done else "") + f"zip 内の全部品 {n:,} 個"
     if not sheets_done:
         raise PartialScan("セルを表として読めず、XML の文字だけを検査した（列見出しの意味を使えていない）")
 
@@ -204,7 +204,7 @@ def handle_xlsb(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
     f, z = _open_zip(blob)
     with f, z:
         n = sweep_zip_parts(ctx, z, blob, col, depth, raw_parts=lambda name: sheets_done and name.endswith(".bin"))
-    item.method = ("pyxlsb で全シート＋" if sheets_done else "") + f"zip 内の全部品 {n} 個"
+    item.method = ("pyxlsb で全シート＋" if sheets_done else "") + f"zip 内の全部品 {n:,} 個"
     if not sheets_done:
         raise Uncheckable(
             "xlsb のセルを構造として読めず、生データ走査のみ（数値のセルは検査できていない。"
@@ -474,12 +474,7 @@ def try_decrypt_office(ctx: ScanContext, data: bytes) -> tuple[bytes | None, boo
 
 
 def _pw_reason(ctx: ScanContext, what: str) -> str:
-    n = len(ctx.password_candidates())
-    return (
-        f"{what}（受け取ったパスワード {n} 個と既定値を試したが開けなかった）"
-        if n
-        else f"{what}（パスワードを入力すると再検査できる）"
-    )
+    return ctx.password_reason(what, also="と既定値")
 
 
 # ------------------------------------------------------------------ OLE 複合文書

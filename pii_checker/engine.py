@@ -1115,12 +1115,28 @@ class ScanContext:
             )
         if self.entries > self.options.max_entries:
             raise Uncheckable(
-                f"内側のファイル数が上限（{self.options.max_entries}件）を超えたため打ち切り"
+                f"内側のファイル数が上限（{self.options.max_entries:,}件）を超えたため打ち切り"
                 "（本物の書庫なら、展開してからそのフォルダを検査してください）"
             )
 
     def password_candidates(self) -> list[str]:
         return list(self.passwords)
+
+    def password_reason(self, what: str, also: str = "") -> str:
+        """パスワードで開けなかったときの理由の文。試した数と、画面とコマンドの版での次の手を添える。
+
+        also は受け取ったパスワードのほかに試したもの（Office の既定値など）。
+        """
+        n = len(self.password_candidates())
+        if n:
+            return (
+                f"{what}（受け取ったパスワード {n:,} 個{also}を試したが開けなかった。"
+                "別のパスワードを入れると再検査できる。分からなければ持ち主に中身を確かめてもらう）"
+            )
+        return (
+            f"{what}（パスワードが分かれば、結果の「パスワードが必要なファイル」で入れると再検査できる。"
+            "コマンドの版は --password-file で渡す）"
+        )
 
     def maybe_checkpoint(self) -> None:
         """前の書き出しから CHECKPOINT_SECONDS 経っていれば、それまでの項目（検出の件数・明細）を書き出す。

@@ -369,6 +369,8 @@ def test_job_counts_allowed_and_reuse_follows_settings(folder, tmp_path):
     assert "拾わない値（許可リスト）で外した検出 1 件" in joined
     assert "設定: 拾わない値（許可リスト）" in cells and "1 件" in cells
     assert "設定: 自分で足す規則" in cells and "1 件（社員番号）" in cells
+    # 設定の名前は画面の項目名と同じに書く（前は画面に無い「イメージの未使用領域」だった）
+    assert "設定: ディスクイメージの空き領域（削除されたファイル）" in cells and "調べない" in cells
     assert "090-1234-5678" not in joined and "5678" not in joined
 
 

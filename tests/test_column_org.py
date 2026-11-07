@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_checker import engine  # noqa: E402
@@ -318,3 +320,56 @@ def test_table_without_name_column_is_not_prefetched():
     src = iter([["1", "東京都"]])
     assert col._prefetch_table_orgs(["code", "住所"], src, pending) is None
     assert not pending and list(src) == [["1", "東京都"]]
+
+
+def _sec_rows(headers: list[str], name_col: int, values: list[str]) -> list[list[str]]:
+    """見出し headers の表で、name_col 列に values を入れ、ほかの列は番号・日付で埋めた行を作る。"""
+    rows = [headers]
+    for i, v in enumerate(values):
+        row = [f"{1300 + i}" if "code" in h.lower() or "コード" in h else "2024/01/01" for h in headers]
+        row[name_col] = v
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+@pytest.mark.parametrize(
+    "headers, name_col",
+    [
+        (["name", "listing_date", "offer_price", "first_open", "odds"], 0),  # IPO の当選確率の表
+        (["blog", "bunbai_date", "code4", "name", "result"], 3),  # 分売の抽選の表
+        (["銘柄コード", "Name", "上場日"], 1),
+        (["Ticker", "NAME"], 1),
+    ],
+)
+def test_securities_table_name_column_is_org(headers, name_col, records):
+    """会社の印の無い銘柄の一覧でも、見出しが英語の「name」だけで証券の項目の見出しが並んでいれば、最初の行から 低。
+    異なる値が 50 個に満たない小さな表でも同じ。"""
+    got = _names(_sec_rows(headers, name_col, PLAIN_COMPANIES[:20]), records=records)
+    assert got == {"name:low": 20}, got
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+@pytest.mark.parametrize(
+    "headers, name_col",
+    [
+        (["氏名", "銘柄コード", "数量"], 0),  # 人を指す見出し（取引の記録の顧客）
+        (["customer_name", "ticker", "qty"], 0),
+        (["顧客名", "code4"], 0),
+        (["name", "age", "address"], 0),  # 証券の項目の見出しが無い
+        (["name", "code", "部署"], 0),  # 「code」だけは社員の番号にもあるので証券の見出しにしない
+        (["name", "コード"], 0),
+    ],
+)
+def test_person_tables_beside_securities_words_stay_medium(headers, name_col, records):
+    """陽性対照: 人の名簿・取引の記録の顧客名は、証券の語が並んでいても 中 のまま。"""
+    got = _names(_sec_rows(headers, name_col, PERSONS[:20]), records=records)
+    assert got == {"name:medium": 20}, got
+
+
+def test_securities_header_found_in_later_header_row():
+    """空行の後の別の表の見出しで銘柄の一覧になったときも、その表の名前の列は 低（見出しを決めるたびに作り直す）。"""
+    rows = [["氏名", "電話"]] + [[p, "03-1234-5678"] for p in PERSONS[:3]] + [[]]
+    rows += [["code4", "name"]] + [[f"{1300 + i}", c] for i, c in enumerate(PLAIN_COMPANIES[:5])]
+    got = _names(rows)
+    assert got == {"name:medium": 3, "name:low": 5}, got

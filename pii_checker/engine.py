@@ -94,6 +94,29 @@ RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 # 松井の分売 6%・優待 9%・JPX の銘柄 10% があるので 10% にはしない）
 COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
+# 会社の印がほとんど無い銘柄の一覧（IPO の当選確率の表「name,listing_date,offer_price,…」・分売の表「code4,name,…」）は
+# 割合では見分けられない（2026-11-08・株のデータ）。氏名の列の見出しが英語の「name」だけ（「氏名」「customer_name」のように
+# 人を指す見出しでない）で、同じ見出しの行に証券の項目の見出しがあれば、その列を最初から会社名の列にする。
+# 「コード」「code」だけの見出しは社員の番号にもあるので入れない
+COLUMN_ORG_BARE_NAME_HEADERS = frozenset({"name"})
+RE_SECURITIES_HEADER = re.compile(
+    r"(?:code4|ticker|tickersymbol|stockcode|securitiescode|securitycode|listingdate|offerprice|firstopen|ipoprice"
+    r"|銘柄コード|証券コード|上場日|公募価格|売出価格|初値|上場市場)",
+)
+
+
+def _header_key(header: str | None) -> str:
+    """見出しを比べやすい形（空白・「_」・「-」を除いて小文字）にする。"""
+    return re.sub(r"[\s_\-]", "", str(header or "")).lower()
+
+
+def _securities_name_columns(headers) -> set[int]:
+    """見出しの並びから、銘柄の一覧の銘柄名とみなす氏名の列（列の番号）を返す。当たらなければ空。"""
+    keys = [_header_key(h) for h in headers]
+    bare = {i for i, k in enumerate(keys) if k in COLUMN_ORG_BARE_NAME_HEADERS}
+    if not bare or not any(RE_SECURITIES_HEADER.fullmatch(k) for k in keys):
+        return set()
+    return bare
 # 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
 # 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
 # 流しながら読む表（add_table・CSV と xlsx）も、見出しを決めた直後と空行の直後に、次の空行か見出し語のある行まで先読みする。
@@ -866,7 +889,7 @@ class Collector:
             if switch:
                 headers = [v or None for v in values]
                 self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
-                self._col_orgs = _ColumnOrgs()
+                self._col_orgs = _ColumnOrgs(headers)
                 cur_score = score
                 cur_cells = cells
                 # 見出し行自体も検査（見出しなしで）
@@ -917,8 +940,8 @@ class Collector:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""
         self._skip_seen = False
         self._col_digits = _ColumnDigits()
-        self._col_orgs = _ColumnOrgs()
         headers = list(columns)
+        self._col_orgs = _ColumnOrgs(headers)
         # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
         sure = [bool(h and detectors.header_category(h)) for h in headers]
         head, keys, error, rest = self._prefetch_org_columns(headers, rows)
@@ -1046,19 +1069,24 @@ class _ColumnOrgs:
 
     _ColumnDigits と同じく表ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで（そこで判定を固める）。
     判定が付く前（異なる値が COLUMN_ORG_MIN_DISTINCT 個未満）に読んだ値は今までどおり（中）。小さな表は判定しない。
+    headers（表の見出しの並び）を渡すと、銘柄の一覧の見出しの組み合わせ（_securities_name_columns）の列は、値を数えずに
+    最初から会社名の列にする。
     """
 
-    __slots__ = ("_values", "_orgs", "_decided", "_is_name", "verdict")
+    __slots__ = ("_values", "_orgs", "_decided", "_is_name", "_forced", "verdict")
 
-    def __init__(self) -> None:
+    def __init__(self, headers=None) -> None:
         self._values: dict[int, set[str]] = {}
         self._orgs: dict[int, int] = {}
         self._decided: set[int] = set()  # 判定を固めた列（異なる値が上限に届いた）
         self._is_name: dict[int, bool] = {}  # 列の見出しが氏名か（見出しは表の中で変わらないので1回だけ調べる）
         self.verdict: dict[int, bool] = {}  # 列ごとの今の判定（会社名の列なら True）
+        self._forced: set[int] = _securities_name_columns(headers) if headers else set()  # 見出しで決めた列
 
     def cell(self, c_idx: int, header: str | None, v: str) -> bool:
         """表のセルを1つ見て、この列が今のところ会社名の列か（org_column に渡す値）を返す。header は列の見出し。"""
+        if c_idx in self._forced:
+            return True
         is_name = self._is_name.get(c_idx)
         if is_name is None:
             is_name = self._is_name[c_idx] = bool(header) and detectors.header_category(header) == "name"
@@ -1082,9 +1110,9 @@ class _ColumnOrgs:
     def decided(self, c_idx: int) -> bool:
         """この列の判定が固まったか（異なる値が COLUMN_ID_TRACK 個に届いたか・氏名の列でなければ常に固まっている）。
 
-        まだ値を1つも見ていない列は固まっていない（見出しが氏名かを調べる前なので）。
+        まだ値を1つも見ていない列は固まっていない（見出しが氏名かを調べる前なので）。見出しで決めた列は固まっている。
         """
-        return self._is_name.get(c_idx) is False or c_idx in self._decided
+        return self._is_name.get(c_idx) is False or c_idx in self._decided or c_idx in self._forced
 
 
 class _ColumnDigits:

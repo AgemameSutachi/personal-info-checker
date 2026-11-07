@@ -59,6 +59,22 @@ def table_counts(rows) -> dict[str, int]:
             ],
             {"name": 2, "phone": 2},
         ),
+        # 英語の見出しの名簿（姓・名・ふりがな・免許証の列。前は Surname・Given Name・Furigana・Driver's License を見出しと読まなかった）
+        (
+            [
+                ["Surname", "Given Name", "Furigana", "Driver's License"],
+                ["鬼瓦", "権左衛門", "オニガワラ ゴンザエモン", "301234567890"],
+                ["勅使河原", "二郎", "テシガワラ ジロウ", "301234567891"],
+            ],
+            {"name": 6, "drivers_license": 2},
+        ),
+        # 英語の名前が tel・mail・dob を含んでも氏名の列から落とさない（前は Patel・Ismail・Dobson を項目名とみなしていた）。
+        # 見出しの行の長い項目名「Date of Birth」「Address Line 1」は、左隣の見出しの値として拾わない
+        (
+            [["Name", "Date of Birth", "Address Line 1"]]
+            + [[v] for v in ["Patel", "Raj Patel", "Telford", "Ismail", "Dobson", "Castelli", "Kana"]],
+            {"name": 7},
+        ),
         # 横持ちの申込書
         (
             [["氏名", "鬼瓦権左衛門"], ["住所", "東京都港区六本木6-10-1"], ["電話", "0312345678"]],

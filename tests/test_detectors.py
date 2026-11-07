@@ -446,6 +446,34 @@ def test_header_categories():
     assert header_category("担当者") == "name"
 
 
+@pytest.mark.parametrize(
+    "header, category",
+    [
+        ("Surname", "name"),
+        ("Given Name", "name"),
+        ("Family Name", "name"),
+        ("FAMILY_NAME", "name"),
+        ("Furigana", "name"),
+        ("ADDR", "address"),
+        ("Credit Card", "credit_card"),
+        ("CC Number", "credit_card"),
+        ("Individual Number", "my_number"),
+        ("Driver's License", "drivers_license"),
+        ("Drivers License No", "drivers_license"),
+        ("Driver License", "drivers_license"),
+    ],
+)
+def test_english_header_categories(header, category):
+    """英語の見出しも、日本語の同じ意味の見出し（姓・名・フリガナ・住所・カード番号・個人番号・免許証）と同じ種類に読む。"""
+    assert header_category(header) == category
+
+
+@pytest.mark.parametrize("header", ["Kana", "Kana Input", "File Name", "Cell", "City", "Account No", "Acc Number"])
+def test_english_headers_that_are_not_pii_columns(header):
+    """足した語の近くの見出しで、個人情報の列としないもの（「Kana」はローマ字の名前（佳奈）にもあるので見出しにしない）。"""
+    assert header_category(header) is None, header
+
+
 def test_context_has_no_raw_values():
     from pii_checker.detectors import masked_context
 

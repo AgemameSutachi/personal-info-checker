@@ -83,6 +83,11 @@ def test_heic_exif_is_found_without_opening_image(tmp_path):
     assert dict(item.finding_counts).get("name"), item.finding_counts
     assert misc.GPS_NOTE in item.notes
     assert misc.exif_from_raw(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64) is None
+    p2 = tmp_path / "IMG_0003.HEIC"  # XMP（iPhone の編集・Lightroom が書く）も同じく印で探す
+    p2.write_bytes(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 200 + _xmp_packet() + b"\x00" * 100)
+    item = scan_file(str(p2), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
+    assert dict(item.finding_counts).get("phone"), item.finding_counts
+    assert any("XMP" in n for n in item.notes), item.notes
 
 
 def test_broken_exif_does_not_stop_scan(tmp_path):
@@ -128,6 +133,92 @@ def test_japanese_artist_in_jpeg_is_found(tmp_path):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     assert dict(item.finding_counts).get("name"), (item.finding_counts, item.method)
     assert item.method.startswith("写真の情報（EXIF）") and "検査不要" in item.method
+
+
+_XMP = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+    xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"
+    photoshop:AuthorsPosition="営業部 主任"
+    xmp:CreatorTool="Example 1.0">
+   <dc:creator><rdf:Seq><rdf:li>{creator}</rdf:li></rdf:Seq></dc:creator>
+   <Iptc4xmpCore:CreatorContactInfo
+     Iptc4xmpCore:CiAdrExtadr="東京都千代田区丸の内9-9-9"
+     Iptc4xmpCore:CiEmailWork="taro.yamada@example.jp">
+    <Iptc4xmpCore:CiTelWork>090-1234-5678</Iptc4xmpCore:CiTelWork>
+   </Iptc4xmpCore:CreatorContactInfo>
+   <Iptc4xmpExt:PersonInImage><rdf:Bag><rdf:li>&undefined; 佐藤花子</rdf:li></rdf:Bag></Iptc4xmpExt:PersonInImage>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+
+
+def _xmp_packet(creator: str = "氏名 山田太郎") -> bytes:
+    return _XMP.replace("{creator}", creator).encode("utf-8")
+
+
+def _jpeg_with_xmp(packet: bytes, exif: Image.Exif | None = None, size=(64, 64)) -> bytes:
+    """JPEG の先頭（SOI の直後）に XMP の APP1 を入れる（Adobe の道具と同じ形）。"""
+    data = _jpeg(exif or Image.Exif(), size)
+    body = b"http://ns.adobe.com/xap/1.0/\x00" + packet
+    app1 = b"\xff\xe1" + (len(body) + 2).to_bytes(2, "big") + body
+    return data[:2] + app1 + data[2:]
+
+
+def test_xmp_text_is_scanned(tmp_path):
+    """XMP の作成者・作成者の連絡先（属性で書く形・要素で書く形）・写っている人を検査する。道具の名前などは読まない。"""
+    p = tmp_path / "edited.jpg"
+    p.write_bytes(_jpeg_with_xmp(_xmp_packet(), size=(16, 16)))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    found = dict(item.finding_counts)
+    assert found.get("phone") and found.get("email") and found.get("name"), found
+    locations = {f.location for f in item.findings}
+    assert {"XMP 作成者", "XMP 作成者の連絡先"} <= locations, locations
+    assert any("XMP" in n and "4 項目" in n for n in item.notes), item.notes
+    assert item.method.startswith("写真の情報（XMP）") and "検査不要" in item.method
+    fields = dict(misc.xmp_fields(_xmp_packet()))
+    assert fields["作成者の連絡先"].splitlines() == [
+        "住所：東京都千代田区丸の内9-9-9",
+        "メール：taro.yamada@example.jp",
+        "電話：090-1234-5678",
+    ]
+    assert "佐藤花子" in fields["写っている人"]  # 定義の無い実体の参照があっても読める（展開はしない）
+    assert "Example" not in " ".join(fields.values())
+
+
+def test_xmp_and_exif_with_same_value_are_counted_once(tmp_path):
+    """EXIF と XMP の両方に同じ撮影者を書く道具が多い。同じ値は EXIF の1件だけと数える。"""
+    exif = Image.Exif()
+    exif[0x9C9D] = "氏名 山田太郎".encode("utf-16-le") + b"\x00\x00"
+    p = tmp_path / "both.jpg"
+    p.write_bytes(_jpeg_with_xmp(_xmp_packet("氏名 山田太郎"), exif, size=(16, 16)))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    names = [f.location for f in item.findings if f.pii_type == "name"]
+    assert names == ["EXIF 作成者"], (names, item.finding_counts)
+    assert item.method.startswith("写真の情報（EXIF・XMP）"), item.method
+
+
+def test_xmp_in_png_and_broken_packets(tmp_path):
+    """PNG（iTXt）の XMP も読む。壊れた塊・閉じていない塊・XMP でない XML で落ちない。"""
+    from PIL.PngImagePlugin import PngInfo
+
+    info = PngInfo()
+    info.add_itxt("XML:com.adobe.xmp", _xmp_packet().decode("utf-8"))
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), "white").save(buf, "PNG", pnginfo=info)
+    p = tmp_path / "edited.png"
+    p.write_bytes(buf.getvalue())
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
+    assert dict(item.finding_counts).get("phone"), item.finding_counts
+    assert misc.xmp_fields(b"<x:xmpmeta><<<>>") == []
+    assert misc._xmp_packets(b"..<x:xmpmeta xmlns:x='adobe:ns:meta/'>") == []  # 閉じていない
+    assert misc.xmp_fields(b"<x:xmpmeta xmlns:x='adobe:ns:meta/'><a>090-1234-5678</a></x:xmpmeta>") == []
 
 
 def test_gps_photos_are_counted_in_summary(tmp_path):

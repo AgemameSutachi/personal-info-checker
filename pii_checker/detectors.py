@@ -214,9 +214,15 @@ RE_BANK_FULL = re.compile(
     re.I,
 )
 NAME_CHARS = r"[一-龥々ぁ-んァ-ヶー]"
+# 見出し語と値の区切り。「氏名: 山田」「氏名 山田」のほか、JSON・設定の書き方（`"氏名": "山田"`・`氏名="山田"`）と
+# XML のタグ（`<氏名>山田</氏名>`）も読む（引用符・タグで区切りが切れて見落としていた）。Rust にもそのまま書き出す。
+# 「>」は `<見出し語>` のタグの形のときだけ（パンくず「ホーム>担当>営業部」を拾わない。Rust は後読みが無いので選択肢で書く）
+LABEL_SEP = r"""(?:["']?\s*[:：=]\s*["']?|[ 　]+)"""
+NAME_LABEL_WORDS = (
+    r"(?:氏名|お名前|名前|患者名|顧客名|利用者名|契約者名|申込者名|保護者名|受取人|宛名|宛先|担当者?|ふりがな|フリガナ)"
+)
 RE_NAME_LABEL = re.compile(
-    rf"(?:氏名|お名前|名前|患者名|顧客名|利用者名|契約者名|申込者名|保護者名|受取人|宛名|宛先|担当者?|ふりがな|フリガナ)"
-    rf"(?:\s*[:：]\s*|[ 　]+)({NAME_CHARS}{{2,8}}(?:[ 　]{NAME_CHARS}{{1,8}})?)"
+    rf"(?:<{NAME_LABEL_WORDS}>|{NAME_LABEL_WORDS}{LABEL_SEP})({NAME_CHARS}{{2,8}}(?:[ 　]{NAME_CHARS}{{1,8}})?)"
 )
 RE_NAME_LABEL_TIGHT = re.compile(
     rf"(?:^|(?<=[\s　:：、,|]))(?:氏名|お名前|名前|患者名|顧客名|契約者名)((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])"
@@ -270,8 +276,10 @@ def iter_name_spaced(text: str):
     return _finditer_not_after_kanji(_RE_NAME_SPACED_BODY, text)
 
 
+SENSITIVE_WORDS = r"(?:病名|病歴|既往歴|診断名|傷病名|障害等級|障害者手帳|犯罪歴|前科|信仰|宗教|信条|本籍)"
 RE_SENSITIVE = re.compile(
-    r"(?:病名|病歴|既往歴|診断名|傷病名|障害等級|障害者手帳|犯罪歴|前科|信仰|宗教|信条|本籍)\s*[:：]\s*([^\s、。,]{1,30})"
+    # 区切りは氏名と同じく引用符・「=」・XML のタグ（`<病名>…`）も読む。空白の区切り（「病名 不明」）は今までどおり読まない
+    rf"""(?:<{SENSITIVE_WORDS}>|{SENSITIVE_WORDS}["']?\s*[:：=]\s*["']?)([^\s、。,"'<]{{1,30}})"""
 )
 ROLE_EMAIL = re.compile(
     r"^(info|support|noreply|no-reply|admin|sales|contact|webmaster|postmaster|help|service)@",

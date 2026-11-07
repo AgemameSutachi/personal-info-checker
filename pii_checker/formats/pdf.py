@@ -55,7 +55,10 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         else:
             doc = fitz.open(ctx.blob_as_path(blob), filetype="pdf")
     except Exception as e:
-        raise Uncheckable(f"PDF を開けなかった（壊れている可能性）: {e}")
+        raise Uncheckable(
+            "PDF を開けなかった（壊れている可能性。PDF の閲覧ソフトで開けるなら、"
+            f"別名で保存した写しを検査してください。開けなければ元のファイルを取り直してください）: {e}"
+        )
     with doc:
         repaired = doc.is_repaired
         if repaired and not doc.is_encrypted and _has_encrypt_mark(blob):

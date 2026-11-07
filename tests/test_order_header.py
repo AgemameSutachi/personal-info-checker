@@ -105,3 +105,49 @@ def test_pii_header_after_order_header_still_switches():
     counts = _counts(rows)
     assert any(k.startswith("name:") and v for k, v in counts.items()), counts
     assert any(k.startswith("phone:") and v for k, v in counts.items()), counts
+
+
+def _reread_counts(read_table: bool) -> dict[str, int]:
+    """表として読んだ後に、見出しの分からない読み直し（xlsx のシートの XML と同じ skip_seen）で同じ値を読む。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    data = _data()
+    if read_table:
+        col.add_table([["伝票番号", "品番", "数量", "単価"]] + data, lambda r, c: f"R{r}C{c + 1}")
+    col.add_lines("\n".join(row[1] for row in data), location_prefix="sheet1.xml ", skip_seen=True)
+    return item.conf_counts
+
+
+def test_reread_does_not_raise_product_code():
+    """表で型番とみなした値は、見出しの分からない読み直しで 中 に引き上げない。"""
+    counts = _reread_counts(read_table=True)
+    assert counts.get("credit_card:low", 0) == 5
+    assert counts.get("credit_card:medium", 0) == 0
+
+
+def test_reread_alone_still_finds_medium():
+    """陽性対照: 表で読んでいなければ、読み直しの側だけでも 中 で拾う。"""
+    assert _reread_counts(read_table=False).get("credit_card:medium", 0) == 5
+
+
+def test_xlsx_product_code_column_is_low(tmp_path):
+    """xlsx の「伝票番号,品番,数量」のシートの品番は、シートの XML の読み直しを含めても 低。"""
+    import openpyxl
+
+    from pii_checker.engine import scan_file
+    from pii_checker.models import ScanOptions
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "集計"
+    ws.append(["伝票番号", "品番", "数量"])
+    for i, v in enumerate(_card_like(5, 9)):
+        ws.append([f"10{i:04d}", v, 3])
+    path = tmp_path / "order.xlsx"
+    wb.save(path)
+    counts: dict[str, int] = {}
+    for it in scan_file(str(path), ScanOptions()).items:
+        for k, v in it.conf_counts.items():
+            counts[k] = counts.get(k, 0) + v
+    assert counts.get("credit_card:low", 0) == 5
+    assert counts.get("credit_card:medium", 0) == 0

@@ -108,8 +108,10 @@ def _der(body: bytes) -> bytes:
 
 
 def test_der_certificate_text_is_scanned(tmp_path):
-    # 鍵と署名に当たる乱数の間に、名前とメールが文字のまま入っている（エントロピーが高くても読む）
-    body = os.urandom(3000) + b"\x0c\x17taro.yamada@example.com" + os.urandom(3000)
+    # 鍵と署名に当たる乱数の間に、名前とメールが文字のまま入っている（エントロピーが高くても読む）。
+    # 本物と同じく文字列の直後は次の項目の頭（0x30）。乱数をじかに続けると、英字が2つ続いたとき
+    # 「example.comaJ」と読めて約 2% の回で落ちていた
+    body = os.urandom(3000) + b"\x0c\x17taro.yamada@example.com" + b"\x30\x82" + os.urandom(3000)
     p = tmp_path / "sign.p7s"
     p.write_bytes(_der(body))
     assert _kind(p) == "der"

@@ -739,6 +739,9 @@ _RE_ORG_NAME = re.compile(
     re.I,
 )
 _RE_HONORIFIC_IN_VALUE = re.compile(r"様|殿|さん")
+_RE_WHITESPACE = re.compile(r"\s+")
+_RE_ORG_PREFIX = re.compile(r"株式会社|有限会社|合同会社|[(（](?:株|有|同)[)）]|㈱|㈲")
+_RE_KANJI = re.compile(r"[一-龥々]")
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -761,8 +764,16 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         # 横持ちの表の項目名（入社日・所属・備考など）は名前ではない
         if len(v) <= 8 and RE_LABEL_WORD.fullmatch(v):
             return None
-        # 法人格・会社の語を含む値は会社名（株の表の英語の見出し「name」の列の銘柄名）。敬称つき（「株式会社サンプル 山田様」）は残す
-        if _RE_ORG_NAME.search(v) and not _RE_HONORIFIC_IN_VALUE.search(v):
+        # 法人格・会社の語で終わる値は会社名（株の表の英語の見出し「name」の列の銘柄名）。空白で区切った最後の語に
+        # 会社の語があるときだけ落とし、会社名の後に人の名前が続くもの（「三井住友銀行 山田太郎」）と敬称つきは残す。
+        # 記号だけの語（銘柄の表の注の印「（株） *」）は語に数えない
+        # 頭に法人格のある社名（「（株）Sun Asterisk」「（株）ライフドリンク カンパニー」）も、2つ目より後ろの語に
+        # 漢字が無ければ会社名とみなす（「株式会社サンプル 山田太郎」は残す）
+        words = [w for w in _RE_WHITESPACE.split(v) if _RE_WORD_CHAR.search(w)]
+        if not _RE_HONORIFIC_IN_VALUE.search(v) and (
+            _RE_ORG_NAME.search(words[-1])
+            or (_RE_ORG_PREFIX.match(v) and not any(_RE_KANJI.search(w) for w in words[1:]))
+        ):
             return None
     elif category == "my_number":
         if my_number_is_valid(digits):
@@ -1657,9 +1668,9 @@ def _era_date_is_broken(text: str, h: Hit) -> bool:
 
 
 # 「よくある姓＋空白＋名」の名の側に来る一般の語（2026-11-07・株のデータの報告の文。証券会社「松井」「野村」の後の語）。
-# 1字の名（実・勉・茂）があるので、名にまず使わない語だけを並べる
+# 1字の名（実・勉・茂・等・計・全）があるので、名にまず使わない語だけを並べる
 _NOT_GIVEN_NAMES = frozenset(
-    "約 計 等 他 各 全 当選 落選 手数料 銘柄 最低 最高 総合 合計 平均 通常 以上 以下 以外 比較 株価 口座 証券 信託 "
+    "約 他 各 当選 落選 手数料 銘柄 最低 最高 総合 合計 平均 通常 以上 以下 以外 比較 株価 口座 証券 信託 "
     "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
 )
 _RE_SPACE = re.compile(r"[ 　]")
@@ -1745,8 +1756,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if _RE_SPACE.split(h.value, maxsplit=1)[-1] in _NOT_GIVEN_NAMES:
                 continue
         elif h.rule == "氏名の見出し語＋名前":
-            # 説明の文の「名前: 戦略の名前。」「名前: 表示用の名前。」（引数の説明）。人の名前に「名前」の語は入らない
-            if "名前" in h.value:
+            # 説明の文の「名前: 戦略の名前。」「名前: 表示用の名前。」（引数の説明）。人の名前に「名前」の語は入らない。
+            # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
+            if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
                 continue
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない

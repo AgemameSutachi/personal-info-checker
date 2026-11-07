@@ -1108,9 +1108,11 @@ def test_surname_then_common_word_is_not_name(text):
     assert "name" not in types_of(text)
 
 
-@pytest.mark.parametrize("text", ["渡辺　勉 9 / 山田　直樹 4", "担当: 松井 実", "佐藤 計子"])
+@pytest.mark.parametrize(
+    "text", ["渡辺　勉 9 / 山田　直樹 4", "担当: 松井 実", "佐藤 計子", "佐藤 計", "田中 全", "田中 等"]
+)
 def test_surname_then_given_name_still_found(text):
-    # 1字の名（勉・実）と、一般の語で始まるだけの名（計子）は残す
+    # 1字の名（勉・実・計・全・等）と、一般の語で始まるだけの名（計子）は残す
     assert "name" in types_of(text)
 
 
@@ -1126,8 +1128,18 @@ def test_name_label_followed_by_description_is_not_name(text):
     assert "name" not in types_of(text)
 
 
-def test_name_label_with_real_name_still_found():
-    assert "name" in types_of("名前: 鬼瓦権左衛門")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "名前: 鬼瓦権左衛門",
+        # 値は空白の後の語まで取り込むので、後ろの「名前」の語で本物の名前ごと落とさない（評価で見つかった穴）
+        "名前: 山田太郎 名前: 鈴木花子",
+        "お名前: 山田太郎 お名前（ふりがな）",
+        "氏名: 山田太郎 名前を変更した",
+    ],
+)
+def test_name_label_with_real_name_still_found(text):
+    assert "name" in types_of(text)
 
 
 @pytest.mark.parametrize(
@@ -1139,6 +1151,11 @@ def test_name_label_with_real_name_still_found():
         "㈱サンプル",
         "サンプル銀行",
         "Sample Holdings Inc.",
+        "Ｓａｍｐｌｅ Ｉｎｃ．",  # 全角も normalize の後で同じに読む
+        "Sample Inc_",  # 「_」は語の切れ目
+        "サンプルホールディングス（株） *",  # 銘柄の表の注の印（記号だけの語）は語に数えない
+        "（株）Sample Technologies",  # 頭に法人格・後ろの語に漢字が無い
+        "（株）サンプル カンパニー",
     ],
 )
 def test_company_in_name_column_is_not_name(value):
@@ -1146,9 +1163,20 @@ def test_company_in_name_column_is_not_name(value):
     assert "name" not in types_of(value, header="name")
 
 
-@pytest.mark.parametrize("value", ["株式会社サンプル 山田様", "鬼瓦 権左衛門", "Taro Yamada", "証田 太郎"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "株式会社サンプル 山田様",
+        "三井住友銀行 山田太郎",  # 会社名の後に人の名前が続くもの（最後の語に会社の語が無い）
+        "株式会社サンプル 山田太郎",  # 頭に法人格があっても、後ろに漢字の名前が続けば残す
+        "鬼瓦 権左衛門",
+        "Taro Yamada",
+        "Ann Incorporated",  # Inc は語の頭だけでは当たらない
+        "証田 太郎",
+    ],
+)
 def test_person_in_name_column_still_found(value):
-    # 敬称つきの担当者・法人格の無い名前は残す（「証田」は語の「証券」でないので当たらない）
+    # 敬称つきの担当者・会社名の後の人の名前・法人格の無い名前は残す（「証田」は語の「証券」でないので当たらない）
     assert "name" in types_of(value, header="name")
 
 

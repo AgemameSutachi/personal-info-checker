@@ -818,15 +818,22 @@ class Collector:
             values = ["" if v is None else _cell_to_str(v) for v in row]
             if not any(values):
                 prev_blank = True
+                if headers and cur_score == 0:
+                    headers = []  # 品番などの番号の見出しは、空行の後の別の表へ持ち越さない
                 continue
             score, headerish = _header_row_score(values)
             cells = sum(1 for v in values if v)
             majority = headerish * 2 > cells  # 行の過半数が見出しらしいセル（データ行の「住所変更済」等で切り替えない）
             switch = score and (
                 not headers
+                or cur_score == 0  # 品番などの番号の見出しだけの行（下）の後の、個人情報の見出し語のある行
                 or (cur_cells == 1 and cells >= 2)  # 表題だけの行（「顧客名簿」）の後の本当の見出し
                 or (majority and (prev_blank or score >= max(2, cur_score + 1)))
             )
+            if not switch and not headers and _order_header_row(values):
+                # 「伝票番号,品番,数量」のように個人情報の見出し語が無い見出しも、列の語を値の手がかりに使う
+                # （品番の16桁がカード番号の形に偶然合っても、手がかりなしの 中 にしない）
+                switch = True
             if switch:
                 headers = [v or None for v in values]
                 self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
@@ -1167,6 +1174,33 @@ def _header_row_score(values: list[str]) -> tuple[int, int]:
         elif RE_GENERIC_HEADER.match(core):
             headerish += 1
     return count, headerish
+
+
+RE_ANY_DIGIT = re.compile(r"[0-9０-９]")
+# 品物・伝票の番号の列の見出し（セル全体で照合する）。「注文者」「受注先」は人や会社の列なので入れない。
+# 部分一致にすると英語の名前（Jane・Border）まで見出しになるので、語の形を決め打ちにする
+RE_ORDER_HEADER = re.compile(
+    r"(伝票|注文|受注|発注|管理|製造|商品|部品|製品|図面|出荷|納品|請求)(番号|no\.?|コード|id)"
+    r"|品番|型番|シリアル(番号|no\.?)?|serial(no\.?|number)?|s/?n|sku|jan(コード|code)?|isbn"
+    r"|(order|item|product|part|invoice|slip)(no\.?|number|code|id)",
+    re.I,
+)
+
+
+def _order_header_row(values: list[str]) -> bool:
+    """個人情報の見出し語は無いが、品番・伝票番号などの番号の見出しを含む見出し行か。
+
+    売上・在庫の一覧の「伝票番号,品番,数量,単価」の行。どのセルも数字を含まない20字以下で、セルが2つ以上あり、
+    番号の見出し（RE_ORDER_HEADER にセル全体が当たるもの）が1つ以上あるときだけ見出しとみなす
+    （1つだけのセルは表題の「注文一覧」かもしれず、列の意味に使うと、その列の値を取り違える）。
+    """
+    cells = [v.strip() for v in values if v and v.strip()]
+    if len(cells) < 2:
+        return False
+    for v in cells:
+        if len(v) > 20 or RE_ANY_DIGIT.search(v) or "@" in v:
+            return False
+    return any(RE_ORDER_HEADER.fullmatch(re.sub(r"[\s_\-・]", "", v)) for v in cells)
 
 
 def _cell_to_str(v) -> str:

@@ -2,7 +2,7 @@
 
 版ごとの主な変更です。配布版（zip）は [Releases](https://github.com/AgemameSutachi/personal-info-checker/releases) にあります。
 
-## 次の版（未公開）
+## 1.6.0（2026-11-07）
 
 - プログラムのソース（Python・JavaScript・VBA・PowerShell・C など）で、住所・氏名を大量に誤って拾っていたのを直した（配布版の zip に同梱したライブラリの1ファイルで住所 1,645 件・確度 中）
   - 原因: 「,」が行ごとに同じ数だけ並ぶので CSV のような表と読み、`AddressBookType` の Address や `name, value = …` の name を、住所・氏名の列の見出しとみなしていた

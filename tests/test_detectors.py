@@ -247,6 +247,10 @@ def test_numeric_data_false_positive(text, pii_type):
         ("https://a.jp/a;jsessionid=123456789018", "my_number"),
         ("https://a.jp/a&amp;x=123456789018", "my_number"),
         ("https://example.jp/日本語/123456789018/x", "my_number"),
+        # URL のすぐ後ろに「:」「=」だけをはさんで書いた値（パスの一部でなく項目の値）
+        ("https://a.jp/x:123456789018", "my_number"),
+        ("https://a.jp/x=123456789018", "my_number"),
+        ("https://a.jp/form/id=123456789018/next", "my_number"),
         ("mailto:a@b.jp 123456789018", "my_number"),
         ("C:\\Users\\123456789018\\a.txt", "my_number"),
         ("個人番号 https://a.jp/123456789018", "my_number"),  # 語があれば（語の届く近さなら）確度 高 で残る

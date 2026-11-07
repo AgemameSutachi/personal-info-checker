@@ -65,7 +65,7 @@ def test_bomb_ratio_names_threshold(ratio_size):
         archive._check_bomb(ctx, total, ratio_size)
     reason = str(e.value)
     assert f"圧縮率が異常（{total / ratio_size:,.0f}倍・展開後 20GB。" in reason, reason
-    assert "10GB を超える展開で 1,000倍を超えると打ち切る）のため打ち切り" in reason, reason
+    assert "基準は 10GB を超える展開で 1,000倍）のため打ち切り" in reason, reason
     assert "展開してからそのフォルダを検査してください" in reason, reason
 
 

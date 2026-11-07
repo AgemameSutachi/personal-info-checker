@@ -757,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--deep-image-sweep",
         action="store_true",
-        help="ディスクイメージの未使用領域（削除済みファイル）も走査する",
+        help="ディスクイメージの空き領域（削除されたファイル）も調べる（時間がかかる）",
     )
     s.add_argument("--temp-dir", help="展開に使う一時フォルダ（空きの多いドライブを指定）")
     s.add_argument("--sevenzip", help="7z.exe の場所")

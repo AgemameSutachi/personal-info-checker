@@ -725,6 +725,13 @@ def en_header_word_backed(core: str) -> bool:
     return any(w in _EN_HEADER_WORDS or _is_en_header_compound(w) for w in words)
 
 
+# 番号の列の値として、ありえない形（2026-11-07・株のデータの検査）。横持ちの表で左隣のセルを見出しに読むと、
+# 社名「パスポート」・備考「…当選口座: …」・書類番号「S100ETEL」の右隣の、市場名・URL・コード「E31640」を番号にしていた。
+# 英字の頭に数字が続くだけの値はコード（TEL・FAX・No の頭の電話番号は残す）
+_RE_URL_LIKE = re.compile(r"://|www\.", re.I)
+_RE_LETTER_CODE = re.compile(r"(?!(?:tel|fax|no)[.:]?[0-9])[A-Za-z]{1,4}[0-9]{3,}", re.I)
+
+
 def _header_value_hit(category: str, value: str) -> Hit | None:
     """見出しが個人情報の列の値を、検出として扱うかを決める。"""
     v = value.strip()
@@ -758,7 +765,7 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         else:
             return None
     elif category in ("phone", "postal_code", "bank_account", "credit_card", "pension"):
-        if len(digits) < 5:
+        if len(digits) < 5 or _RE_URL_LIKE.search(v) or _RE_LETTER_CODE.fullmatch(v):
             return None
         if category == "postal_code" and len(digits) not in (6, 7):
             return None  # 6桁は数値として先頭の0が落ちたもの
@@ -767,7 +774,8 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         if category == "bank_account":
             conf = Confidence.HIGH
     elif category in ("drivers_license", "passport", "health_insurance"):
-        if len(_RE_NON_ALNUM.sub("", v)) < 4:
+        # 旅券・免許証・保険証の番号には数字がある（数字の無い「JASDAQ スタンダード」は番号ではない）
+        if len(_RE_NON_ALNUM.sub("", v)) < 4 or not digits or _RE_URL_LIKE.search(v):
             return None
         conf = Confidence.HIGH if category != "health_insurance" else Confidence.MEDIUM
     elif category == "residence_card":
@@ -1590,7 +1598,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     - メールアドレスの形: TLD が実在しない・大文字小文字の混ざり・Java の注釈の形（_email_domain_plausible）
     2026-11-07: 手がかり語の無い番号の形が改行をまたぎ、前後の行が数だけの行のもの（1行に数が1つずつの一覧）・
     16進のダンプの行と OBJ の要素の行の中のもの。マイナンバー（手がかり語なし）のすぐ隣が20桁以上の数字の連続のもの
-    （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）
+    （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）。
+    カード番号（確度 高 でないもの）の小数の途中のもの
     """
     out = []
     for h in hits:
@@ -1630,6 +1639,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 and not h.value.isdigit()
                 and not _CARD_GROUPS.fullmatch(h.value)
             ):
+                continue
+            # 小数の途中のもの（数値の表の「0.1234567890123545」の小数部が Luhn に合う・2026-11-07 株のデータ）
+            if h.confidence != Confidence.HIGH and _decimal_adjacent(text, h.start, h.end):
                 continue
         elif h.pii_type == "phone" and h.confidence == Confidence.LOW:
             before = text[max(0, h.start - 2) : h.start]

@@ -64,6 +64,33 @@ def test_check_bomb_names_total_and_limit(tmp_path):
     _check_bomb(ctx, total=1024**3, archive_size=1024**3)  # ちょうど上限は通す
 
 
+def test_check_bomb_counts_earlier_expansion_in_text(tmp_path):
+    """入れ子の書庫で、それまでに展開した分と合わせて超えたときは、合わせた合計とこの書庫の分の両方を示す。
+
+    今回の分（上限より小さい）だけを書くと「上限より小さい合計が上限を超えた」と読めてしまう。
+    """
+    ctx = ScanContext(str(tmp_path / "a.zip"), ScanOptions(max_expand_bytes=1024**3), [])
+    ctx.expanded_bytes = 800 * 1024**2
+    with pytest.raises(Uncheckable) as e:
+        _check_bomb(ctx, total=300 * 1024**2, archive_size=300 * 1024**2)
+    msg = str(e.value)
+    assert "これまでに展開した分（800MB）と合わせた展開後の合計（1.1GB。この書庫の分は 300MB）" in msg, msg
+    assert "が上限（1GB）を超える" in msg, msg
+    ctx.expanded_bytes = 700 * 1024**2
+    _check_bomb(ctx, total=300 * 1024**2, archive_size=300 * 1024**2)  # 合わせて上限以内なら通す
+
+
+def test_single_compression_over_limit_names_total(tmp_path):
+    """gz などの1ファイルの圧縮で上限を超えたときも、展開した合計と上限を示す（入れ子なら合わせた数）。"""
+    import gzip
+
+    gz = tmp_path / "big.txt.gz"
+    gz.write_bytes(gzip.compress(b"a" * (3 * 1024**2)))
+    top = engine.scan_file(str(gz), ScanOptions(temp_dir=str(tmp_path), max_expand_bytes=2 * 1024**2)).items[0]
+    assert top.status == Status.UNCHECKABLE
+    assert "展開後の合計（" in top.reason and "が上限（2MB）を超えたため打ち切り" in top.reason, top.reason
+
+
 @pytest.mark.parametrize(
     "nbytes, text",
     [

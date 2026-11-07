@@ -1700,6 +1700,9 @@ _NOT_GIVEN_NAMES = frozenset(
     "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
 )
 _RE_SPACE = re.compile(r"[ 　]")
+# 固定幅の表の列の区切り（空白2つ以上・タブ・全角空白。_name_label_in_header_row）と、見る行の長さの上限
+_RE_CELL_GAP = re.compile(r"(?: {2,}|[\t　][ \t　]*| [\t　][ \t　]*)")
+_HEADER_ROW_MAX = 200
 # 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
 # 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
 # 「=」「<」「>」も入れない（`氏名=山田太郎 年齢=40`・`氏名=山田太郎<br>`）。「÷」のほかの演算子は、前後に空白があって
@@ -1707,6 +1710,60 @@ _RE_SPACE = re.compile(r"[ 　]")
 _RE_CODE_AFTER_VALUE = re.compile(r"[ \t]*÷|[ \t]+[×*%+][ \t]+[0-9A-Za-z_]|\[[\"']|\.[A-Za-z_][0-9A-Za-z_]*\(")
 _CALL_LOOKBACK = 200
 NAME_IN_CALL_NOTE = "（閉じていない括弧の中の「=」の書き方のため 低）"
+
+
+def _fixed_width_cells(line: str) -> list[str]:
+    """固定幅の表の1行を、空白2つ以上・タブ・全角空白の区切りでセルに分ける。"""
+    return [c for c in _RE_CELL_GAP.split(line.strip(" \t　\r")) if c]
+
+
+def _name_label_in_header_row(text: str, h: Hit) -> bool:
+    """「氏名の見出し語＋名前」が、固定幅の表の見出し行の隣の見出しを名前に読んだものか。
+
+    「名前      年率      超過」「氏名      住所      電話」では、見出し語の後の空白の並びの先の語
+    （次の列の見出し）を名前に読んでいた（2026-11-07 の株のデータの報告の文で見つけた形）。次の4つがそろうものだけ:
+    - 見出し語と値の間が、空白2つ以上・タブ・全角空白（表の列の区切り）
+    - その行が3つ以上のセルに分かれ、数字を1つも含まない（見出し行には値が無い）。行が _HEADER_ROW_MAX 文字までのもの
+    - 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）か、
+      次の空でない行が同じ数のセルに分かれ、数字を含むセルがあり、最初のセルが見出しの語でない（表のデータの行）
+    「氏名    山田太郎    営業部」の次の行が「電話    03-1234-5678    内線12」のような書式の帳票は、
+    次の行の最初のセルが見出しの語なので残す。
+    """
+    sep_start = h.start
+    while sep_start > 0 and text[sep_start - 1] in " \t　":
+        sep_start -= 1
+    if not _RE_CELL_GAP.fullmatch(text, sep_start, h.start):
+        return False
+    line_start = text.rfind("\n", 0, h.start) + 1
+    line_end = text.find("\n", h.end)
+    if line_end < 0:
+        line_end = len(text)
+    if line_end - line_start > _HEADER_ROW_MAX:
+        return False
+    line = text[line_start:line_end]
+    if any(c.isdigit() for c in line):
+        return False
+    cells = _fixed_width_cells(line)
+    if len(cells) < 3:
+        return False
+    if header_category(_RE_SPACE.split(h.value, maxsplit=1)[0]) is not None:
+        return True
+    pos = line_end + 1
+    while pos < len(text):
+        nxt_end = text.find("\n", pos)
+        if nxt_end < 0:
+            nxt_end = len(text)
+        if nxt_end - pos > _HEADER_ROW_MAX:
+            return False
+        nxt = _fixed_width_cells(text[pos:nxt_end])
+        if nxt:
+            return (
+                len(nxt) == len(cells)
+                and any(any(c.isdigit() for c in cell) for cell in nxt)
+                and header_category(nxt[0]) is None
+            )
+        pos = nxt_end + 1
+    return False
 
 
 def _name_label_code_shape(text: str, h: Hit) -> str:
@@ -1765,6 +1822,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     「よくある姓＋空白＋名」の名の側が一般の語のもの（_NOT_GIVEN_NAMES）・「氏名の見出し語＋名前」の値に
     「名前」の語を含むもの（引数の説明の文）・「=」の形でコードの代入の続きのもの（関数の引数の中なら 低 に下げる・
     _name_label_code_shape）
+    2026-11-08: 「氏名の見出し語＋名前」が固定幅の表の見出し行の隣の見出しのもの（_name_label_in_header_row）
     """
     out = []
     for h in hits:
@@ -1827,6 +1885,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             # 説明の文の「名前: 戦略の名前。」「名前: 表示用の名前。」（引数の説明）。人の名前に「名前」の語は入らない。
             # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
             if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
+                continue
+            # 固定幅の表の見出し行（「名前      年率      超過」の「年率」）
+            if _name_label_in_header_row(text, h):
                 continue
             # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
             shape = _name_label_code_shape(text, h)

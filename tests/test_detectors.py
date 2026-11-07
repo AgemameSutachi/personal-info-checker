@@ -1144,6 +1144,37 @@ def test_name_label_followed_by_description_is_not_name(text):
 @pytest.mark.parametrize(
     "text",
     [
+        # 固定幅の表の見出し行の、隣の列の見出し（2026-11-07・株のデータの報告の文）
+        "名前          年率    超過    最大DD\nベンチ      5.2%    0.0%   -12%",
+        "名前      年率      超過\n\nA戦略     3.1%      1.2%",  # 空行をはさんだデータの行
+        "名前\t年率\t超過\nベンチ\t5.2%\t0.0%",  # タブ区切り
+        "氏名      住所      電話",  # 値そのものが個人情報の見出しの語
+        "氏名　　住所　　電話番号　　生年月日",
+    ],
+)
+def test_name_label_in_fixed_width_header_row_is_not_name(text):
+    assert "name" not in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "名前      山田太郎",  # セルが2つだけ
+        "名前    山田太郎    年齢 40",  # 行に数字がある（値の入った帳票の行）
+        "名前 山田太郎 営業部\n鈴木 3.1% 1.2%",  # 空白1つの区切りは表の列とみなさない
+        "氏名    山田太郎    営業部\n電話    03-1234-5678    内線12",  # 次の行の最初のセルが見出しの語
+        "氏名    山田太郎    営業部\n担当    東京    大阪",  # 次の行に数字が無い
+        "氏名    山田太郎    営業部\nA    1    2    3",  # 次の行のセルの数が違う
+        "名前      年率      超過",  # 次の行が無く、値が見出しの語でもない（見落とさない側）
+    ],
+)
+def test_name_label_not_header_row_still_found(text):
+    assert "name" in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "名前: 鬼瓦権左衛門",
         # 値は空白の後の語まで取り込むので、後ろの「名前」の語で本物の名前ごと落とさない（評価で見つかった穴）
         "名前: 山田太郎 名前: 鈴木花子",

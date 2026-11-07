@@ -113,6 +113,21 @@ def test_english_header_table_in_txt_still_table(tmp_path):
         ("山田 太郎,東京都千代田区丸の内9-9-9", False),
         ("    '山田',", False),  # 英語の識別子でない値
         ("Name,Address,Phone", False),
+        ("import os, sys", True),
+        ("Dim name As String", True),
+        ("End Function", True),
+        ("public static void main(String[] args) {", True),
+        ("const x = 1;", True),
+        # 1列目が英単語の表の行（評価で見つかった誤爆）
+        ("return,date,amount", False),
+        ("Function,Qty,Price", False),
+        ("Sub Total,100,200", False),
+        ("Dim Sum House,Tokyo", False),
+        ("import data,2020", False),
+        ("from tokyo import,x", False),
+        ("public Taro,Yamada", False),
+        ("let me,know", False),
+        ("#include,x", False),
     ],
 )
 def test_source_line_pattern(line, expected):

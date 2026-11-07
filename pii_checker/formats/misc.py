@@ -276,19 +276,23 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         item.method = f"巨大なテキスト（{enc}）を少しずつ読み取り（{line_no:,}行）"
 
 
-# ソースの行の印（拡張子の無い・.txt に写したソースを、表と読み違えないため）。表のセルがこの形で始まることはまず無い
+# ソースの行の印（拡張子の無い・.txt に写したソースを、表と読み違えないため）。表の1列目が英単語（return・Function・
+# import など）の行に当たらないよう、語の後ろに文の続き（空白と識別子・括弧・「=」）を求め、カンマが続く形は外す
+_ID = r"[A-Za-z_][\w.]*"
 _RE_SOURCE_LINE = re.compile(
-    r"^\s*(?:import\s+[\w.]+|from\s+[\w.]+\s+import\b|(?:async\s+)?def\s+\w+\s*\(|class\s+\w+\s*[(:{]|"
-    r"return\b|(?:el)?if\s.*:\s*$|else\s*:|for\s.+\sin\s.+:\s*$|try\s*:|except\b.*:\s*$|"
-    r"(?:export\s+)?(?:function|const|let|var)\s+\w+|#include\b|(?:public|private|protected|static)\s+\w+|"
-    r"(?:Dim|Sub|End\s+Sub|Function|End\s+Function)\b|[{}\])]+[;,]?\s*$|__all__\s*=)"
+    rf"^\s*(?:import\s+{_ID}(?:\s*,\s*{_ID})*(?:\s+as\s+\w+)?\s*;?\s*$|import\s.*\sfrom\s+['\"]|"
+    rf"from\s+{_ID}\s+import\s+[\w*(]|(?:async\s+)?def\s+\w+\s*\(|class\s+\w+\s*[(:{{]|"
+    r"return(?:\s+[^\s,]|\s*;?\s*$)|(?:el)?if\s.*:\s*$|else\s*:|for\s.+\sin\s.+:\s*$|try\s*:|except\b.*:\s*$|"
+    r"(?:export\s+)?function\s*\w*\s*\(|(?:export\s+)?(?:const|let|var)\s+\w+\s*[=:;]|#include\s*[<\"]|"
+    r"(?:public|private|protected|static)\s+(?:[\w<>\[\]]+\s+)*\w+\s*[(=;{]|"
+    r"(?:Dim|Sub|Function)\s+\w+\s*(?:\(|As\b|$)|End\s+(?:Sub|Function)\s*$|[{}\])]+[;,]?\s*$|__all__\s*=)"
     # 字下げした、引用符で囲んだ英語の識別子だけの並び（__all__ = [ 'AddressBookType', … ]）。CSV の行は字下げしない
     r"|^[ \t]+(['\"])[A-Za-z_][A-Za-z0-9_.]*\1,?\s*$"
 )
 
 
 def _looks_like_source(lines: list[str]) -> bool:
-    """見た行の3割以上がプログラムの文の形ならソースとみなす。"""
+    """見た行の3割以上（少なくとも2行）がプログラムの文の形ならソースとみなす。"""
     hits = sum(1 for ln in lines if _RE_SOURCE_LINE.match(ln))
     return hits >= max(2, len(lines) * 0.3)
 

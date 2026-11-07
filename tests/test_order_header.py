@@ -118,7 +118,7 @@ def _reread_counts(read_table: bool) -> dict[str, int]:
     return item.conf_counts
 
 
-def test_reread_does_not_raise_product_code():
+def test_reread_does_not_raise_model_number():
     """表で型番とみなした値は、見出しの分からない読み直しで 中 に引き上げない。"""
     counts = _reread_counts(read_table=True)
     assert counts.get("credit_card:low", 0) == 5

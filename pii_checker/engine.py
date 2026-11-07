@@ -100,6 +100,8 @@ COLUMN_ORG_MIN_RATIO = 0.05
 COLUMN_ORG_PREFETCH_ROWS = 2000
 COLUMN_ORG_PREFETCH_CHARS = 4_000_000
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
+# 前に「品番」などの語があり、型番とみなして 低 にした検出の規則に detectors が足す注（読み直しで引き上げない値の印）
+MODEL_NUMBER_NOTE = "型番などの番号とみなした"
 # 表の形で確度を 低 に下げたときに、明細の「検出規則」の末尾へ足す注（なぜ 低 なのかを使い手が引けるように）
 ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
 WEAK_HEADER_NOTE = "（左隣の「見出し語＋値」のセルを見出しにしたため 低）"
@@ -288,6 +290,9 @@ class Collector:
     # 番号の列（_ColumnDigits）で外した、手がかり語の無い12桁の値の hash。同じ本文の読み直し（xlsx のシートの XML・
     # 生データ走査）では列が分からないので、表で外した値をここで見て拾い直さない
     id_column_seen: set = field(default_factory=set)
+    # 見出しの語や、値の前の「品番」などの語で型番とみなし 低 にした (種類, 値) の hash。xlsx のシートの XML の読み直しでは見出しが
+    # 分からず 中 に見えるので、ここで見て引き上げない（「伝票番号,品番,数量」の表の品番が 中 に戻っていた・2026-11-08）
+    model_seen: set = field(default_factory=set)
     # ファイル全体の異なる値を集める先（種類 → {正規化した値の hash → 見た最も高い確度の順位}）。ScanContext が渡す
     distinct_sink: dict | None = None
     # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
@@ -450,6 +455,11 @@ class Collector:
             elif hit.needs_person and confidence == Confidence.MEDIUM and self.person_cue:
                 # 手がかりが先に見つかっていた（待たずに 中 にした）ときも、なぜ 中 なのかを明細に残す
                 hit.rule += self._cue_note()
+            if raw or skip_seen:
+                if prev is not None and key in self.model_seen:
+                    continue  # 表で型番とみなした値を、見出しの分からない読み直しで引き上げない（数えもしない）
+            elif MODEL_NUMBER_NOTE in hit.rule and len(self.model_seen) < SEEN_LIMIT:
+                self.model_seen.add(key)
             if prev is not None:
                 self._maybe_upgrade(prev, hit, confidence, norm, location, location_fn, method, raw, key)
                 if raw or skip_seen:

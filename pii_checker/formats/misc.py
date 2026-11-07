@@ -1071,7 +1071,7 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
 def handle_out_of_scope(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     if item.kind == "実行ファイル":
         # 自己解凍形式・インストーラーは、実行ファイルの後ろに書庫を持つ。7-Zip で開けるなら中身を検査する
-        from .archive import _decode_7z, _run_7z, find_7z, handle_with_7z_exe
+        from .archive import SEVENZIP_HINT, _decode_7z, _run_7z, find_7z, handle_with_7z_exe
 
         exe = find_7z(ctx.options.sevenzip)
         if exe:
@@ -1086,7 +1086,9 @@ def handle_out_of_scope(ctx: ScanContext, blob: Blob, item: ItemResult, col: Col
                 item.kind = f"自己解凍形式・インストーラー（{archive_types[-1]}）"
                 return handle_with_7z_exe(ctx, blob, item, col, depth, kind="sfx")
         else:
-            raise Uncheckable("実行ファイルの中に圧縮ファイル（自己解凍形式）が無いかを確かめるには 7-Zip が要る")
+            raise Uncheckable(
+                f"実行ファイルの中に圧縮ファイル（自己解凍形式）が無いかを確かめるには 7-Zip が要る（{SEVENZIP_HINT}）"
+            )
     raise OutOfScope(f"{item.kind}は文字情報を持たない形式として対象外（中の映像・音声・プログラムは検査していない）")
 
 

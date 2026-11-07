@@ -1112,7 +1112,10 @@ class ScanContext:
         try:
             item.size = blob.size
             if depth > self.options.max_depth:
-                raise Uncheckable(f"入れ子が深すぎる（{self.options.max_depth}段を超えた）")
+                raise Uncheckable(
+                    f"入れ子が深すぎる（{self.options.max_depth}段を超えた）ため、ここから内側は検査していない"
+                    "（外側の書庫を展開して、そのフォルダを検査してください）"
+                )
             self._load_pg_toc(blob)
             leaf = blob.display.replace("\\", "/").rsplit("!", 1)[-1].rsplit("/", 1)[-1]
             collector.add_text(leaf, "ファイル名", method="ファイル名")

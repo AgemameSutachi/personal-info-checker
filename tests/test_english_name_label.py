@@ -51,6 +51,12 @@ def _names(text: str) -> list[detectors.Hit]:
         ("  name: 渡辺 健\n", "渡辺 健"),  # YAML の字下げの項目
         ("担当\nContact name: 中村一郎（営業部）", "中村一郎"),
         ('name = "山田太郎"', "山田太郎"),  # コードの代入の文字列の値（日本語の見出し語の「氏名="…"」と同じ扱い）
+        ("customerName: 佐藤花子", "佐藤花子"),  # つなぎの無い書き方（camelCase）
+        # 前に代名詞・冠詞を置いた英文の見出し
+        ("My name: 山田太郎", "山田太郎"),
+        ("Your Name: 佐藤花子", "佐藤花子"),
+        ("Please enter the last name: 鈴木一郎", "鈴木一郎"),
+        ("Legal name = 高橋健", "高橋健"),
     ],
 )
 def test_found_medium(text, value, engine):
@@ -74,6 +80,19 @@ def test_found_medium(text, value, engine):
         "name 山田太郎",  # 空白だけの区切りは読まない
         'name: "Taro Yamada"',  # ローマ字の名前は今までどおり本文では読まない
         "nickname: 山田太郎",
+        "title name: 山田太郎",  # 空白の前の語が代名詞・冠詞でない
+        "brand-name: 山田太郎",
+        # 姓で始まる地名・会社・部署（値の末尾の語で見分ける）
+        "name: 山田工業",
+        "name: 石川県",
+        "name: 松本市",
+        "name: 中野区",
+        "name: 小林製薬",
+        "name: 山田電機",
+        "name: 内田洋行",
+        "name: 森林組合",
+        "name: 山田 営業部",
+        "name: 林業",
     ],
 )
 def test_not_found_by_english_label(text, engine):
@@ -85,6 +104,16 @@ def test_not_found_by_english_label(text, engine):
 def test_code_assignment_dropped(text, engine):
     got = [h for h in _names(text) if h.rule.startswith(RULE)]
     assert not got, got
+
+
+@pytest.mark.parametrize("text, value", [("name: 関東", "関東"), ("name: 原因", "原因"), ("Name: 林健", "林健")])
+def test_two_chars_without_space_is_low(text, value, engine):
+    """空白の無い2字は、姓で始まる語（関東・原因）と見分けられないので 低。空白で姓と名を分けたもの（林 健）は 中。"""
+    got = [h for h in _names(text) if h.value == value and h.rule.startswith(RULE)]
+    assert got and all(h.confidence.value == "low" for h in got), got
+    assert got[0].rule == RULE + detectors.NAME_EN_SHORT_NOTE, got
+    spaced = [h for h in _names("Name: 林 健") if h.rule == RULE]
+    assert [h.confidence.value for h in spaced] == ["medium"], spaced
 
 
 def test_in_call_is_low(engine):

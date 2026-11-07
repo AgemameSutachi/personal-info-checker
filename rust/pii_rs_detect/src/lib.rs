@@ -288,15 +288,25 @@ fn lb_my_number(t: &str, s: usize, _: &Captures) -> bool {
 fn lb_tight(t: &str, s: usize, _: &Captures) -> bool {
     s == 0 || prev_char(t, s).map_or(true, |c| py_is_space(c) || matches!(c, '　' | ':' | '：' | '、' | ',' | '|'))
 }
-/// 英語の氏名の見出し語の前（Python の _en_label_start_ok）: 直前が英数字・「_」、または英字＋空白・「_」・「-」でない
+/// 英語の氏名の見出し語の前（Python の _en_label_start_ok）: 直前が英数字・「_」、または英字＋空白・「_」・「-」でない。
+/// 英字＋空白のときは、空白の前の語が EN_NAME_LABEL_OK_BEFORE（「My name」「the name」）なら始まってよい
 fn lb_name_en(t: &str, s: usize, _: &Captures) -> bool {
-    let mut it = t[..s].chars().rev();
-    let Some(p1) = it.next() else { return true };
+    const OK_BEFORE: [&str; 11] = ["my", "your", "his", "her", "their", "our", "the", "a", "legal", "real", "official"];
+    let bytes = t.as_bytes();
+    let Some(p1) = t[..s].chars().next_back() else { return true };
     if p1.is_ascii_alphanumeric() || p1 == '_' {
         return false;
     }
-    if matches!(p1, ' ' | '_' | '-') && it.next().map_or(false, |c| c.is_ascii_alphabetic()) {
-        return false;
+    if matches!(p1, ' ' | '_' | '-') && s >= 2 && bytes[s - 2].is_ascii_alphabetic() {
+        if p1 != ' ' {
+            return false;
+        }
+        let mut i = s - 2;
+        while i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+            i -= 1;
+        }
+        let word = t[i..s - 1].to_ascii_lowercase();
+        return OK_BEFORE.contains(&word.as_str());
     }
     true
 }

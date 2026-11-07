@@ -5,8 +5,10 @@
 ## 次の版（未公開）
 
 - 文中の英語の見出し語＋日本語の名前（`Name: 山田太郎`・`Customer name = 佐藤花子`・`{"name": "山田太郎"}`・YAML の `name: 山田 太郎`）を、氏名（確度 中）として拾うようにした。前は英語の見出し語を本文では読まず、`Name: 山田太郎` を見落とし、`Full Name: 山田 太郎` は「よくある姓＋空白＋名」の 低 だった。明細の「検出規則」は「英語の氏名の見出し語＋よくある姓の名前」
-  - `name:` は YAML・設定の項目名にも多いので、値がよくある姓で始まり、漢字の名が1〜3字続くものだけを拾う（「name: 営業部」「name: 山田工業株式会社」は拾わない）。区切りは「:」「=」だけ
-  - 見出し語は `Name`・`Full Name`・`First Name`・`Last Name`・`Given Name`・`Family Name`・`Customer name`・`Client name`・`User name`・`Contact name`・`Person name`・`Member name`・`Patient name`・`Display name`（空白・`_`・`-` でつないだもの・つなぎの無いものも）。`filename:`・`company name:`・`project-name:` のように、別の物の名前の見出しは拾わない
+  - `name:` は YAML・設定の項目名にも多いので、値がよくある姓で始まり、漢字の名が1〜3字続くものだけを拾う（「name: 営業部」は拾わない）。区切りは「:」「=」だけ
+  - 姓で始まる地名・会社・部署（「name: 石川県」「name: 山田工業」「name: 小林製薬」「name: 山田 営業部」）は、値の末尾の語（県・市・区・町・業・社・店・部・課・組合・商事・銀行 など）で見分けて拾わない。空白の無い2字（「name: 関東」「name: 原因」）は姓で始まる語と見分けられないので 低（明細の「検出規則」の末尾に「（空白の無い2字で、姓で始まる語と見分けられないため 低）」）。空白で姓と名を分けたもの（「Name: 林 健」）は 中
+  - 見出し語は `Name`・`Full Name`・`First Name`・`Last Name`・`Given Name`・`Family Name`・`Customer name`・`Client name`・`User name`・`Contact name`・`Person name`・`Member name`・`Patient name`・`Display name`。空白・`_`・`-` でつないだもの・つなぎの無いもの（`fullname`・`customerName`）も読み、大文字小文字は問わない
+  - 見出し語の前が英数字・`_` のもの（`filename:`・`company_name:`）と、英字の語＋空白・`_`・`-` のもの（`company name:`・`brand-name:`・`title name:`）は、別の物の名前の見出しなので拾わない。ただし前の語が `my`・`your`・`his`・`her`・`their`・`our`・`the`・`a`・`legal`・`real`・`official` なら拾う（`My name: 山田太郎`・`the last name: 鈴木一郎`）
   - コードの代入の続き（`name = 山田太郎.strip()`）は拾わず、関数の引数（`User(name="山田太郎")`）は 低 にする（日本語の見出し語と同じ）
   - ローマ字の名前（`"name": "Taro Yamada"`）は、今までどおり本文の中では読まない（表の列見出しとしては読む）
 - ログ・JSON の ID の項目の値（`id=36227206271667`・`"user_id": "…"`・`requestId:` の後ろの番号）が Luhn 検査とブランドの番号体系に偶然合うと、カード番号（手がかりなし・確度 中）に数えていたのを 低 にした（ログ 1600 行の材料で 中 35件 → 低 35件）。明細の「検出規則」の末尾に「（すぐ前が ID の項目のキーで、識別番号とみなした）」を付ける

@@ -295,10 +295,23 @@ def iter_name_spaced(text: str):
 
 
 NAME_LABEL_EN_RULE = "英語の氏名の見出し語＋よくある姓の名前"
+# 「My name: 山田太郎」「the name: …」のように、空白を挟んで前に置いても別の物の名前にならない語（小文字で比べる）
+EN_NAME_LABEL_OK_BEFORE = frozenset(
+    {"my", "your", "his", "her", "their", "our", "the", "a", "legal", "real", "official"}
+)
+# 値の末尾がこの語なら、姓で始まる地名・会社・部署（「石川県」「山田電機」「山田 営業部」）とみなして落とす
+_RE_NAME_EN_ORG_TAIL = re.compile(
+    r"(?:業|県|府|市|区|町|村|郡|組|部|課|係|室|屋|会|社|店|所|局|署|館|園|院|校|場|機|薬|組合|洋行|商事|銀行)$"
+)
+NAME_EN_SHORT_NOTE = "（空白の無い2字で、姓で始まる語と見分けられないため 低）"
 
 
 def _en_label_start_ok(text: str, start: int) -> bool:
-    """英語の見出し語が start から始まってよいか。直前が英数字・「_」、または英字＋空白・「_」・「-」なら別の語の続き。"""
+    """英語の見出し語が start から始まってよいか。
+
+    直前が英数字・「_」なら語の続き（「filename」）。直前が英字＋空白・「_」・「-」なら別の物の名前（「company name」）。
+    ただし空白の前の語が EN_NAME_LABEL_OK_BEFORE（「My name」「the name」）なら始まってよい。
+    """
     if start == 0:
         return True
     prev = text[start - 1]
@@ -307,7 +320,12 @@ def _en_label_start_ok(text: str, start: int) -> bool:
     if prev in " _-" and start >= 2:
         prev2 = text[start - 2]
         if prev2.isascii() and prev2.isalpha():
-            return False
+            if prev != " ":
+                return False
+            i = start - 2
+            while i > 0 and text[i - 1].isascii() and text[i - 1].isalpha():
+                i -= 1
+            return text[i : start - 1].lower() in EN_NAME_LABEL_OK_BEFORE
     return True
 
 
@@ -2103,6 +2121,12 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 if shape == "low":
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
         elif h.rule == NAME_LABEL_EN_RULE:
+            # 姓で始まる地名・会社・部署（「name: 石川県」「name: 山田電機」「name: 山田 営業部」）
+            if _RE_NAME_EN_ORG_TAIL.search(h.value):
+                continue
+            # 空白の無い2字は、姓で始まる語（「関東」「原因」「林業」）と見分けられないので 低
+            if len(h.value) == 2:
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_EN_SHORT_NOTE)
             # コードの代入の続き（`name = 山田太郎.strip()`）は落とし、関数の引数（`User(name="山田太郎")`）は 低 にする
             shape = _name_label_code_shape(text, h)
             if shape == "drop":

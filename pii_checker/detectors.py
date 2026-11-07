@@ -823,7 +823,12 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
             conf = Confidence.HIGH
     elif category in ("drivers_license", "passport", "health_insurance"):
         # 旅券・免許証・保険証の番号には数字がある（数字の無い「JASDAQ スタンダード」は番号ではない）
-        if len(_RE_NON_ALNUM.sub("", v)) < 4 or not digits or _RE_URL_LIKE.search(v):
+        alnum = len(_RE_NON_ALNUM.sub("", v))
+        if alnum < 4 or not digits or _RE_URL_LIKE.search(v):
+            return None
+        # 旅券番号は区切りを除いて6文字以上とみなす（日本は英字2＋数字7・ICAO 9303 の欄は9文字。5文字以下の国は知られていない前提）。
+        # 5桁の証券コード「75770」（社名「パスポート」の右隣）は番号ではない
+        if category == "passport" and alnum < 6:
             return None
         conf = Confidence.HIGH if category != "health_insurance" else Confidence.MEDIUM
     elif category == "residence_card":

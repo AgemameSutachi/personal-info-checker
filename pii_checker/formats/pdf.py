@@ -76,15 +76,7 @@ def handle_pdf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
                         item.notes.append("パスワードで開いた")
                     break
             if not opened:
-                n = len(ctx.password_candidates())
-                raise NeedPassword(
-                    "pdf",
-                    (
-                        f"PDF に開くためのパスワードが掛かっている（受け取ったパスワード {n} 個を試したが開けなかった）"
-                        if n
-                        else "PDF に開くためのパスワードが掛かっている（パスワードを入力すると再検査できる）"
-                    ),
-                )
+                raise NeedPassword("pdf", ctx.password_reason("PDF に開くためのパスワードが掛かっている"))
 
         if col.collect_positions:
             col.pos_layout = "pdf"  # 対処のために、ページ・行・文字の範囲で位置を集める（remedy_pdf.py が黒塗りに使う）

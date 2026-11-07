@@ -1128,7 +1128,7 @@ def dump_table(session, name: str, emitter: Emitter, max_rows: int | None) -> in
     count = 0
     for values in rows:
         if max_rows is not None and count >= max_rows:
-            emitter.warning(f"表「{name}」は {max_rows} 行を超えるため、{max_rows} 行で打ち切りました。")
+            emitter.warning(f"表「{name}」は {max_rows:,} 行を超えるため、{max_rows:,} 行で打ち切りました。")
             break
         count += 1
         out = []

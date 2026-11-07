@@ -209,7 +209,7 @@ def _dump_odbc(ctx: ScanContext, conn, col: Collector, item: ItemResult, depth: 
             lambda r, c, name=name, columns=columns: f"表「{name}」{r}行目 列「{columns[c] if c < len(columns) else c + 1}」",
             method="表のレコード",
         )
-        item.notes.append(f"表「{name}」{n}行")
+        item.notes.append(f"表「{name}」{n:,}行")
         memo_like = [d[0] for d in c2.description if d[1] is str and (d[3] or 0) >= MEMO_SIZE]
         c2.close()
         _scan_odbc_attachments(ctx, conn, name, memo_like, item, depth, display)
@@ -684,15 +684,7 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             item.notes.append("先に試して失敗した方法: " + " / ".join(attempts))
         return
     if need_pw:
-        n = len(ctx.password_candidates())
-        raise NeedPassword(
-            "access",
-            (
-                f"Access にデータベースパスワードが掛かっている（受け取ったパスワード {n} 個を試したが開けなかった）"
-                if n
-                else "Access にデータベースパスワードが掛かっている（パスワードを入力すると再検査できる）"
-            ),
-        )
+        raise NeedPassword("access", ctx.password_reason("Access にデータベースパスワードが掛かっている"))
     raise Uncheckable(
         "Access の表を読めなかった（生データ走査のみ。数値型の列は検査できていない。壊れている可能性があり、"
         "Access で開けるなら「データベースの最適化/修復」をかけた写しを検査してください）"
@@ -819,8 +811,8 @@ def handle_dbf(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
     n = col.add_records(
         columns, rows(), lambda r, c: f"{r}行目 列「{columns[c] if c < len(columns) else c + 1}」", method="レコード"
     )
-    item.method = f"dBase の全レコード {n} 件（削除フラグ付き {deleted} 件を含む）"
+    item.method = f"dBase の全レコード {n:,} 件（削除フラグ付き {deleted:,} 件を含む）"
     if truncated:
         raise PartialScan(
-            f"dBase のレコードが途中で切れている（見出しの件数 {n_records} 件のうち {truncated[0]} 件まで読んだ。残りの行は検査していない。元のファイルを取り直してください）"
+            f"dBase のレコードが途中で切れている（見出しの件数 {n_records:,} 件のうち {truncated[0]:,} 件まで読んだ。残りの行は検査していない。元のファイルを取り直してください）"
         )

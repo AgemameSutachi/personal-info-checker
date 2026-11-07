@@ -142,7 +142,7 @@ def handle_git_index(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collec
         names += 1
         entry_len = end - pos
         pos += (entry_len + 8) // 8 * 8
-    item.method = f"追跡しているファイルのパス名 {names} 件"
+    item.method = f"追跡しているファイルのパス名 {names:,} 件"
 
 
 def handle_git_meta(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
@@ -429,8 +429,8 @@ def _scan_pack(ctx: ScanContext, reader: PackReader, blob: Blob, item: ItemResul
             name = f"（blob {shas[i].hex()[:12]}）"
         _scan_object(ctx, col, blob.display, otype, data, depth, name)
     item.method = (
-        f"全オブジェクト {n} 件を展開（commit {counts['commit']}・tree {counts['tree']}・"
-        f"blob {counts['blob']}・tag {counts['tag']}）"
+        f"全オブジェクト {n:,} 件を展開（commit {counts['commit']:,}・tree {counts['tree']:,}・"
+        f"blob {counts['blob']:,}・tag {counts['tag']:,}）"
     )
     if problems:
         # 中身を読めずに飛ばしたオブジェクトがある。読めた分の検出は残したまま、言い切りを妨げる「検査不能」にする

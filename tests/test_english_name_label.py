@@ -88,7 +88,6 @@ def test_found_medium(text, value, engine):
         "name: 中野区",
         "name: 小林製薬",
         "name: 山田電機",
-        "name: 内田洋行",
         "name: 森林組合",
         "name: 山田 営業部",
         "name: 林業",
@@ -122,6 +121,8 @@ def test_two_chars_without_space_is_low(text, value, engine):
         ("Name: 鈴木浩市", "鈴木浩市"),
         ("name: 田中 美園", "田中 美園"),
         ("name: 山田 英機", "山田 英機"),
+        ("name: 内田洋行", "内田洋行"),
+        ("name: 山田 洋行", "山田 洋行"),
     ],
 )
 def test_ambiguous_org_tail_is_low(text, value, engine):

@@ -354,8 +354,14 @@ def test_email_needs_real_tld(text):
         "Taro@Example.Org",
         "見積_taro@example.com_memo.txt",  # アドレス入りのファイル名（よく使う TLD は「_」が続いても残す）
         "taro@example.co.jp_2024.pdf",
-        "hanako@example.tokyo_2024.pdf",  # 「_」の後が数字なら識別子の続きとみなさない
+        "hanako@example.shop_2024.pdf",  # 「_」の後が数字なら識別子の続きとみなさない
+        "taro@example.de_memo.txt",  # 国の2文字の TLD は「_＋小文字」が続いても残す
+        "hanako@mail.example.co.uk_a.txt",
+        "taro@example.tokyo_memo.pdf",  # よく使う汎用の TLD も残す
+        "taro@example.biz_list.csv",
+        "user@example.org_Memo",  # 「_」の後が大文字なら識別子の続きとみなさない
         "taro_yamada@example.shop",  # ローカル部の「_」だけなら残す
+        "john._smith@example.com",  # 「._」でもドメインが2段なら残す
         "Taro.Yamada@gmail.Com",  # 頭文字の大文字の並びは CamelCase ではない
     ],
 )

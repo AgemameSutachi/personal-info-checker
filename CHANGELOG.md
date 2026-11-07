@@ -9,8 +9,8 @@
   - 旅券・免許証・保険証の番号は、数字の無い値と URL を拾わない
 - 数値の表の小数（`0.4111111111111111`）の小数部を、Luhn 検査が合うのでカード番号（確度 中）に数えていたのを直した。カードの語や列の見出しがある 高 のものは今までどおり拾う
 - mypy のキャッシュ（`.mypy_cache` の `*.db`）の型・モジュールの名前の並びを、メールアドレス（確度 中）に数えていたのを直した（`click.core@click.shell_completion`・`pandas._libs.tslibs@pandas.tseries…abc` など）。次の3つの形を拾わない
-  - アドレスの形の直後に「_」と小文字が続くもの（識別子の途中で `.shell`・`.do` のような実在の TLD に当たったもの）。com・jp などよく使う TLD は、アドレス入りのファイル名（`taro@example.com_memo.txt`）もあるので今までどおり拾う
-  - ローカル部（@ の前）に「._」を含むもの
+  - アドレスの形の直後に「_」と小文字が続くもの（識別子の途中で `.shell`・`.do` のような実在の TLD に当たったもの）。アドレス入りのファイル名（`taro@example.com_memo.txt`・`taro@example.de_memo.txt`）もあるので、国の2文字の TLD（`.jp`・`.de`・`.uk` など）と、よく使う汎用の TLD（com・net・org・biz・tokyo など）は今までどおり拾う。それ以外の TLD（`taro@example.shop_memo.txt` の `.shop` など）は、この形では見落とす
+  - ローカル部（@ の前）に「._」を含み、ドメインが3段以上のもの（`john._smith@example.com` は拾う）
   - TLD が頭文字だけ大文字（`.Ba`）で、ローカル部が CamelCase（`TarError`）のもの
 
 ## 1.6.0（2026-11-07）

@@ -23,6 +23,43 @@ def handle_empty(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
 # 大きさの数倍のメモリを使う（SQL のダンプは、ここを超えても列名つきの読み方のまま少しずつ読む）
 TEXT_READ_ALL_LIMIT = 64 * 1024 * 1024
 SQL_EXTS = (".sql", ".dump", ".pgsql", ".psql", ".ddl")
+# プログラムのソース。引数や配列の「,」が行ごとに同じ数だけ並ぶので表と読み違え、英語の識別子
+# （AddressBookType の Address・name, value = …）を列の見出しと取って、下の行をまるごと拾ってしまう。中身にかかわらず本文として読む
+SOURCE_EXTS = (
+    ".py",
+    ".pyw",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".jsx",
+    ".tsx",
+    ".vbs",
+    ".vb",
+    ".bas",
+    ".cls",
+    ".frm",
+    ".ps1",
+    ".psm1",
+    ".bat",
+    ".cmd",
+    ".sh",
+    ".rb",
+    ".pl",
+    ".php",
+    ".java",
+    ".kt",
+    ".scala",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cs",
+    ".go",
+    ".rs",
+    ".swift",
+    ".lua",
+)
 
 
 def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
@@ -42,7 +79,7 @@ def handle_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, 
     if blob.ext in SQL_EXTS or looks_like_sql(text):
         col.pos_layout = "sqldump"  # 対処のために、表・行・列で位置を集める（COPY の行・INSERT の組）
         scan_sql_text(text, col, item)
-    elif blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(text):
+    elif blob.ext in (".csv", ".tsv", ".tab") or (blob.ext not in SOURCE_EXTS and _looks_tabular(text)):
         _scan_delimited(text, col, item)
     else:
         col.pos_layout = "lines"  # 対処のために、行番号で位置を集める（空のままなら集めない）
@@ -193,7 +230,7 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
 
             scan_sql_lines(sql_lines(), col, item)
             return
-        if blob.ext in (".csv", ".tsv", ".tab") or _looks_tabular(sample):
+        if blob.ext in (".csv", ".tsv", ".tab") or (blob.ext not in SOURCE_EXTS and _looks_tabular(sample)):
             delim = "\t" if sample.count("\t") > sample.count(",") else ","
             csv.field_size_limit(2**31 - 1)
 
@@ -239,11 +276,30 @@ def _handle_huge_text(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         item.method = f"巨大なテキスト（{enc}）を少しずつ読み取り（{line_no:,}行）"
 
 
+# ソースの行の印（拡張子の無い・.txt に写したソースを、表と読み違えないため）。表のセルがこの形で始まることはまず無い
+_RE_SOURCE_LINE = re.compile(
+    r"^\s*(?:import\s+[\w.]+|from\s+[\w.]+\s+import\b|(?:async\s+)?def\s+\w+\s*\(|class\s+\w+\s*[(:{]|"
+    r"return\b|(?:el)?if\s.*:\s*$|else\s*:|for\s.+\sin\s.+:\s*$|try\s*:|except\b.*:\s*$|"
+    r"(?:export\s+)?(?:function|const|let|var)\s+\w+|#include\b|(?:public|private|protected|static)\s+\w+|"
+    r"(?:Dim|Sub|End\s+Sub|Function|End\s+Function)\b|[{}\])]+[;,]?\s*$|__all__\s*=)"
+    # 字下げした、引用符で囲んだ英語の識別子だけの並び（__all__ = [ 'AddressBookType', … ]）。CSV の行は字下げしない
+    r"|^[ \t]+(['\"])[A-Za-z_][A-Za-z0-9_.]*\1,?\s*$"
+)
+
+
+def _looks_like_source(lines: list[str]) -> bool:
+    """見た行の3割以上がプログラムの文の形ならソースとみなす。"""
+    hits = sum(1 for ln in lines if _RE_SOURCE_LINE.match(ln))
+    return hits >= max(2, len(lines) * 0.3)
+
+
 def _looks_tabular(text: str) -> bool:
     from collections import Counter
 
     lines = [ln for ln in text[:50000].splitlines()[:30] if ln.strip()]
     if len(lines) < 2:
+        return False
+    if _looks_like_source(lines):
         return False
     for sep in (",", "\t"):
         counts = [ln.count(sep) for ln in lines]

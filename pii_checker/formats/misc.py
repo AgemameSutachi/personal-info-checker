@@ -757,6 +757,9 @@ _XMP_CONTACT_LABELS = {
     "CiUrlWork": "URL",
 }
 _XMP_MAX = 4 * 1024 * 1024  # 読む XMP の塊の大きさの上限（普通は数 KB〜数十 KB）
+# JPEG の Extended XMP の区切りの印と、組み直す GUID の数の上限（_jpeg_extended_xmp）
+_XMP_EXT_SIG = b"http://ns.adobe.com/xmp/extension/\x00"
+_XMP_EXT_MAX_GUIDS = 4
 
 
 def _xmp_packets(data: bytes, limit: int = 4):
@@ -780,6 +783,64 @@ def _xmp_packets(data: bytes, limit: int = 4):
             out.append(bytes(data[start:end]))
         pos = end
     return out
+
+
+def _jpeg_extended_xmp(data: bytes) -> tuple[bytes, list[bytes]]:
+    """JPEG の Extended XMP（64KB を超えて APP1 の区切りに分けた XMP）を組み直す。
+
+    区切りは「http://ns.adobe.com/xmp/extension/\\0」＋GUID（32 文字）＋全体の長さ（4 バイト）＋位置（4 バイト）＋中身。
+    区切りの頭が塊の途中に混じるので、そのまま印で探すと XML が壊れる。区切りを GUID ごとに位置へ並べて組み直し、
+    元のバイト列からは区切りを空白で埋めた写しを返す（印で探す側が壊れた塊を拾わないため）。
+    返り値は（区切りを埋めたバイト列, 組み直した塊の並び）。JPEG でない・区切りが無いときは（data, []）。
+    全体の長さが _XMP_MAX を超えるもの・GUID が _XMP_EXT_MAX_GUIDS を超えた分は読まない。
+    走査は最初の画像のデータ（SOS）か終わり（EOI）の印で止める（XMP は画像のデータより前に置く決まり）。
+    """
+    if not data.startswith(b"\xff\xd8") or _XMP_EXT_SIG not in data:
+        return data, []
+    parts: dict[bytes, tuple[int, list[tuple[int, bytes]]]] = {}
+    spans = []
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            break
+        marker = data[pos + 1]
+        if marker == 0xFF:  # 詰め物の 0xFF
+            pos += 1
+            continue
+        if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:  # 長さを持たない印
+            pos += 2
+            continue
+        if marker in (0xD9, 0xDA):
+            break
+        end = pos + 2 + int.from_bytes(data[pos + 2 : pos + 4], "big")
+        if end > len(data):
+            break
+        seg = data[pos + 4 : end]
+        if marker == 0xE1 and seg.startswith(_XMP_EXT_SIG):
+            body = seg[len(_XMP_EXT_SIG) :]
+            if len(body) > 40:
+                guid = bytes(body[:32])
+                total = int.from_bytes(body[32:36], "big")
+                offset = int.from_bytes(body[36:40], "big")
+                if guid in parts or len(parts) < _XMP_EXT_MAX_GUIDS:
+                    parts.setdefault(guid, (total, []))[1].append((offset, bytes(body[40:])))
+            spans.append((pos, end))
+        pos = end
+    if not spans:
+        return data, []
+    packets = []
+    for total, chunks in parts.values():
+        if total > _XMP_MAX:
+            continue
+        buf = bytearray(b" " * total)
+        for offset, chunk in chunks:
+            if offset + len(chunk) <= total:
+                buf[offset : offset + len(chunk)] = chunk
+        packets.append(bytes(buf))
+    cleaned = bytearray(data)
+    for start, end in spans:
+        cleaned[start:end] = b" " * (end - start)
+    return bytes(cleaned), packets
 
 
 def _xmp_value(el) -> str:
@@ -874,9 +935,13 @@ def scan_xmp(data: bytes, item: ItemResult, col: Collector, extra=None) -> int:
     extra は PIL が画像の情報として解いて返した XMP（PNG の圧縮した iTXt などはバイト列のままでは探せない）。
     EXIF と同じ値を両方に書く道具が多いので、EXIF で数えた値は数え直さない（skip_seen）。
     写っている人（顔のタグ）は「氏名」の列の値として検査する（姓名だけで書かれるため）。
+    JPEG の Extended XMP（64KB を超えて分けたもの）は組み直して読む（_jpeg_extended_xmp）。
     返り値は検査した文字の項目の数。
     """
+    data, extended = _jpeg_extended_xmp(data)
     packets = _xmp_packets(data)
+    for packet in extended:
+        packets += [p for p in _xmp_packets(packet) if p not in packets]
     if extra:
         if isinstance(extra, str):
             extra = extra.encode("utf-8", "replace")

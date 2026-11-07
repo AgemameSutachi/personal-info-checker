@@ -258,6 +258,24 @@ def test_shape_filter_keeps_real_ones(text, expected):
         ("arn:aws:lambda:ap-northeast-1:123456789018:function:hello", "my_number"),
         ("arn:aws-us-gov:sns:us-gov-west-1:123456789018:topic", "my_number"),
         ("https://console.aws.amazon.com/x/arn:aws:iam::123456789018:role/x", "my_number"),
+        # Google Cloud のプロジェクト番号（資源の名前・Firebase のアプリ ID・OAuth のクライアント ID・
+        # サービスアカウント・設定のキー）
+        ("projects/123456789018/locations/global", "my_number"),
+        ('"name": "projects/123456789018"', "my_number"),
+        ("1:123456789018:android:abc123def456", "my_number"),
+        ('"mobilesdk_app_id": "1:123456789018:ios:0a1b2c3d"', "my_number"),
+        ("1:123456789018:web:0a1b2c3d4e5f", "my_number"),
+        ("123456789018-abcdefg.apps.googleusercontent.com", "my_number"),
+        ("service-123456789018@gcp-sa-pubsub.iam.gserviceaccount.com", "my_number"),
+        ("123456789018-compute@developer.gserviceaccount.com", "my_number"),
+        ("123456789018@cloudservices.gserviceaccount.com", "my_number"),
+        ('"project_number": "123456789018"', "my_number"),
+        ("projectNumber: 123456789018", "my_number"),
+        ('"messagingSenderId": "123456789018"', "my_number"),
+        ('<string name="gcm_defaultSenderId">123456789018</string>', "my_number"),
+        ('<string name="gcm_defaultSenderId" translatable="false">123456789018</string>', "my_number"),
+        ('{\\"project_number\\": \\"123456789018\\"}', "my_number"),
+        ("1:123456789018:web:ABCDEF012345", "my_number"),
     ],
 )
 def test_numeric_data_false_positive(text, pii_type):
@@ -309,6 +327,17 @@ def test_numeric_data_false_positive(text, pii_type):
         ("xarn:aws:iam::123456789018:role/x", "my_number"),
         ("arn:gcp:iam::123456789018:role/x", "my_number"),
         ("個人番号 arn:aws:iam::123456789018:role/x", "my_number"),
+        # Google Cloud の形でないもの（「projects」の前に英数字が続く・「1:」だけで後ろが決まった語でない・
+        # Google でないドメイン・よく似たドメインの続き・語があるもの）は残す
+        ("myprojects/123456789018", "my_number"),
+        ("1:123456789018:note", "my_number"),
+        ("123456789018-abc@example.com", "my_number"),
+        ("123456789018-a.apps.googleusercontent.com.evil.example", "my_number"),
+        ("project 123456789018", "my_number"),
+        ("my_sender_id: 123456789018", "my_number"),
+        ('<string name="gcm_defaultSenderId" translatable="false"></string> 123456789018', "my_number"),
+        ("PROJECT_ID  NAME  PROJECT_NUMBER\nmy-proj  My Project  123456789018", "my_number"),
+        ("個人番号 projects/123456789018/x", "my_number"),
         # 電話・カードの形は、隣に長い連続があっても今までどおり（語があっても同じ規則名で出るため）
         ("TEL 09012345678 ID 1234567890123456789012", "phone"),
         ("090-1234-5678 1234567890123456789012", "phone"),

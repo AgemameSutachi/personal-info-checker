@@ -74,3 +74,49 @@ def test_quoted_sensitive_labels(text, want):
 def test_not_found(text):
     got = {k for k in _found(text) if k[0] in ("name", "sensitive")}
     assert not got, got
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # コードの日本語の変数への代入。値の後ろがコードの続き（人の名前ならそこで終わる）
+        '名前 = 有効["holder_name"].fillna("")',
+        "名前 = 表示.列",
+        "名前 = 集計(日次)",
+        '名前 = "営業利益÷総資産 上位20%"',
+        "名前 = '佐藤花子の÷'",
+    ],
+)
+def test_name_label_code_assignment_dropped(text):
+    got = {k for k in _found(text) if k[0] == "name"}
+    assert not got, got
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        # 関数の引数（閉じていない「(」の中）は落とさず 低 に（ログの書き方も同じ形なので見落とさない）
+        ('ベンチ = _成績(日次, 名前="ベンチ")', "ベンチ"),
+        ("記録 = 判定(\n    名前=表示名,\n    詳細={},\n)", "表示名"),
+        ("更新(氏名=山田太郎, 年齢=40)", "山田太郎"),
+    ],
+)
+def test_name_label_in_call_is_low(text, value):
+    got = [h for h in detectors.detect(detectors.normalize(text), None) if h.pii_type == "name" and h.value == value]
+    assert got and all(h.confidence.value == "low" for h in got), got
+    assert any(h.rule.endswith(detectors.NAME_IN_CALL_NOTE) for h in got), got
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        # 閉じた括弧の後ろ・括弧の外の「=」の形は今までどおり 中
+        ('(備考) 氏名="鈴木一郎"', "鈴木一郎"),
+        ("[会員]\n氏名=鈴木一郎\n", "鈴木一郎"),
+        ('<input 氏名="鈴木一郎" />', "鈴木一郎"),
+        # 「:」の形は値の後ろに説明が続いても見ない
+        ('{"氏名": "山田 太郎（営業部）"}', "山田 太郎"),
+    ],
+)
+def test_name_label_outside_call_stays_medium(text, value):
+    assert ("name", "medium", value) in _found(text), _found(text)

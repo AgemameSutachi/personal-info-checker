@@ -145,10 +145,10 @@ MODEL_KW = re.compile(
 )
 # 値のすぐ前が ID の項目のキー（ログの「id=…」・JSON の「"user_id": "…"」・「requestId:」）。識別番号の数がカード番号の
 # 形に偶然合ったものとみなす（2026-11-08・ログ 1600 行の「id=<14桁>」で 中 35件）。「paid=」「valid:」は ID のキーにしない。
-# キーと値の間に改行をはさむものは見ない。日本語の項目名の「会員ID:」「支払い ID:」はカード番号を書く欄でもあるので、
-# キーの前（空白を除く）が日本語などの ASCII でない文字なら下げない（_id_key_before）
+# キーと値の間に改行をはさむものは見ない。日本語の項目名の「会員ID:」「支払いID:」はカード番号を書く欄でもあるので、
+# キーが日本語の語に空白なしでつながるものは下げない（_id_key_before）。「処理完了 id=」「【ログ】id=」は下げる
 RE_ID_KEY_BEFORE = re.compile(
-    r"""(?<![A-Za-z0-9])["']?(?:id|ID|Id|[A-Za-z0-9]+[_\-.](?:id|ID|Id)|[a-z0-9]+(?:Id|ID))["']?[ \t]*[=:][ \t]*["']?\Z"""
+    r"""(?<![A-Za-z0-9])["']?(?:id|ID|Id|[A-Za-z0-9]+[_\-.](?:id|ID|Id)|[A-Za-z0-9]*[a-z0-9](?:Id|ID))["']?[ \t]*[=:][ \t]*["']?\Z"""
 )
 ID_KEY_NOTE = "（すぐ前が ID の項目のキーで、識別番号とみなした）"
 # 語が無ければ拾わない番号（クレジットカードの Luhn が合わないものを、打ち間違いとして 低 で残すときの語）
@@ -1902,12 +1902,12 @@ def _name_label_code_shape(text: str, h: Hit) -> str:
 
 
 def _id_key_before(text: str, start: int) -> bool:
-    """start のすぐ前が ASCII の ID の項目のキー（「id=」「"user_id": "」）か。キーの前が日本語の項目名なら False。"""
+    """start のすぐ前が英字の ID の項目のキー（「id=」「"user_id": "」）か。日本語の語につながるキー（「会員ID:」）なら False。"""
     m = RE_ID_KEY_BEFORE.search(text, max(0, start - 40), start)
     if m is None:
         return False
-    head = text[max(0, m.start() - 20) : m.start()].rstrip(" \t　")
-    return not head or head[-1].isascii()
+    prev = text[m.start() - 1] if m.start() > 0 else ""
+    return not (prev and not prev.isascii() and prev.isalnum())
 
 
 def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:

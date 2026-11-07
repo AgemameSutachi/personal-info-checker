@@ -1695,21 +1695,24 @@ _NOT_GIVEN_NAMES = frozenset(
     "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
 )
 _RE_SPACE = re.compile(r"[ 　]")
-# 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）
-_CODE_AFTER_VALUE = frozenset("[(.")
+# 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
+# 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
+# 「=」「<」「>」も入れない（`氏名=山田太郎 年齢=40`・`氏名=山田太郎<br>`）
+_CODE_OPERATORS = frozenset("÷×*%+")
 _CALL_LOOKBACK = 200
-NAME_IN_CALL_NOTE = "（関数の引数の書き方のため 低）"
+NAME_IN_CALL_NOTE = "（閉じていない括弧の中の「=」の書き方のため 低）"
 
 
 def _name_label_code_shape(text: str, h: Hit) -> str:
     """「氏名の見出し語＋名前」が「=」で区切った形のとき、コードの代入・引数らしさを返す。
 
-    - "drop": 値の後ろがコードの続き。引用符で始まったのに値の直後で閉じない（`名前 = "営業利益÷総資産"`）か、
-      引用符の無い値の直後が「[」「(」「.」（`名前 = 有効["holder_name"]`・`名前 = 表.列`）。人の名前ならそこで終わる
-    - "low": 閉じていない「(」の中（関数の引数 `_成績(日次, 名前="ベンチ")`）。ログの `更新(氏名=山田太郎)` もこの形なので
-      落とさずに確度 低 で残す
-    - "": 「=」の形でないか、上のどれでもない（`氏名="鈴木一郎"`・`氏名=鈴木一郎`）
-    「:」の形（JSON の `"氏名": "山田 太郎（営業部）"`）は値の後ろに説明が続くことがあるので見ない。
+    - "drop": 値の後ろが、人の名前の後ろには来ないコードの続き。演算子（`名前 = "営業利益÷総資産"`・
+      `名前 = 営業利益 * 2`）・引用符か数字で始まる添字（`名前 = 有効["holder_name"]`）・英字のメソッド
+      （`名前 = 表示.fillna("")`）。引用符で囲んだ値は、閉じた後ろ（`"山田太郎".strip()`）は見ない
+    - "low": 閉じていない「(」の中（前 _CALL_LOOKBACK 字を括弧の深さで遡る。関数の引数 `_成績(日次, 名前="ベンチ")`）。
+      ログの `更新(氏名=山田太郎)` もこの形なので、落とさずに確度 低 で残す
+    - "": 「=」の形でないか、上のどれでもない（`氏名="鈴木一郎"`・`氏名=山田太郎(営業部)`）
+    「:」の形（JSON の `"氏名": "山田 太郎（営業部）"`）は見ない。
     """
     i = h.start
     quote = ""
@@ -1720,9 +1723,19 @@ def _name_label_code_shape(text: str, h: Hit) -> str:
         i -= 1
     if i == 0 or text[i - 1] != "=":
         return ""
-    after = text[h.end : h.end + 1]
-    if (quote and after != quote) or (not quote and after in _CODE_AFTER_VALUE):
+    j = h.end
+    if not quote:
+        while j < len(text) and text[j] in " \t":
+            j += 1
+    after = text[j : j + 1]
+    if after and after in _CODE_OPERATORS:
         return "drop"
+    if not quote and j == h.end and after in ("[", "."):
+        nxt = text[j + 1 : j + 2]
+        if (after == "[" and nxt and (nxt in "\"'" or nxt.isdigit())) or (
+            after == "." and nxt and nxt.isascii() and (nxt.isalpha() or nxt == "_")
+        ):
+            return "drop"
     depth = 0
     for c in reversed(text[max(0, i - 1 - _CALL_LOOKBACK) : i - 1]):
         if c in ")]}":

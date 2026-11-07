@@ -81,15 +81,41 @@ def test_not_found(text):
     [
         # コードの日本語の変数への代入。値の後ろがコードの続き（人の名前ならそこで終わる）
         '名前 = 有効["holder_name"].fillna("")',
-        "名前 = 表示.列",
-        "名前 = 集計(日次)",
+        '名前 = 表示.fillna("")',
+        "名前 = 有効[0]",
         '名前 = "営業利益÷総資産 上位20%"',
         "名前 = '佐藤花子の÷'",
+        "名前 = 営業利益 * 2",
+        "名前 = 営業利益×総資産",
     ],
 )
-def test_name_label_code_assignment_dropped(text):
+@pytest.mark.parametrize("rust", [True, False])
+def test_name_label_code_assignment_dropped(text, rust, monkeypatch):
+    monkeypatch.setattr(detectors, "_short_cache", {})  # 覚え書きに残った前の回の結果を返さない
+    if not rust:
+        monkeypatch.setattr(detectors, "_RUST", None)
     got = {k for k in _found(text) if k[0] == "name"}
     assert not got, got
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        # 人の名前の後ろにも来る形は、「=」の書き方でも今までどおり 中（落とさない）
+        ('氏名="山田太郎（営業部）"', "山田太郎"),
+        ("氏名=山田太郎(営業部)", "山田太郎"),
+        ('氏名="ジョン・スミス"', "ジョン"),
+        ('氏名="山田太郎 Taro"', "山田太郎"),
+        ("氏名=山田 太郎.", "山田 太郎"),
+        ("氏名=山田太郎[営業]", "山田太郎"),
+        ("氏名=山田太郎<br>", "山田太郎"),
+        ("氏名=山田太郎/営業", "山田太郎"),
+        ('氏名="山田太郎', "山田太郎"),  # 途中で切れた値
+        ("氏名=山田太郎", "山田太郎"),  # 本文の末尾
+    ],
+)
+def test_name_label_equals_real_names_kept(text, value):
+    assert ("name", "medium", value) in _found(text), _found(text)
 
 
 @pytest.mark.parametrize(
@@ -99,9 +125,15 @@ def test_name_label_code_assignment_dropped(text):
         ('ベンチ = _成績(日次, 名前="ベンチ")', "ベンチ"),
         ("記録 = 判定(\n    名前=表示名,\n    詳細={},\n)", "表示名"),
         ("更新(氏名=山田太郎, 年齢=40)", "山田太郎"),
+        ("（氏名=山田太郎）", "山田太郎"),  # 全角の括弧も正規化で半角になる
+        ("x = f(\n" + "a, " * 60 + "名前=表示名)", "表示名"),  # 括弧が改行をまたいで前 200 字の中
     ],
 )
-def test_name_label_in_call_is_low(text, value):
+@pytest.mark.parametrize("rust", [True, False])
+def test_name_label_in_call_is_low(text, value, rust, monkeypatch):
+    monkeypatch.setattr(detectors, "_short_cache", {})
+    if not rust:
+        monkeypatch.setattr(detectors, "_RUST", None)
     got = [h for h in detectors.detect(detectors.normalize(text), None) if h.pii_type == "name" and h.value == value]
     assert got and all(h.confidence.value == "low" for h in got), got
     assert any(h.rule.endswith(detectors.NAME_IN_CALL_NOTE) for h in got), got
@@ -114,6 +146,8 @@ def test_name_label_in_call_is_low(text, value):
         ('(備考) 氏名="鈴木一郎"', "鈴木一郎"),
         ("[会員]\n氏名=鈴木一郎\n", "鈴木一郎"),
         ('<input 氏名="鈴木一郎" />', "鈴木一郎"),
+        ("f(" + "a, " * 70 + "\n氏名=鈴木一郎", "鈴木一郎"),  # 括弧が前 200 字より遠い
+        ("x = [f(a), 氏名=鈴木一郎]", "鈴木一郎"),  # 近いのは「[」
         # 「:」の形は値の後ろに説明が続いても見ない
         ('{"氏名": "山田 太郎（営業部）"}', "山田 太郎"),
     ],

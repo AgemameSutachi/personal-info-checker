@@ -180,7 +180,8 @@ def _sevenzip_run(exe: str, args: list[str], cwd: str | None = None) -> tuple[in
 def _need_sevenzip(env: ArchiveEnv, why: str) -> str:
     if not env.sevenzip:
         raise RemedyError(
-            f"{why}には 7-Zip（7z.exe）が要りますが、見つかりません（設定で 7z.exe の場所を指定してください）"
+            f"{why}には 7-Zip（7z.exe）が要りますが、見つかりません（7-Zip を Program Files に入れてから、"
+            "もう一度実行してください。コマンドの版で検査したジョブは、検査のときに --sevenzip で指定した場所も探します）"
         )
     return env.sevenzip
 

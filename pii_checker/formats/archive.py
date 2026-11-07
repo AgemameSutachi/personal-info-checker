@@ -40,6 +40,10 @@ SUPPORTED_ZIP_METHODS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED, zipfile.ZIP_B
 CREATE_NO_WINDOW = 0x08000000
 
 
+# 7z.exe が見つからないときの次の手。画面・Web の版には 7z.exe の場所の設定が無く、指定できるのはコマンドの版の --sevenzip だけ
+SEVENZIP_HINT = "7-Zip を Program Files に入れてから再検査する。コマンドの版は --sevenzip で 7z.exe の場所も指定できる"
+
+
 def find_7z(configured: str | None) -> str | None:
     """7z.exe を探す（設定 → 実行ファイルの隣 → Program Files → PATH）。"""
     candidates = []
@@ -432,8 +436,7 @@ def handle_with_7z_exe(
         if blob.head(6) == b"7z\xbc\xaf\x27\x1c":
             return _handle_7z_python(ctx, blob, item, col, depth)
         raise Uncheckable(
-            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない"
-            "（7-Zip を入れるか、設定で 7z.exe の場所を指定して再検査）"
+            f"{item.kind or 'このアーカイブ'}の展開には 7-Zip（7z.exe）が要るが見つからない" f"（{SEVENZIP_HINT}）"
         )
     path = ctx.blob_as_path(blob)
     common = ["-sccUTF-8", "-scsUTF-8"]
@@ -630,7 +633,7 @@ def handle_disk_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
     exe = find_7z(ctx.options.sevenzip)
     try:
         if not exe:
-            raise Uncheckable("ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない")
+            raise Uncheckable(f"ディスクイメージの展開には 7-Zip（7z.exe）が要るが見つからない（{SEVENZIP_HINT}）")
         handle_with_7z_exe(ctx, blob, item, col, depth, kind="image")
         item.notes.append(
             "ファイルシステムの中のファイルを検査した（削除済みファイル・未使用領域は対象外。必要なら「イメージの未使用領域も走査」を有効に）"

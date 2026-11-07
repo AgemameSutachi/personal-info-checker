@@ -212,6 +212,21 @@ def test_7zip_extract_nothing(tmp_path, monkeypatch):
     assert "7-Zip の出力: ERROR: Data Error" in reason, reason
 
 
+def test_7zip_extract_nothing_without_output(tmp_path, monkeypatch):
+    """7-Zip が何も出力しなかったときは、中身の無い（詳細: ）を付けない。"""
+    monkeypatch.setattr(
+        archive, "_run_7z", lambda exe, args, timeout=3600: subprocess.CompletedProcess(args, 2, b"", b"")
+    )
+    ctx = _fake_7z_ctx(tmp_path, [])
+    with pytest.raises(Uncheckable) as e:
+        archive._extract_all_and_scan(
+            ctx, "7z.exe", "a.7z", SimpleNamespace(display="a.7z"), SimpleNamespace(method=""), 0, [], None
+        )
+    assert (
+        str(e.value) == "7-Zip で展開しても中身が出てこなかった（壊れている可能性）。元のファイルを取り直してください"
+    )
+
+
 def test_7zip_error_after_partial_extract(tmp_path, monkeypatch):
     """取り出せた分を検査した後で 7-Zip がエラーを返したときも、取り直す手を先に出す。"""
 

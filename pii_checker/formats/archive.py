@@ -592,6 +592,12 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
     pw = header_pw or NO_PASSWORD
     r = _run_7z(exe, ["x", "-y", f"-o{outdir}", f"-p{pw}"] + common + [path])
     out = _decode_7z(r.stdout) + _decode_7z(r.stderr)
+
+    def detail(limit: int) -> str:
+        # 7-Zip が何も出力しなかったときは、中身の無い（詳細: ）を付けない
+        tail = out.strip()[-limit:]
+        return f"（詳細: 7-Zip の出力: {tail}）" if tail else ""
+
     files = []
     for dirpath, _dirs, names in os.walk(outdir):
         for n in names:
@@ -600,8 +606,7 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
         if any(m in out for m in WRONG_PW_MARKERS):
             raise NeedPassword("archive", _pw_reason(ctx, "暗号化されている"))
         raise Uncheckable(
-            "7-Zip で展開しても中身が出てこなかった（壊れている可能性）。元のファイルを取り直してください"
-            f"（詳細: 7-Zip の出力: {out.strip()[-300:]}）"
+            "7-Zip で展開しても中身が出てこなかった（壊れている可能性）。元のファイルを取り直してください" + detail(300)
         )
     item.method = f"7-Zip で丸ごと展開（{len(files)}件）"
     for f in sorted(files):
@@ -613,7 +618,7 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
 
         raise PartialScan(
             "7-Zip がエラーを返した（取り出せた分は検査した。取り出せなかった中身がある可能性）。"
-            f"残りも見るには元のファイルを取り直してください（詳細: 7-Zip の出力: {out.strip()[-200:]}）"
+            "残りも見るには元のファイルを取り直してください" + detail(200)
         )
 
 
@@ -753,7 +758,8 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
     ):
         raise NeedPassword("archive", _pw_reason(ctx, "7z アーカイブが暗号化されている"))
     raise Uncheckable(
-        f"7z を展開できなかった（7-Zip を入れると読める可能性）。{SEVENZIP_HINT}"
+        f"7z を展開できなかった（7-Zip を入れると読める可能性）。{SEVENZIP_HINT}。"
+        "それでも開けなければ元のファイルを取り直してください"
         f"（詳細: {type(last_err).__name__}: {last_err}）"
     )
 

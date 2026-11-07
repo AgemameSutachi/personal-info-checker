@@ -973,7 +973,7 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
     if not ctx.options.ocr:
         raise Uncheckable(f"OCR を無効にして実行したため画像の中の文字を検査していない（要目視。{OCR_OFF_HINT}）")
     if not ocr.is_available():
-        raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}")
+        raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）。{ocr.unavailable_reason()}")
     try:
         text = ocr.ocr_image_bytes(data)
     except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）
@@ -1006,7 +1006,7 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
     if not ocr.is_available():
         raise Uncheckable(
             "OCR が使えないため画像（JPEG XR）の中の文字を検査できない（要目視。JPEG XR は Windows の部品で開くため、"
-            f"OCR が使えないと開けない）: {ocr.unavailable_reason()}"
+            f"OCR が使えないと開けない）。{ocr.unavailable_reason()}"
         )
     try:
         img = ocr.open_with_wic(data)
@@ -1071,7 +1071,7 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
         )
     if not ocr.is_available():
         raise Uncheckable(
-            f"OCR が使えないため画像（HEIC/AVIF）の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}"
+            f"OCR が使えないため画像（HEIC/AVIF）の中の文字を検査できない（要目視）。{ocr.unavailable_reason()}"
         )
     data = blob.read_all()
     how = "Windows の部品"

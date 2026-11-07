@@ -251,7 +251,10 @@ def handle_parquet(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
         item.notes.append(f"文字として読めなかったバイト列の値が {cell.unreadable} 件あった（中身は検査していない）")
     if broken:
         lost = sum(n for _, n, _ in broken)
-        why = f"（壊れている・暗号化されている・未対応の圧縮の可能性）: {broken[0][2]}"
+        why = (
+            "（壊れている・暗号化されている・未対応の圧縮の可能性）。作ったアプリ（pandas・Spark 等）で読めるなら、"
+            f"CSV に書き出した写しを検査してください（詳細: {broken[0][2]}）"
+        )
         if lost >= total_rows:
             raise Uncheckable(f"parquet の表の行を1行も読めなかった{why}")
         raise PartialScan(

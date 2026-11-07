@@ -1,24 +1,26 @@
-"""形式ごとの検査不能の理由の試験の続き（tar・SQLite・dBase・メールの部品・PDF の添付・実行器）。
+"""形式ごとの検査不能の理由の試験の続き（tar・7z・SQLite・dBase・parquet・メールの部品・PDF の添付・実行器）。
 
 test_reason_detail_formats.py では壊れたファイルを作りやすい形式だけを確かめた。ここでは、壊れ方を
-ファイルで作りにくい所（tar を開く・取り出す、メールの部品の復号、PDF の添付の取り出し、
-実行器が受けた想定外のエラー）を、ライブラリの呼び出しを差し替えて確かめる。
+ファイルで作りにくい所（tar を開く・取り出す、7-Zip・py7zr の失敗、メールの部品の復号、PDF の添付の
+取り出し、実行器が受けた想定外のエラー）を、ライブラリの呼び出しを差し替えて確かめる。
 """
 
 from __future__ import annotations
 
 import email.message
 import io
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_checker import runner  # noqa: E402
-from pii_checker.engine import UNEXPECTED_HINT, scan_file  # noqa: E402
+from pii_checker.engine import UNEXPECTED_HINT, PartialScan, Uncheckable, scan_file  # noqa: E402
 from pii_checker.formats import archive  # noqa: E402
 from pii_checker.models import ScanOptions, Status  # noqa: E402
 from pii_checker.store import Store  # noqa: E402
@@ -177,3 +179,111 @@ def test_runner_unexpected_error(tmp_path, monkeypatch):
     assert len(saved) == 1, saved
     _assert_detail_last(saved[0], "読み取りの途中で想定外のエラーになり、検査できなかった（要目視）。", UNEXPECTED_HINT)
     assert "ValueError: boom" in saved[0], saved[0]
+
+
+def _fake_7z_ctx(tmp_path, scanned: list):
+    """7-Zip で丸ごと展開する経路の試験に要る分だけの ScanContext の代わり。"""
+    out = tmp_path / "out"
+
+    def new_tmp_subdir():
+        out.mkdir(exist_ok=True)
+        return str(out)
+
+    return SimpleNamespace(
+        new_tmp_subdir=new_tmp_subdir,
+        scan_nested=lambda display, **kw: scanned.append(display),
+        password_candidates=lambda: [],
+    )
+
+
+def test_7zip_extract_nothing(tmp_path, monkeypatch):
+    """7-Zip で展開しても何も出てこないときは、取り直す手を先に出し、7-Zip の出力は詳細へ回す。"""
+    monkeypatch.setattr(
+        archive,
+        "_run_7z",
+        lambda exe, args, timeout=3600: subprocess.CompletedProcess(args, 2, b"", b"ERROR: Data Error"),
+    )
+    ctx = _fake_7z_ctx(tmp_path, [])
+    blob = SimpleNamespace(display="a.7z")
+    with pytest.raises(Uncheckable) as e:
+        archive._extract_all_and_scan(ctx, "7z.exe", "a.7z", blob, SimpleNamespace(method=""), 0, [], None)
+    reason = str(e.value)
+    _assert_detail_last(reason, "7-Zip で展開しても中身が出てこなかった（壊れている可能性）。", "取り直してください")
+    assert "7-Zip の出力: ERROR: Data Error" in reason, reason
+
+
+def test_7zip_error_after_partial_extract(tmp_path, monkeypatch):
+    """取り出せた分を検査した後で 7-Zip がエラーを返したときも、取り直す手を先に出す。"""
+
+    def run_7z(exe, args, timeout=3600):
+        outdir = next(a[2:] for a in args if a.startswith("-o"))
+        Path(outdir, "list.csv").write_bytes(b"a,b\n")
+        return subprocess.CompletedProcess(args, 2, b"", b"ERROR: CRC Failed : rest.csv")
+
+    monkeypatch.setattr(archive, "_run_7z", run_7z)
+    scanned: list = []
+    ctx = _fake_7z_ctx(tmp_path, scanned)
+    blob = SimpleNamespace(display="a.7z")
+    item = SimpleNamespace(method="")
+    with pytest.raises(PartialScan) as e:
+        archive._extract_all_and_scan(ctx, "7z.exe", "a.7z", blob, item, 0, [], None)
+    assert scanned == ["a.7z!list.csv"], scanned
+    _assert_detail_last(
+        str(e.value),
+        "7-Zip がエラーを返した（取り出せた分は検査した。",
+        "残りも見るには元のファイルを取り直してください",
+    )
+    assert "CRC Failed" in str(e.value), str(e.value)
+
+
+def test_py7zr_fallback_failed(tmp_path, monkeypatch):
+    """7-Zip が無く py7zr でも展開できないときは、7-Zip の入れ方を先に出し、型と文は詳細へ回す。"""
+    py7zr = pytest.importorskip("py7zr")
+
+    def broken(*args, **kwargs):
+        raise NotImplementedError("unsupported filter")
+
+    monkeypatch.setattr(py7zr, "SevenZipFile", broken)
+    ctx = SimpleNamespace(password_candidates=lambda: [])
+    blob = SimpleNamespace(display="a.7z", open=lambda: io.BytesIO(b""))
+    with pytest.raises(Uncheckable) as e:
+        archive._handle_7z_python(ctx, blob, SimpleNamespace(method=""), None, 0)
+    reason = str(e.value)
+    _assert_detail_last(reason, "7z を展開できなかった（7-Zip を入れると読める可能性）。", archive.SEVENZIP_HINT)
+    assert "NotImplementedError: unsupported filter" in reason, reason
+
+
+def test_parquet_row_groups_broken(tmp_path):
+    """行のまとまりが読めない parquet は、CSV に書き出した写しを検査する手を先に出し、生の文は詳細へ回す。"""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    p = tmp_path / "t.parquet"
+    pq.write_table(pa.table({"name": ["山田太郎", "佐藤花子"], "tel": ["090-1234-5678", "080-1111-2222"]}), str(p))
+    data = bytearray(p.read_bytes())
+    md = pq.ParquetFile(str(p)).metadata
+    for j in range(md.num_columns):
+        start = md.row_group(0).column(j).data_page_offset
+        data[start : start + 32] = b"\xff" * 32
+    p.write_bytes(bytes(data))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
+    _assert_detail_last(
+        item.reason, "parquet の表の行を1行も読めなかった（壊れている・", "CSV に書き出した写しを検査してください"
+    )
+
+
+def test_ocr_unavailable_reason_is_joined_with_period(tmp_path, monkeypatch):
+    """OCR が使えないときの理由は「（要目視）。」で次の手（入れ方）へつなぎ、「）: 」で付けない。"""
+    from PIL import Image
+
+    from pii_checker import ocr
+
+    monkeypatch.setattr(ocr, "is_available", lambda: False)
+    monkeypatch.setattr(ocr, "unavailable_reason", lambda: "日本語の OCR 認識器を入れてください。")
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 300), "white").save(buf, "PNG")
+    item = _scan(tmp_path, "scan.png", buf.getvalue())[0]
+    assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
+    assert item.reason == (
+        "OCR が使えないため画像の中の文字を検査できない（要目視）。日本語の OCR 認識器を入れてください。"
+    ), item.reason

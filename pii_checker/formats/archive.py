@@ -599,7 +599,10 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
     if not files:
         if any(m in out for m in WRONG_PW_MARKERS):
             raise NeedPassword("archive", _pw_reason(ctx, "暗号化されている"))
-        raise Uncheckable(f"7-Zip で展開しても中身が出てこなかった: {out.strip()[-300:]}")
+        raise Uncheckable(
+            "7-Zip で展開しても中身が出てこなかった（壊れている可能性）。元のファイルを取り直してください"
+            f"（詳細: 7-Zip の出力: {out.strip()[-300:]}）"
+        )
     item.method = f"7-Zip で丸ごと展開（{len(files)}件）"
     for f in sorted(files):
         rel = os.path.relpath(f, outdir).replace(os.sep, "/")
@@ -609,7 +612,8 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
         from ..engine import PartialScan
 
         raise PartialScan(
-            f"7-Zip がエラーを返した（取り出せた分は検査した。取り出せなかった中身がある可能性）: {out.strip()[-200:]}"
+            "7-Zip がエラーを返した（取り出せた分は検査した。取り出せなかった中身がある可能性）。"
+            f"残りも見るには元のファイルを取り直してください（詳細: 7-Zip の出力: {out.strip()[-200:]}）"
         )
 
 
@@ -748,7 +752,10 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
         "CrcError",
     ):
         raise NeedPassword("archive", _pw_reason(ctx, "7z アーカイブが暗号化されている"))
-    raise Uncheckable(f"7z を展開できなかった（7-Zip を入れると読める可能性）: {last_err}")
+    raise Uncheckable(
+        f"7z を展開できなかった（7-Zip を入れると読める可能性）。{SEVENZIP_HINT}"
+        f"（詳細: {type(last_err).__name__}: {last_err}）"
+    )
 
 
 def handle_7z(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:

@@ -53,7 +53,7 @@ def utf16_without_bom(sample: bytes) -> str | None:
       （Python の .pyc）を UTF-16 と誤らないための見分け
     - 改行の文字（U+000A）がある
     - かな・漢字・日本語の句読点（_RE_JA_CHAR）が UTF16_STRICT_JA_RATIO 以上
-    UTF-8 として読めるもの（ASCII だけの文を含む）は UTF-16 にしない。
+    UTF-8 として読めるもの（ASCII だけの文を含む）と、両方の向きで通るもの（向きを決められない）は UTF-16 にしない。
     """
     sample = sample[:UTF16_STRICT_SAMPLE]
     n = len(sample) - len(sample) % 2
@@ -64,6 +64,7 @@ def utf16_without_bom(sample: bytes) -> str | None:
     if max(ratios.values()) < UTF16_STRICT_RATIO:
         return None  # バイナリの大半はここで終わる
     kana = {enc: len(_RE_KANA.findall(t)) / len(t) for enc, t in texts.items()}
+    found = []
     for enc, other in (("utf-16-le", "utf-16-be"), ("utf-16-be", "utf-16-le")):
         text = texts[enc]
         if ratios[enc] < UTF16_STRICT_RATIO or "\n" not in text:
@@ -74,8 +75,10 @@ def utf16_without_bom(sample: bytes) -> str | None:
         if ratios[other] >= UTF16_STRICT_SWAPPED_RATIO and not hiragana_text:
             continue
         if len(_RE_JA_CHAR.findall(text)) >= len(text) * UTF16_STRICT_JA_RATIO:
-            return enc
-    return None
+            found.append(enc)
+    # 両方の向きで通るもの（40〜60字ほどの短い文で起きる）は向きを決められないので、取り違えて化けたまま
+    # 「検査済み」にせず、今までどおり簡易検査に回す
+    return found[0] if len(found) == 1 else None
 
 
 def decode_text(data: bytes) -> tuple[str, str]:

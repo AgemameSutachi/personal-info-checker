@@ -82,6 +82,18 @@ def test_pyc_is_not_text():
     assert not sniff._looks_like_text(data[:8192])
 
 
+def test_both_orientations_passing_is_not_decided(monkeypatch):
+    """両方の向きで通るものは向きを決めない（取り違えて化けたまま検査済みにしない）。閾値を緩めて両方を通す。"""
+    data = JA_ONLY.encode("utf-16-le")
+    monkeypatch.setattr(textdecode, "UTF16_STRICT_RATIO", 0.0)
+    monkeypatch.setattr(textdecode, "UTF16_STRICT_SWAPPED_RATIO", 2.0)
+    monkeypatch.setattr(textdecode, "UTF16_STRICT_JA_RATIO", 0.0)
+    # 片方の向きにだけ改行の文字があれば、その向きに決まる
+    assert textdecode.utf16_without_bom(data) == "utf-16-le"
+    # 逆の向き（ビッグエンディアン）にも改行の文字を足すと、両方で通るので決めない
+    assert textdecode.utf16_without_bom(data + "\n".encode("utf-16-be")) is None
+
+
 def test_single_line_without_newline_is_not_utf16():
     """改行の文字が1つも無いものは、この見分けでは UTF-16 にしない（バイナリと誤らない側に倒す）。"""
     assert textdecode.utf16_without_bom(JA_ONLY.replace("\r\n", "　").encode("utf-16-le")) is None

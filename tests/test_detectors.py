@@ -1167,6 +1167,53 @@ def test_diners_card_prefix():
     assert types_of("カード番号 30569309025904") == {"credit_card": "high"}
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "INFO job=1 id=36227206271667 size=5",
+        '{"id": "4111111111111111"}',
+        "user_id=4111111111111111",
+        "request-id: 4111111111111111",
+        "trace.ID=4111111111111111",
+        "userId=4111111111111111",
+        "sessionID:'4111111111111111'",
+        "Id=4111111111111111",
+        "ログ: id=4111111111111111",  # キーの前が空白で、その前の日本語との間に区切りがある
+        "処理完了 id=4111111111111111",
+        "【ログ】id=4111111111111111",
+        "RequestId=4111111111111111",
+        "UserID: 4111111111111111",
+    ],
+)
+def test_card_shape_after_id_key_is_low(text):
+    """値のすぐ前が ID の項目のキー（id=・"id":・user_id・userId）なら、識別番号とみなしてカード番号を 低 にする。"""
+    assert _conf_of(text, "credit_card") == ["low"]
+    assert any("ID の項目のキー" in h.rule for h in detect(normalize(text), None))
+
+
+@pytest.mark.parametrize(
+    "text, conf",
+    [
+        ("id 4111111111111111", "medium"),  # 区切りの「=」「:」が無い
+        ("paid=4111111111111111", "medium"),  # 英単語の末尾の id
+        ("valid: 4111111111111111", "medium"),
+        ("ids=4111111111111111", "medium"),
+        ("uuid=4111111111111111", "medium"),
+        ("会員ID: 4111111111111111", "medium"),  # 日本語の項目名の ID はカード番号を書く欄でもある
+        ("支払いID: 4111111111111111", "medium"),
+        ("会員ＩＤ：4111111111111111", "medium"),  # 全角（normalize で半角になる）
+        ("id=\n4111111111111111", "medium"),  # キーと値の間に改行
+        ("id=x 4111111111111111", "medium"),  # キーの値はほかにあり、カードの形はその後ろ
+        ("card_id=4111111111111111", "high"),  # カードの語が先
+        ("id=4111 1111 1111 1111", "high"),  # 4桁ずつの区切りは識別番号の書き方でない
+        ("4111111111111111", "medium"),  # 陽性対照
+    ],
+)
+def test_card_shape_without_id_key_is_unchanged(text, conf):
+    """ID のキーでないもの・カードの語や4桁の区切りがあるものは今までどおり。"""
+    assert _conf_of(text, "credit_card") == [conf]
+
+
 def test_mask_value_of_blank_is_blank():
     assert mask_value("phone", "   ") == ""
 

@@ -28,6 +28,7 @@ from ..engine import (
     ScanContext,
     Uncheckable,
     long_path,
+    size_text,
 )
 from .. import safeio
 from ..models import Status
@@ -597,7 +598,8 @@ def _check_bomb(ctx: ScanContext, total: int, archive_size: int) -> None:
     """展開後の大きさが異常に大きいもの（zip 爆弾）を打ち切る。OS イメージのような正当な巨大さは通す。"""
     if ctx.expanded_bytes + total > ctx.options.max_expand_bytes:
         raise Uncheckable(
-            f"展開後の合計（{total / 1024**3:.1f}GB）が上限を超えるため打ち切り（上限は設定で変えられる）"
+            f"展開後の合計（{size_text(total)}）が上限（{size_text(ctx.options.max_expand_bytes)}）を超えるため打ち切り"
+            "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
         )
     if total > 10 * 1024**3 and archive_size > 0 and total / archive_size > ctx.options.max_expand_ratio:
         raise Uncheckable(
@@ -684,7 +686,10 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
                 infos = [i for i in z.list() if not i.is_directory]
                 total = sum(i.uncompressed or 0 for i in infos)
                 if ctx.expanded_bytes + total > ctx.options.max_expand_bytes:
-                    raise Uncheckable("展開後の合計が上限を超えるため打ち切り（zip 爆弾の疑い）")
+                    raise Uncheckable(
+                        f"展開後の合計（{size_text(total)}）が上限（{size_text(ctx.options.max_expand_bytes)}）"
+                        "を超えるため打ち切り（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
+                    )
                 outdir = ctx.new_tmp_subdir()
                 z.extractall(path=outdir)
             item.method = f"py7zr で展開（{len(infos)}件）"
@@ -968,7 +973,10 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
             if written % (256 * 1024**2) < len(chunk):  # 256MB ごとに一時フォルダの空きを確かめる
                 ctx.ensure_space(256 * 1024**2, "展開の途中で")
             if ctx.expanded_bytes + written > ctx.options.max_expand_bytes:
-                raise Uncheckable("展開後の大きさが上限を超えたため打ち切り（圧縮爆弾の疑い）")
+                raise Uncheckable(
+                    f"展開後の大きさが上限（{size_text(ctx.options.max_expand_bytes)}）を超えたため打ち切り"
+                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してからそのフォルダを検査してください）"
+                )
             if written > 10 * 1024**3 and written / max(1, blob.size) > ctx.options.max_expand_ratio:
                 raise Uncheckable(
                     f"圧縮率が異常（{written / max(1, blob.size):.0f}倍）のため打ち切り（圧縮爆弾の疑い）"

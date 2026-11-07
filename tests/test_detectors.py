@@ -1095,6 +1095,64 @@ def test_surname_with_honorific_still_found(text):
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "楽天 約3,600円・松井 約12,600円",  # 証券会社の名前の後の「約」（2026-11-07・株のデータの報告）
+        "楽天 当選 33（14.2%）／松井 当選 50（21.5%）",
+        "Russell/野村 総合バリュー（配当込み）",
+        "[松井 手数料](https://example.com/)",
+        "マネックス 通常 0.1%・松井 最低 0.2%",
+    ],
+)
+def test_surname_then_common_word_is_not_name(text):
+    assert "name" not in types_of(text)
+
+
+@pytest.mark.parametrize("text", ["渡辺　勉 9 / 山田　直樹 4", "担当: 松井 実", "佐藤 計子"])
+def test_surname_then_given_name_still_found(text):
+    # 1字の名（勉・実）と、一般の語で始まるだけの名（計子）は残す
+    assert "name" in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "名前: 戦略の名前。",  # 関数の引数の説明（2026-11-07・株のデータの台本の docstring）
+        "名前: 報告に出す名前。省略すると関数名。",
+        "名前: 表示用の名前。",
+    ],
+)
+def test_name_label_followed_by_description_is_not_name(text):
+    assert "name" not in types_of(text)
+
+
+def test_name_label_with_real_name_still_found():
+    assert "name" in types_of("名前: 鬼瓦権左衛門")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "株式会社サンプル",
+        "サンプルホールディングス",
+        "(株)サンプル",
+        "㈱サンプル",
+        "サンプル銀行",
+        "Sample Holdings Inc.",
+    ],
+)
+def test_company_in_name_column_is_not_name(value):
+    # 株の表の英語の見出し「name」の列の銘柄名（2026-11-07）。法人格・会社の語のある値は会社名
+    assert "name" not in types_of(value, header="name")
+
+
+@pytest.mark.parametrize("value", ["株式会社サンプル 山田様", "鬼瓦 権左衛門", "Taro Yamada", "証田 太郎"])
+def test_person_in_name_column_still_found(value):
+    # 敬称つきの担当者・法人格の無い名前は残す（「証田」は語の「証券」でないので当たらない）
+    assert "name" in types_of(value, header="name")
+
+
+@pytest.mark.parametrize(
     "text, absent",
     [
         ("口座残高 1234567円", "bank_account"),  # 口座の語の後ろが金額

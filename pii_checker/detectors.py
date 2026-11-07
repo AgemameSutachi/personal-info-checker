@@ -628,6 +628,12 @@ _RE_ISO_DATE_HEAD = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _RE_DATE_SERIAL = re.compile(r"[0-9]{4,5}(\.0+)?")
 _RE_PLAIN_NUMBER = re.compile(r"[0-9]{1,9}(\.[0-9]+)?")
 _RE_AT_WORD = re.compile(r"[\[(（]\s*at\s*[\])）]|\sat\s|アットマーク", re.I)
+# プログラムの識別子・コードの断片（見出しが住所・氏名の列に入っていても、人の住所・名前ではない）。ASCII の値だけに使う。
+# 空白の無い語で、こぶ（小文字の後の大文字）が2つ以上の AddressBookType・「_」でつないだ user_name・a.b.c の形。
+# こぶ1つの McDonald・DeVito は名前にあるので外さない
+_RE_IDENT_WORD = re.compile(r"(?:\w*[a-z][A-Z]){2}\w*|\w*[A-Za-z0-9]_[A-Za-z0-9]\w*|\w+\.\w+\.\w+")
+# 文の記号（=・;・{}・::・->・識別子のすぐ後の括弧）か、引用符・括弧で始まる断片
+_RE_CODE_MARK = re.compile(r"[=;{}]|::|->|\w\(|^['\"(\[<]")
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -639,6 +645,8 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         return None
     if len(v) <= 12 and not cannot_be_header(v) and header_category(v) is not None:
         return None  # 「住所」「電話」などの見出し語そのもの（横持ちの表の項目名）は値ではない
+    if category in ("address", "name") and v.isascii() and (_RE_IDENT_WORD.fullmatch(v) or _RE_CODE_MARK.search(v)):
+        return None  # コードを表として読んだときの識別子・文の断片は、住所・名前ではない
     conf = Confidence.MEDIUM
     digits = _RE_NON_DIGIT.sub("", v)
     if category == "name":

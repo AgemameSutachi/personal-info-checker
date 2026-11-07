@@ -633,16 +633,18 @@ _RE_AT_WORD = re.compile(r"[\[(（]\s*at\s*[\])）]|\sat\s|アットマーク", 
 # 形だけでは外さず、次の2つに限る:
 # (1) 空白の無い語を、こぶ（小文字の後の大文字）か「_」で語に割ったとき、2つ目より後ろにプログラムでよく使う語がある
 #     （AddressBookType の Type・ContactAddressIndex の Index・user_name の name）。人の名前・地名にこの語はまず続かない
-# (2) 文の記号: 「=」・「{」「}」・「::」・「->」・メソッドの呼び出し（.split( の形）・引数の無い呼び出し（getName()）・
-#     文字列を渡す呼び出し（split('=' の形）
+# (2) 文の記号: 「=」・「{」「}」・「::」・「->」・小文字で始まる識別子のメソッドの呼び出し（cookie_pair.split( の形）・
+#     引数の無い呼び出し（getName()）。「;」・括弧の注記・引用符で始まる値・a.b.c の形だけでは外さない
 _RE_IDENT_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+")
 _RE_IDENT_PART = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 _CODE_WORDS = frozenset(
     "type types index idx id ids name names address addr properties property props flag flags info data list map set "
-    "get value values count kind mode status format class enum book field fields key keys code str num obj ptr ref "
+    # 姓にもある語（Key・Field・Book・Count など）は入れない（Anna_Field・JohnKey を落とさないため）
+    "get value values kind mode status format class enum keys code str num obj ptr ref "
     "handler callback config options param params attr attrs item items node table row col column entry".split()
 )
-_RE_CODE_MARK = re.compile(r"[={}]|::|->|\.\w+\(|\w\(\s*\)|\w\(\s*['\"]")
+# 呼び出しは小文字で始まる識別子に限る（Apt.3B(2F)・Bldg.A(3F)・Mr.Smith(Jr)・Smith() は住所・名前の書き方）
+_RE_CODE_MARK = re.compile(r"[={}]|::|->|[a-z_]\w*\.[a-z_]\w*\(|(?<![\w.])[a-z_]\w*\(\s*\)")
 
 
 def _looks_like_code(v: str) -> bool:

@@ -62,6 +62,16 @@ def test_code_like_values_not_header_hits(header, value):
         ("Address", "Oak St.; Apt 4", "address"),
         ("Address", "Apt.3B.2F", "address"),
         ("Address", "[Tokyo]", "address"),
+        ("Address", "Apt.3B(2F)", "address"),
+        ("Address", "Bldg.A(3F)", "address"),
+        ("Address", 'Hotel Tokyo("East")', "address"),
+        ("Name", "Mr.Smith(Jr)", "name"),
+        ("Name", "Smith()", "name"),
+        # 姓にもある語でつないだもの
+        ("Name", "Anna_Field", "name"),
+        ("Name", "JohnKey", "name"),
+        ("Name", "Jean_Book", "name"),
+        ("Name", "AnnaFields", "name"),
     ],
 )
 def test_real_values_still_header_hits(header, value, kind):

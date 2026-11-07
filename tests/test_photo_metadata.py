@@ -200,7 +200,7 @@ def test_xmp_and_exif_with_same_value_are_counted_once(tmp_path):
     p.write_bytes(_jpeg_with_xmp(_xmp_packet("氏名 山田太郎"), exif, size=(16, 16)))
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
     names = [f.location for f in item.findings if f.pii_type == "name"]
-    assert names == ["EXIF 作成者"], (names, item.finding_counts)
+    assert names == ["EXIF 作成者", "XMP 写っている人"], (names, item.finding_counts)  # 山田太郎は EXIF の1件だけ
     assert item.method.startswith("写真の情報（EXIF・XMP）"), item.method
 
 
@@ -219,6 +219,74 @@ def test_xmp_in_png_and_broken_packets(tmp_path):
     assert misc.xmp_fields(b"<x:xmpmeta><<<>>") == []
     assert misc._xmp_packets(b"..<x:xmpmeta xmlns:x='adobe:ns:meta/'>") == []  # 閉じていない
     assert misc.xmp_fields(b"<x:xmpmeta xmlns:x='adobe:ns:meta/'><a>090-1234-5678</a></x:xmpmeta>") == []
+
+
+_FACES = """<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:MP="http://ns.microsoft.com/photo/1.2/" xmlns:MPRI="http://ns.microsoft.com/photo/1.2/t/RegionInfo#"
+   xmlns:MPReg="http://ns.microsoft.com/photo/1.2/t/Region#"
+   xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/">
+  <dc:creator><rdf:Seq><rdf:li>Canon Inc.</rdf:li></rdf:Seq></dc:creator>
+  <dc:rights><rdf:Alt><rdf:li xml:lang="x-default">株式会社サンプル</rdf:li></rdf:Alt></dc:rights>
+  <MP:RegionInfo rdf:parseType="Resource"><MPRI:Regions><rdf:Bag>
+   <rdf:li MPReg:PersonDisplayName="山田太郎" MPReg:Rectangle="0.1, 0.1, 0.2, 0.2"/>
+  </rdf:Bag></MPRI:Regions></MP:RegionInfo>
+  <mwg-rs:Regions rdf:parseType="Resource"><mwg-rs:RegionList><rdf:Bag>
+   <rdf:li><rdf:Description mwg-rs:Name="佐藤花子" mwg-rs:Type="Face"/></rdf:li>
+   <rdf:li><rdf:Description mwg-rs:Name="ポチ" mwg-rs:Type="Pet"/></rdf:li>
+   <rdf:li rdf:parseType="Resource"><mwg-rs:Name>タマ</mwg-rs:Name><mwg-rs:Type>Pet</mwg-rs:Type></rdf:li>
+  </rdf:Bag></mwg-rs:RegionList></mwg-rs:Regions>
+ </rdf:Description></rdf:RDF></x:xmpmeta>""".encode("utf-8")
+
+
+def test_xmp_face_tags_are_names_but_creators_are_not(tmp_path):
+    """顔のタグ（Windows のフォト・Lightroom）の姓名だけの値は名前として拾う。動物の領域は読まない。
+    作成者・著作権の会社名は名前にしない（氏名の列とみなすと会社名まで名前になる）。"""
+    fields = misc.xmp_fields(_FACES)
+    assert ("写っている人", "山田太郎") in fields and ("写っている人", "佐藤花子") in fields, fields
+    assert not any(v in ("ポチ", "タマ") for _, v in fields), fields
+    p = tmp_path / "faces.jpg"
+    p.write_bytes(_jpeg_with_xmp(_FACES, size=(16, 16)))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    names = sorted(f.location for f in item.findings if f.pii_type == "name")
+    assert names == ["XMP 写っている人", "XMP 写っている人"], (names, item.finding_counts)
+    assert any("（作成者・著作権・写っている人）" in n for n in item.notes), item.notes
+
+
+def test_xmp_in_other_containers(tmp_path):
+    """圧縮した PNG の iTXt（PIL が解いたもの）・TIFF（700 番）・WebP の XMP も読む。"""
+    from PIL.PngImagePlugin import PngInfo
+
+    packet = _xmp_packet()
+    info = PngInfo()
+    info.add_itxt("XML:com.adobe.xmp", packet.decode("utf-8"), zip=True)
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), "white").save(buf, "PNG", pnginfo=info)
+    assert b"<x:xmpmeta" not in buf.getvalue()  # バイト列のままでは探せない
+    (tmp_path / "zipped.png").write_bytes(buf.getvalue())
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), "white").save(buf, "TIFF", tiffinfo={700: packet})
+    (tmp_path / "photo.tif").write_bytes(buf.getvalue())
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), "white").save(buf, "WEBP", xmp=packet)
+    (tmp_path / "photo.webp").write_bytes(buf.getvalue())
+    for name in ("zipped.png", "photo.tif", "photo.webp"):
+        item = scan_file(str(tmp_path / name), ScanOptions(temp_dir=str(tmp_path))).items[0]
+        assert dict(item.finding_counts).get("phone"), (name, item.finding_counts, item.reason)
+
+
+def test_xmp_packets_skip_oversized_and_dedupe():
+    """大きすぎる塊は飛ばして後ろの塊を読む。属性と要素に同じ値を書いても1項目と数える。"""
+    big = b"<x:xmpmeta>" + b" " * (misc._XMP_MAX + 1) + b"</x:xmpmeta>"
+    packet = _xmp_packet()
+    inner = packet[packet.index(b"<x:xmpmeta") : packet.index(b"</x:xmpmeta>") + len(b"</x:xmpmeta>")]
+    assert misc._xmp_packets(big + packet) == [inner]
+    twice = (
+        b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        b'<rdf:Description xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" photoshop:Credit="ABC">'
+        b"<photoshop:Credit>ABC</photoshop:Credit></rdf:Description></rdf:RDF></x:xmpmeta>"
+    )
+    assert misc.xmp_fields(twice) == [("クレジット", "ABC")]
 
 
 def test_gps_photos_are_counted_in_summary(tmp_path):

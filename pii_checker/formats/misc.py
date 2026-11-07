@@ -637,6 +637,7 @@ def scan_exif(exif, item: ItemResult, col: Collector) -> int:
 _NS_DC = "http://purl.org/dc/elements/1.1/"
 _NS_PS = "http://ns.adobe.com/photoshop/1.0/"
 _NS_IPTC_CORE = "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+_NS_MWG_RS = "http://www.metadataworkinggroup.com/schemas/regions/"
 # 写真に人が書き込む文字の XMP の項目（（名前空間, 名前）→ 明細の場所に出す名前）。日時・機種・場所の名前は読まない
 _XMP_TEXT_FIELDS = {
     (_NS_DC, "creator"): "作成者",
@@ -644,10 +645,14 @@ _XMP_TEXT_FIELDS = {
     (_NS_DC, "description"): "説明",
     (_NS_DC, "title"): "題名",
     (_NS_DC, "subject"): "キーワード",
+    (_NS_DC, "contributor"): "協力者",
+    (_NS_DC, "publisher"): "発行者",
     (_NS_PS, "AuthorsPosition"): "作成者の役職",
     (_NS_PS, "CaptionWriter"): "説明の作成者",
     (_NS_PS, "Credit"): "クレジット",
+    (_NS_PS, "Headline"): "見出し",
     ("http://ns.adobe.com/xap/1.0/rights/", "Owner"): "権利者",
+    ("http://ns.adobe.com/xap/1.0/rights/", "UsageTerms"): "利用条件",  # 連絡先を書く運用がある
     ("http://ns.adobe.com/exif/1.0/", "UserComment"): "ユーザーコメント",
     ("http://ns.adobe.com/tiff/1.0/", "Artist"): "撮影者",
     ("http://ns.adobe.com/tiff/1.0/", "ImageDescription"): "説明",
@@ -656,8 +661,11 @@ _XMP_TEXT_FIELDS = {
     ("http://cipa.jp/exif/1.0/", "CameraOwnerName"): "カメラの持ち主",
     ("http://iptc.org/std/Iptc4xmpExt/2008-02-29/", "PersonInImage"): "写っている人",
     ("http://ns.microsoft.com/photo/1.2/t/Region#", "PersonDisplayName"): "写っている人",  # Windows のフォトの顔の名前
-    ("http://www.metadataworkinggroup.com/schemas/regions/", "Name"): "写っている人",  # Lightroom・Picasa の顔の名前
+    (_NS_MWG_RS, "Name"): "写っている人",  # Lightroom・Picasa の顔の名前（Type が Pet の領域は除く）
 }
+# 写っている人（顔のタグ）の値は姓名だけで書かれるので、「氏名」の列の値として検査する。
+# 作成者・撮影者・著作権は会社名・写真の配信元の名前が多く、氏名の列とみなすと会社名まで名前になるので、そのまま検査する
+_XMP_PERSON_LABEL = "写っている人"
 # 作成者の連絡先（IPTC の CreatorContactInfo）。中の項目は「項目名：値」の行にして、住所・電話の手がかりの語にする
 _XMP_CONTACT = (_NS_IPTC_CORE, "CreatorContactInfo")
 _XMP_CONTACT_LABELS = {
@@ -678,6 +686,7 @@ def _xmp_packets(data: bytes, limit: int = 4):
 
     JPEG（APP1）・PNG（iTXt）・TIFF（700 番）・HEIC・WebP のどれも、塊は UTF-8 の文字のまま入っているので、
     入れ物の作りをたどらずに印で探す。UTF-16 で書いた塊（ほとんど見ない）は見つけられない。
+    大きすぎる塊は飛ばして、その後ろの塊を探し続ける。
     """
     out = []
     pos = 0
@@ -686,10 +695,11 @@ def _xmp_packets(data: bytes, limit: int = 4):
         if start < 0:
             break
         end = data.find(b"</x:xmpmeta>", start)
-        if end < 0 or end - start > _XMP_MAX:
+        if end < 0:
             break
         end += len(b"</x:xmpmeta>")
-        out.append(bytes(data[start:end]))
+        if end - start <= _XMP_MAX:
+            out.append(bytes(data[start:end]))
         pos = end
     return out
 
@@ -716,6 +726,17 @@ def _xmp_contact_text(el) -> str:
     return "\n".join(lines)
 
 
+def _is_pet_region(desc) -> bool:
+    """mwg-rs の領域（rdf:Description）が動物の顔か（Type="Pet"。属性で書く形と要素で書く形がある）。"""
+    if desc is None:
+        return False
+    kind = desc.get(f"{{{_NS_MWG_RS}}}Type")
+    if kind is None:
+        child = desc.find(f"{{{_NS_MWG_RS}}}Type")
+        kind = child.text if child is not None else None
+    return (kind or "").strip() == "Pet"
+
+
 def xmp_fields(packet: bytes) -> list[tuple[str, str]]:
     """XMP の塊から、人が書き込む文字の項目を（場所の名前, 値）の並びで返す。読めなければ空。
 
@@ -732,42 +753,59 @@ def xmp_fields(packet: bytes) -> list[tuple[str, str]]:
     if root is None:
         return []
     out = []
+
+    def add(label: str, value: str) -> None:
+        # 同じ値を属性と要素の両方に書く道具がある。同じ（場所, 値）は1つにする
+        if value and (label, value) not in out:
+            out.append((label, value))
+
     for el in root.iter():
         if not isinstance(el.tag, str):  # コメント・処理命令
             continue
         for name, value in el.attrib.items():
             ns, _, local = name[1:].partition("}") if name.startswith("{") else ("", "", name)
             label = _XMP_TEXT_FIELDS.get((ns, local))
-            if label and value.strip():
-                out.append((label, value.strip()))
+            if label and not (ns == _NS_MWG_RS and _is_pet_region(el)):
+                add(label, value.strip())
         ns, _, local = el.tag[1:].partition("}") if el.tag.startswith("{") else ("", "", el.tag)
         if (ns, local) == _XMP_CONTACT:
-            text = _xmp_contact_text(el)
-            if text:
-                out.append(("作成者の連絡先", text))
+            add("作成者の連絡先", _xmp_contact_text(el))
             continue
         label = _XMP_TEXT_FIELDS.get((ns, local))
-        if label:
-            value = _xmp_value(el)
-            if value:
-                out.append((label, value))
+        if label and not (ns == _NS_MWG_RS and _is_pet_region(el.getparent())):
+            add(label, _xmp_value(el))
     return out
 
 
-def scan_xmp(data: bytes, item: ItemResult, col: Collector) -> int:
+def scan_xmp(data: bytes, item: ItemResult, col: Collector, extra=None) -> int:
     """写真の XMP（Adobe などの道具・Windows のフォトが書く写真の情報）のうち人が書き込む文字を検査する。
 
+    extra は PIL が画像の情報として解いて返した XMP（PNG の圧縮した iTXt などはバイト列のままでは探せない）。
     EXIF と同じ値を両方に書く道具が多いので、EXIF で数えた値は数え直さない（skip_seen）。
+    写っている人（顔のタグ）は「氏名」の列の値として検査する（姓名だけで書かれるため）。
     返り値は検査した文字の項目の数。
     """
-    read = 0
-    for packet in _xmp_packets(data):
-        for label, text in xmp_fields(packet):
-            read += 1
-            col.add_text(text[:10000], f"XMP {label}", method="XMP", skip_seen=True)
-    if read:
-        item.notes.append(f"写真の情報（XMP）の文字 {read} 項目（作成者・連絡先など）も検査した")
-    return read
+    packets = _xmp_packets(data)
+    if extra:
+        if isinstance(extra, str):
+            extra = extra.encode("utf-8", "replace")
+        packets += [p for p in _xmp_packets(bytes(extra)) if p not in packets]
+    fields = []
+    for packet in packets:
+        fields += [f for f in xmp_fields(packet) if f not in fields]
+    for label, text in fields:
+        header = "氏名" if label == _XMP_PERSON_LABEL else None
+        col.add_text(text[:10000], f"XMP {label}", header=header, method="XMP", skip_seen=True)
+    if fields:
+        labels = "・".join(dict.fromkeys(label for label, _ in fields))
+        item.notes.append(f"写真の情報（XMP）の文字 {len(fields)} 項目（{labels}）も検査した")
+    return len(fields)
+
+
+def _pil_xmp(im):
+    """PIL が開いた画像の情報に入っている XMP（無ければ None）。版によって鍵の名前が違う。"""
+    info = getattr(im, "info", None) or {}
+    return info.get("xmp") or info.get("XML:com.adobe.xmp")
 
 
 def _metadata_label(exif_fields: int, xmp_count: int) -> str:
@@ -817,10 +855,11 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
                 exif = im.getexif()
             except Exception:  # 壊れた EXIF は読まない（画像の文字の検査は続ける）
                 exif = None
+            pil_xmp = _pil_xmp(im)
     except Exception as e:
         raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式）: {e}")
     exif_fields = scan_exif(exif, item, col)  # 写真の情報は、OCR を使わない・小さな画像でも読む
-    xmp_count = scan_xmp(data, item, col)
+    xmp_count = scan_xmp(data, item, col, pil_xmp)
     if max(w, h) < ctx.options.min_image_px:
         item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
         if exif_fields or xmp_count:
@@ -847,6 +886,7 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
     """
     from .. import ocr
 
+    scan_xmp(data, item, col)  # 写真の情報は、OCR を使わなくても読む
     if not ctx.options.ocr:
         raise Uncheckable("OCR を無効にして実行したため画像（JPEG XR）の中の文字を検査していない（要目視）")
     if not ocr.is_available():

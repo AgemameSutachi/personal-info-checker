@@ -34,9 +34,10 @@ def _types(value: str, header: str | None = None) -> set[str]:
     [
         ("passport", "JASDAQ スタンダード"),
         ("passport", "https://example.com/a/123456"),
-        # 旅券番号は6〜9文字。5桁の証券コード・5文字のコードは番号ではない
+        # 旅券番号は区切りを除いて6文字以上とみなす。5桁の証券コード・英数字5文字のコードは番号ではない
         ("passport", "75770"),
-        ("passport", "AB-123"),
+        ("passport", "A1234"),
+        ("passport", "AB-123"),  # 区切りを除くと5文字
         ("drivers_license", "ゴールド免許"),
         ("bank_account", "https://example.jp/bunbai/123456.html"),
         ("bank_account", "www.example.jp/123456"),
@@ -59,7 +60,12 @@ def test_impossible_number_values_dropped(category, value):
     [
         ("passport", "TK1234567"),
         ("passport", "M1234567"),
-        ("passport", "123456"),  # 6文字の旅券番号の国もある
+        ("passport", "123456"),  # 下限ちょうど
+        ("passport", "TK 1234567"),  # 区切り・空白は数えない
+        ("passport", "TK-1234567"),
+        # 6文字の下限は旅券だけ（免許証・保険証の短い値は今までどおり）
+        ("drivers_license", "75770"),
+        ("health_insurance", "1234"),
         ("drivers_license", "301234567890"),
         ("health_insurance", "12-3456"),
         ("bank_account", "普通 1234567"),

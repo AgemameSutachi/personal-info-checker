@@ -1238,6 +1238,8 @@ _HONORIFIC_WORDS = (
 _HONORIFIC_NOT_AFTER = "式子性態堂"
 # 「様」で終わる語のうち、終わりの2文字だけでは名前と分けられないもの（「美歩様」は名前なので「歩様」では落とさない）
 _HONORIFIC_LONG_WORDS = ("交差歩様",)  # 馬の歩き方（競馬の調教の寸評）
+# 「よくある姓＋敬称」の値の末尾の敬称（RE_NAME_HONORIFIC の終わりと同じ並び）
+_RE_HONORIFIC_TAIL = re.compile(r"(?:様|殿|さん|君|くん|ちゃん)\Z")
 # 手がかり語の無い番号の形（数字ばかりの並びの中にあれば、数値のデータとみなして捨てる）
 _BARE_NUMBER_RULES = frozenset(
     {
@@ -1539,6 +1541,11 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if decimal_before and text[max(0, h.start - 4) : h.start] == "+81.":
                 decimal_before = False  # 「+81.90-…」の国番号の区切り（小数ではない）
             if decimal_before or (len(after) == 2 and after[0] == "." and after[1].isdigit()):
+                continue
+        elif h.rule == "よくある姓＋敬称":
+            # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない
+            # （「田中部長殿」のように姓が前に付いたものは人なので残す）。空白は姓の直後に入りうる（「関 係者様」）ので詰めて比べる
+            if HONORIFIC_STOP.fullmatch(_RE_HONORIFIC_TAIL.sub("", h.value).replace(" ", "").replace("　", "")):
                 continue
         elif h.rule == "漢字の名前＋様・殿":
             nxt = text[h.end : h.end + 1]

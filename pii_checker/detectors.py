@@ -299,11 +299,15 @@ NAME_LABEL_EN_RULE = "英語の氏名の見出し語＋よくある姓の名前"
 EN_NAME_LABEL_OK_BEFORE = frozenset(
     {"my", "your", "his", "her", "their", "our", "the", "a", "legal", "real", "official"}
 )
-# 値の末尾がこの語なら、姓で始まる地名・会社・部署（「石川県」「山田電機」「山田 営業部」）とみなして落とす
+# 値の末尾がこの語なら、姓で始まる地名・会社・部署（「石川県」「山田工業」「山田 営業部」）とみなして落とす。
+# 人の名の末尾にまず来ない語だけ（「浩市」「英機」「美園」のように名にも来る字は下の _RE_NAME_EN_ORG_TAIL_WEAK）
 _RE_NAME_EN_ORG_TAIL = re.compile(
-    r"(?:業|県|府|市|区|町|村|郡|組|部|課|係|室|屋|会|社|店|所|局|署|館|園|院|校|場|機|薬|組合|洋行|商事|銀行)$"
+    r"(?:業|県|府|区|郡|組|部|課|係|室|屋|会|社|店|署|館|院|校|場|薬|組合|洋行|商事|銀行|電機|工機|商店|書店)$"
 )
+# 地名・組織の語尾だが人の名の末尾にも来る字（「松本市」と「鈴木浩市」）。落とさず 低 にする
+_RE_NAME_EN_ORG_TAIL_WEAK = re.compile(r"[市町村所機園局]$")
 NAME_EN_SHORT_NOTE = "（空白の無い2字で、姓で始まる語と見分けられないため 低）"
+NAME_EN_ORG_TAIL_NOTE = "（末尾が地名・組織の語の字で、名と見分けられないため 低）"
 
 
 def _en_label_start_ok(text: str, start: int) -> bool:
@@ -2127,6 +2131,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             # 空白の無い2字は、姓で始まる語（「関東」「原因」「林業」）と見分けられないので 低
             if len(h.value) == 2:
                 h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_EN_SHORT_NOTE)
+            elif _RE_NAME_EN_ORG_TAIL_WEAK.search(h.value):
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_EN_ORG_TAIL_NOTE)
             # コードの代入の続き（`name = 山田太郎.strip()`）は落とし、関数の引数（`User(name="山田太郎")`）は 低 にする
             shape = _name_label_code_shape(text, h)
             if shape == "drop":

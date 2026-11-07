@@ -85,7 +85,6 @@ def test_found_medium(text, value, engine):
         # 姓で始まる地名・会社・部署（値の末尾の語で見分ける）
         "name: 山田工業",
         "name: 石川県",
-        "name: 松本市",
         "name: 中野区",
         "name: 小林製薬",
         "name: 山田電機",
@@ -114,6 +113,28 @@ def test_two_chars_without_space_is_low(text, value, engine):
     assert got[0].rule == RULE + detectors.NAME_EN_SHORT_NOTE, got
     spaced = [h for h in _names("Name: 林 健") if h.rule == RULE]
     assert [h.confidence.value for h in spaced] == ["medium"], spaced
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("name: 松本市", "松本市"),
+        ("Name: 鈴木浩市", "鈴木浩市"),
+        ("name: 田中 美園", "田中 美園"),
+        ("name: 山田 英機", "山田 英機"),
+    ],
+)
+def test_ambiguous_org_tail_is_low(text, value, engine):
+    """末尾が地名・組織の語尾にも名にも来る字（市・園・機など）は、落とさず 低（「松本市」と「鈴木浩市」を見分けられない）。"""
+    got = [h for h in _names(text) if h.value == value and h.rule.startswith(RULE)]
+    assert [h.confidence.value for h in got] == ["low"], got
+    assert got[0].rule == RULE + detectors.NAME_EN_ORG_TAIL_NOTE, got
+
+
+@pytest.mark.parametrize("text, value", [("Name: 山田 和行", "山田 和行"), ("Name: 内田 洋", "内田 洋")])
+def test_real_names_near_org_words_stay_medium(text, value, engine):
+    got = [h for h in _names(text) if h.value == value and h.rule.startswith(RULE)]
+    assert [h.confidence.value for h in got] == ["medium"], got
 
 
 def test_in_call_is_low(engine):

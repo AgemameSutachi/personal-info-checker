@@ -1427,6 +1427,12 @@ _RE_DUMP_LINE = re.compile(
     r"[ \t]*(?:[0-9A-Fa-f]{6,7}0(?:[ \t]+[0-9A-Fa-f]{2}){8,}|[0-9A-Fa-f]{5}0(?:[ \t]+[0-9A-Fa-f]{2}){12,}"
     r"|[0-9A-Fa-f]{7}0:(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
 )
+# 途中の番地から出したダンプ（`hexdump -s 5`・`xxd -s 7` の「0000005  …」）の行。番地の末尾を問わない代わりに、
+# 前か後ろの行も同じ形で番地がちょうど1行分（16進の 0x10・od の既定の8進の 020）ずれているときだけダンプとみなす
+_RE_DUMP_LINE_ANY = re.compile(
+    r"[ \t]*(?:(?P<a>[0-9A-Fa-f]{7,8})(?:[ \t]+[0-9A-Fa-f]{2}){8,}|(?P<b>[0-9A-Fa-f]{6})(?:[ \t]+[0-9A-Fa-f]{2}){12,}"
+    r"|(?P<c>[0-9A-Fa-f]{8}):(?:(?:[ \t]+[0-9A-Fa-f]{4}){4,}|(?:[ \t]+[0-9A-Fa-f]{2}){8,}))(?![0-9A-Fa-f])"
+)
 _DUMP_LINE_MAX = 200
 # URL のパスの中の検出（_in_url_path）。手前の「scheme://」を探す幅と、パスとみなす文字
 # （ASCII の英数字と「-._~/%:@+=」だけ。「?」「#」「;」「&」「,」・空白・引用符・日本語の文字などが来たら URL の外とみなす）
@@ -1710,7 +1716,8 @@ def _in_dump_or_mesh_line(text: str, start: int) -> bool:
     """検出の始まる行が、16進のダンプの行か Wavefront OBJ の要素の行か。
 
     - ダンプ（od・hexdump・xxd の出力をログに貼ったもの）: 右の文字の欄「624K000135004120」に数字が並ぶと、
-      左の16進の欄と同じ中身が12桁の番号の形に見える（見本のダンプの貼られたログ1つで 106 件）
+      左の16進の欄と同じ中身が12桁の番号の形に見える（見本のダンプの貼られたログ1つで 106 件）。
+      途中の番地から出したダンプは _dump_line_from_offset で前後の行の番地を見る
     - OBJ の面・頂点の行「f 1074 1076 1075」: 4桁の数が3つ空白で並ぶと、区切りつきの12桁の形になる
     どちらの行も短いので、前後 _DUMP_LINE_MAX 文字の中に行の端が無い行は見ない
     （改行の無い長い本文で、検出ごとに行全体をなめて二乗の遅さにならないため）。
@@ -1725,11 +1732,55 @@ def _in_dump_or_mesh_line(text: str, start: int) -> bool:
         line_end = len(text)
     if _RE_DUMP_LINE.match(text, line_start, line_end):
         return True
+    if _dump_line_from_offset(text, line_start, line_end):
+        return True
     while line_start < line_end and text[line_start] in " \t":
         line_start += 1
     while line_end > line_start and text[line_end - 1] in " \t\r":
         line_end -= 1
     return bool(_RE_OBJ_LINE.fullmatch(text, line_start, line_end))
+
+
+def _dump_address(text: str, start: int, end: int) -> str | None:
+    """text[start:end] の行が _RE_DUMP_LINE_ANY の形なら番地の文字列を、そうでなければ None を返す。"""
+    m = _RE_DUMP_LINE_ANY.match(text, start, end)
+    if not m:
+        return None
+    return m.group("a") or m.group("b") or m.group("c")
+
+
+def _dump_line_from_offset(text: str, line_start: int, line_end: int) -> bool:
+    """途中の番地から出したダンプの行か（番地の末尾が0でない「0000005  61 62 3a …」）。
+
+    _RE_DUMP_LINE は番地の末尾が0の行だけを見るので、`hexdump -s 5`・`xxd -s 7` のように途中から出した
+    ダンプでは、右の文字の欄の12桁・16桁を拾っていた。前か後ろの行（どちらも _DUMP_LINE_MAX 文字まで）も
+    同じ形で、番地の桁の数が同じで、ちょうど1行分（16進で 0x10。番地がどちらも8進の数字だけなら、od の既定の
+    8進の 020 も）ずれているときだけダンプとみなす（1行だけのとき・前後の行の番地が1行分ずれていないときは当たらない）。
+    ダンプの行とみなすと、手がかり語の無い番号の形（_BARE_NUMBER_RULES・確度 高 でないもの）を捨てる（末尾が0の行と同じ）。
+    """
+    addr = _dump_address(text, line_start, line_end)
+    if addr is None:
+        return False
+    neighbors = []
+    if line_start > 0:
+        prev_start = text.rfind("\n", max(0, line_start - 1 - _DUMP_LINE_MAX), line_start - 1) + 1
+        if prev_start > 0 or line_start - 1 <= _DUMP_LINE_MAX:
+            neighbors.append((_dump_address(text, prev_start, line_start - 1), 1))
+    if line_end < len(text):
+        next_end = text.find("\n", line_end + 1, line_end + 1 + _DUMP_LINE_MAX)
+        if next_end < 0 and len(text) <= line_end + 1 + _DUMP_LINE_MAX:
+            next_end = len(text)
+        if next_end >= 0:
+            neighbors.append((_dump_address(text, line_end + 1, next_end), -1))
+    for other, sign in neighbors:
+        if other is None or len(other) != len(addr):
+            continue
+        if (int(addr, 16) - int(other, 16)) * sign == 0x10:
+            return True
+        octal = set("01234567")
+        if set(addr) <= octal and set(other) <= octal and (int(addr, 8) - int(other, 8)) * sign == 0o20:
+            return True
+    return False
 
 
 def _era_date_is_broken(text: str, h: Hit) -> bool:
@@ -1754,6 +1805,12 @@ _NOT_GIVEN_NAMES = frozenset(
     "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
 )
 _RE_SPACE = re.compile(r"[ 　]")
+# 固定幅の表の列の区切り（空白2つ以上・タブ・全角空白。_name_label_in_header_row）と、見る行の長さの上限
+_RE_CELL_GAP = re.compile(r"(?: {2,}|[\t　][ \t　]*| [\t　][ \t　]*)")
+_HEADER_ROW_MAX = 200
+# 見出し行とデータの行の間にはさんでよい空行の数
+_HEADER_ROW_BLANKS = 2
+NAME_IN_HEADER_ROW_NOTE = "（固定幅の表の見出し行の形のため 低）"
 # 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
 # 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
 # 「=」「<」「>」も入れない（`氏名=山田太郎 年齢=40`・`氏名=山田太郎<br>`）。「÷」のほかの演算子は、前後に空白があって
@@ -1761,6 +1818,81 @@ _RE_SPACE = re.compile(r"[ 　]")
 _RE_CODE_AFTER_VALUE = re.compile(r"[ \t]*÷|[ \t]+[×*%+][ \t]+[0-9A-Za-z_]|\[[\"']|\.[A-Za-z_][0-9A-Za-z_]*\(")
 _CALL_LOOKBACK = 200
 NAME_IN_CALL_NOTE = "（閉じていない括弧の中の「=」の書き方のため 低）"
+
+
+def _fixed_width_cells(line: str) -> list[str]:
+    """固定幅の表の1行を、空白2つ以上・タブ・全角空白の区切りでセルに分ける。"""
+    return [c for c in _RE_CELL_GAP.split(line.strip(" \t　\r")) if c]
+
+
+def _line_bounds(text: str, start: int, end: int) -> tuple[int, int] | None:
+    """text[start:end] を含む行の始まりと終わり。行が _HEADER_ROW_MAX 文字を超えるなら None。
+
+    行の端は前後 _HEADER_ROW_MAX 文字の中だけを探す（改行の無い長い本文で、検出ごとに全体をなめないため）。
+    """
+    line_start = text.rfind("\n", max(0, start - _HEADER_ROW_MAX), start) + 1
+    if line_start == 0 and start > _HEADER_ROW_MAX:
+        return None
+    line_end = text.find("\n", end, end + _HEADER_ROW_MAX)
+    if line_end < 0:
+        if len(text) > end + _HEADER_ROW_MAX:
+            return None
+        line_end = len(text)
+    if line_end - line_start > _HEADER_ROW_MAX:
+        return None
+    return line_start, line_end
+
+
+def _name_label_in_header_row(text: str, h: Hit) -> str:
+    """「氏名の見出し語＋名前」が、固定幅の表の見出し行の隣の見出しを名前に読んだものかを返す。
+
+    「名前      年率      超過」「氏名      住所      電話」では、見出し語の後の空白の並びの先の語
+    （次の列の見出し）を名前に読んでいた（2026-11-07 の株のデータの報告の文で見つけた形）。見るのは、
+    見出し語と値の間が空白2つ以上・タブ・全角空白（表の列の区切り）で、その行が3つ以上のセルに分かれ、
+    数字を1つも含まない（見出し行には値が無い）・_HEADER_ROW_MAX 文字までの行だけ。
+    - "drop": 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）
+    - "low": 次の空でない行が同じ数のセルに分かれ、値の列から右のセルに数字があり、最初のセルが見出しの語でない
+      （表のデータの行「ベンチ      5.2%    0.0%」）。帳票の「氏名    山田太郎    営業部」の次の行が
+      「入社日    2024/01/01    正社員」のように同じ形になることがあるので、落とさずに 低 にする
+    - "": 上のどれでもない。次の行が「電話    03-1234-5678    内線12」のように見出しの語で始まる帳票・
+      次の行の無い1行だけの見出しは、今までどおり 中
+    """
+    sep_start = h.start
+    while sep_start > max(0, h.start - _HEADER_ROW_MAX) and text[sep_start - 1] in " \t　":
+        sep_start -= 1
+    if not _RE_CELL_GAP.fullmatch(text, sep_start, h.start):
+        return ""
+    bounds = _line_bounds(text, h.start, h.end)
+    if bounds is None:
+        return ""
+    line_start, line_end = bounds
+    line = text[line_start:line_end]
+    if any(c.isdigit() for c in line):
+        return ""
+    cells = _fixed_width_cells(line)
+    if len(cells) < 3:
+        return ""
+    if header_category(_RE_SPACE.split(h.value, maxsplit=1)[0]) is not None:
+        return "drop"
+    column = len(_fixed_width_cells(text[line_start : h.start]))
+    pos = line_end + 1
+    for _ in range(_HEADER_ROW_BLANKS + 1):
+        if pos >= len(text):
+            return ""
+        nxt_bounds = _line_bounds(text, pos, pos)
+        if nxt_bounds is None:
+            return ""
+        nxt = _fixed_width_cells(text[pos : nxt_bounds[1]])
+        if nxt:
+            if (
+                len(nxt) == len(cells)
+                and any(c.isdigit() for cell in nxt[column:] for c in cell)
+                and header_category(nxt[0]) is None
+            ):
+                return "low"
+            return ""
+        pos = nxt_bounds[1] + 1
+    return ""
 
 
 def _name_label_code_shape(text: str, h: Hit) -> str:
@@ -1819,7 +1951,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     「よくある姓＋空白＋名」の名の側が一般の語のもの（_NOT_GIVEN_NAMES）・「氏名の見出し語＋名前」の値に
     「名前」の語を含むもの（引数の説明の文）・「=」の形でコードの代入の続きのもの（関数の引数の中なら 低 に下げる・
     _name_label_code_shape）
-    2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）・
+    2026-11-08: 「氏名の見出し語＋名前」が固定幅の表の見出し行の隣の見出しのもの（_name_label_in_header_row）
+    2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）
     Google Cloud のプロジェクト番号の置き場のもの（_in_gcp_project_number）
     """
     out = []
@@ -1886,12 +2019,19 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
             if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
                 continue
-            # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
-            shape = _name_label_code_shape(text, h)
-            if shape == "drop":
+            # 固定幅の表の見出し行（「名前      年率      超過」の「年率」）
+            header_row = _name_label_in_header_row(text, h)
+            if header_row == "drop":
                 continue
-            if shape == "low":
-                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
+            if header_row == "low":
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_HEADER_ROW_NOTE)
+            else:
+                # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
+                shape = _name_label_code_shape(text, h)
+                if shape == "drop":
+                    continue
+                if shape == "low":
+                    h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない
             # （「田中部長殿」のように姓が前に付いたものは人なので残す）。空白は姓の直後に入りうる（「関 係者様」）ので詰めて比べる

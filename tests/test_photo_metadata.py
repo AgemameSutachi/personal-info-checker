@@ -297,6 +297,57 @@ def test_xmp_in_other_containers(tmp_path):
         assert dict(item.finding_counts).get("phone"), (name, item.finding_counts, item.reason)
 
 
+def _jpeg_with_extended_xmp(main: bytes, extended: bytes, pieces: int, guid: bytes = b"0" * 32) -> bytes:
+    """本体の XMP の後ろに、Extended XMP を pieces 個の APP1 に分けて入れた JPEG（区切りは後ろから入れて順を崩す）。"""
+    data = _jpeg_with_xmp(main, size=(16, 16))
+    step = -(-len(extended) // pieces)
+    segs = []
+    for off in range(0, len(extended), step):
+        body = (
+            misc._XMP_EXT_SIG
+            + guid
+            + len(extended).to_bytes(4, "big")
+            + off.to_bytes(4, "big")
+            + extended[off : off + step]
+        )
+        segs.append(b"\xff\xe1" + (len(body) + 2).to_bytes(2, "big") + body)
+    at = data.index(b"\xff\xe1", 2)
+    at += 2 + int.from_bytes(data[at + 2 : at + 4], "big")  # 本体の XMP の APP1 の後ろ
+    return data[:at] + b"".join(reversed(segs)) + data[at:]
+
+
+def test_extended_xmp_in_jpeg_is_reassembled(tmp_path):
+    """JPEG の Extended XMP（64KB を超えて APP1 に分けたもの）を組み直して読む。区切りの順が崩れていても読む。"""
+    main = (
+        b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        b'<rdf:Description xmlns:xmpNote="http://ns.adobe.com/xmp/note/" xmpNote:HasExtendedXMP="'
+        + b"0" * 32
+        + b'"/></rdf:RDF></x:xmpmeta>'
+    )
+    extended = _xmp_packet().replace(b"<?xpacket end", b"<!-- " + b"x" * 70000 + b" --><?xpacket end")
+    extended = extended[extended.index(b"<x:xmpmeta") : extended.index(b"</x:xmpmeta>") + len(b"</x:xmpmeta>")]
+    data = _jpeg_with_extended_xmp(main, extended, pieces=3)
+    assert len(misc._xmp_packets(data)) >= 1
+    assert not misc.xmp_fields(misc._xmp_packets(misc._jpeg_extended_xmp(data)[0])[0])  # 本体には項目が無い
+    p = tmp_path / "extended.jpg"
+    p.write_bytes(data)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    found = dict(item.finding_counts)
+    assert found.get("phone") and found.get("email") and found.get("name"), (found, item.notes)
+    assert "XMP 作成者の連絡先" in {f.location for f in item.findings}
+
+
+def test_extended_xmp_limits_and_non_jpeg():
+    """JPEG でないもの・区切りの無いものはそのまま。全体の長さが上限を超える区切りは読まない（区切りは埋める）。"""
+    plain = _jpeg_with_xmp(_xmp_packet(), size=(16, 16))
+    assert misc._jpeg_extended_xmp(plain) == (plain, [])
+    assert misc._jpeg_extended_xmp(b"PNG" + misc._XMP_EXT_SIG) == (b"PNG" + misc._XMP_EXT_SIG, [])
+    seg_body = misc._XMP_EXT_SIG + b"1" * 32 + (misc._XMP_MAX + 1).to_bytes(4, "big") + bytes(4) + b"<x:xmpmeta>"
+    big = plain[:2] + b"\xff\xe1" + (len(seg_body) + 2).to_bytes(2, "big") + seg_body + plain[2:]
+    cleaned, packets = misc._jpeg_extended_xmp(big)
+    assert packets == [] and len(cleaned) == len(big) and misc._XMP_EXT_SIG not in cleaned
+
+
 def test_xmp_packets_skip_oversized_and_dedupe():
     """大きすぎる塊は飛ばして後ろの塊を読む。属性と要素に同じ値を書いても1項目と数える。"""
     big = b"<x:xmpmeta>" + b" " * (misc._XMP_MAX + 1) + b"</x:xmpmeta>"

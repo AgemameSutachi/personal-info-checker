@@ -982,12 +982,12 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
             if ctx.expanded_bytes + written > ctx.options.max_expand_bytes:
                 raise Uncheckable(
                     f"展開後の大きさが上限（{size_text(ctx.options.max_expand_bytes)}）を超えたため打ち切り"
-                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してからそのフォルダを検査してください）"
+                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             if written > 10 * 1024**3 and written / max(1, blob.size) > ctx.options.max_expand_ratio:
                 raise Uncheckable(
                     f"圧縮率が異常（{written / max(1, blob.size):.0f}倍）のため打ち切り"
-                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してからそのフォルダを検査してください）"
+                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             dst.write(chunk)
     item.method = f"展開（{written:,}バイト）"

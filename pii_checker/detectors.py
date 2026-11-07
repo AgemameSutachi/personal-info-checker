@@ -13,7 +13,7 @@ import logging
 import re
 from bisect import bisect_left, bisect_right
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -1695,6 +1695,47 @@ _NOT_GIVEN_NAMES = frozenset(
     "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
 )
 _RE_SPACE = re.compile(r"[ 　]")
+# 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
+# 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
+# 「=」「<」「>」も入れない（`氏名=山田太郎 年齢=40`・`氏名=山田太郎<br>`）。「÷」のほかの演算子は、前後に空白があって
+# 数か英字が続くとき（`営業利益 * 2`）だけ（必須の印 `山田太郎 *必須`・連名 `山田太郎 + 花子`・`山田太郎 +81-90-…` は人の名前）
+_RE_CODE_AFTER_VALUE = re.compile(r"[ \t]*÷|[ \t]+[×*%+][ \t]+[0-9A-Za-z_]|\[[\"']|\.[A-Za-z_][0-9A-Za-z_]*\(")
+_CALL_LOOKBACK = 200
+NAME_IN_CALL_NOTE = "（閉じていない括弧の中の「=」の書き方のため 低）"
+
+
+def _name_label_code_shape(text: str, h: Hit) -> str:
+    """「氏名の見出し語＋名前」が「=」で区切った形のとき、コードの代入・引数らしさを返す。
+
+    - "drop": 値の後ろが、人の名前の後ろには来ないコードの続き（_RE_CODE_AFTER_VALUE）。「÷」（`名前 = "営業利益÷総資産"`）・
+      空白に挟まれて数か英字の続く演算子（`名前 = 営業利益 * 2`）・引用符で始まる添字（`名前 = 有効["holder_name"]`）・
+      英字のメソッドの呼び出し（`名前 = 表示.fillna("")`）。引用符で囲んだ値は、引用符の中の「÷」だけを見る
+    - "low": 閉じていない「(」の中（前 _CALL_LOOKBACK 字を括弧の深さで遡る。関数の引数 `_成績(日次, 名前="ベンチ")`）。
+      ログの `更新(氏名=山田太郎)` もこの形なので、落とさずに確度 低 で残す
+    - "": 「=」の形でないか、上のどれでもない（`氏名="鈴木一郎"`・`氏名=山田太郎(営業部)`）
+    「:」の形（JSON の `"氏名": "山田 太郎（営業部）"`）は見ない。
+    """
+    i = h.start
+    quote = ""
+    if i > 0 and text[i - 1] in "\"'":
+        quote = text[i - 1]
+        i -= 1
+    while i > 0 and text[i - 1] in " \t":
+        i -= 1
+    if i == 0 or text[i - 1] != "=":
+        return ""
+    m = _RE_CODE_AFTER_VALUE.match(text, h.end)
+    if m and (not quote or m.group(0).lstrip(" \t") == "÷"):
+        return "drop"  # 引用符で囲んだ値は、引用符の中の「÷」だけを見る（閉じた後ろの `"山田太郎".strip()` は見ない）
+    depth = 0
+    for c in reversed(text[max(0, i - 1 - _CALL_LOOKBACK) : i - 1]):
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                return "low" if c == "(" else ""
+            depth -= 1
+    return ""
 
 
 def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
@@ -1717,7 +1758,8 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     （識別子の途中で TLD が切れた形・_email_before_identifier）。マイナンバー（手がかり語なし）の直前が
     大文字の英字2文字のもの（国の頭のついたコード「JP」＋12桁・_after_country_prefix）。
     「よくある姓＋空白＋名」の名の側が一般の語のもの（_NOT_GIVEN_NAMES）・「氏名の見出し語＋名前」の値に
-    「名前」の語を含むもの（引数の説明の文）
+    「名前」の語を含むもの（引数の説明の文）・「=」の形でコードの代入の続きのもの（関数の引数の中なら 低 に下げる・
+    _name_label_code_shape）
     """
     out = []
     for h in hits:
@@ -1781,6 +1823,12 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
             if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
                 continue
+            # コードの日本語の変数への代入・関数の引数（`名前 = 有効["…"]`・`_成績(…, 名前="ベンチ")`）
+            shape = _name_label_code_shape(text, h)
+            if shape == "drop":
+                continue
+            if shape == "low":
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない
             # （「田中部長殿」のように姓が前に付いたものは人なので残す）。空白は姓の直後に入りうる（「関 係者様」）ので詰めて比べる

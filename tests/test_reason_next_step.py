@@ -52,6 +52,46 @@ def test_broken_file_reason_names_next_step(tmp_path, name, data, start, hint):
     assert start in item.reason and hint in item.reason, item.reason
 
 
+def _cut_image(fmt: str) -> bytes:
+    """文字の入った画像を作り、後ろ半分を切り落とす（頭は読めるが中身が途中で切れている）。"""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (800, 400), "white")
+    ImageDraw.Draw(img).text((10, 10), "090-1234-5678", fill="black")
+    buf = io.BytesIO()
+    img.save(buf, fmt)
+    data = buf.getvalue()
+    return data[: len(data) // 2]
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "TIFF"])
+def test_truncated_image_reason_names_next_step(tmp_path, fmt):
+    """途中で切れた画像は「読み取り中にエラー（ValueError…）」ではなく、写しを作る・取り直す手を出す。"""
+    from pii_checker import ocr
+
+    if not ocr.is_available():
+        pytest.skip("OCR が使えない環境では、画像の中身を読む前に「OCR が使えない」で止まる")
+    p = tmp_path / f"cut.{fmt.lower()}"
+    p.write_bytes(_cut_image(fmt))
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE, item.reason
+    assert item.reason.startswith("画像を読み込めなかった（途中で切れているか壊れている可能性"), item.reason
+    assert "PNG か JPEG で別名で保存した写しを検査してください" in item.reason, item.reason
+    assert "読み取り中にエラー" not in item.reason, item.reason
+
+
+def test_unopenable_image_reason_names_next_step(tmp_path):
+    """拡張子だけ画像で開けないものにも、写しを作る・取り直す手を出す（OCR の有無に依らない）。"""
+    p = tmp_path / "photo.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    assert item.status == Status.UNCHECKABLE, item.reason
+    assert "画像を開けなかった" in item.reason, item.reason
+    assert "開けなければ元のファイルを取り直してください" in item.reason, item.reason
+
+
 def test_too_deep_nesting_names_embedded_case(tmp_path):
     """入れ子の上限は文書の埋め込み・メールの添付でも起きるので、取り出したファイルを検査する手も出す。"""
     p = tmp_path / "a.txt"

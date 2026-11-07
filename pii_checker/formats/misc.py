@@ -913,6 +913,13 @@ def exif_from_raw(data: bytes):
     return None
 
 
+# 画像が開けない・途中で切れているときの次の手（PDF の「別名で保存した写しを検査」と同じ形）
+IMAGE_BROKEN_HELP = (
+    "画像を表示できるソフトで開けるなら、PNG か JPEG で別名で保存した写しを検査してください。"
+    "開けなければ元のファイルを取り直してください"
+)
+
+
 def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     from PIL import Image
 
@@ -934,7 +941,7 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
                 exif = None
             pil_xmp = _pil_xmp(im)
     except Exception as e:
-        raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式）: {e}")
+        raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式。{IMAGE_BROKEN_HELP}）: {e}")
     exif_fields = scan_exif(exif, item, col)  # 写真の情報は、OCR を使わない・小さな画像でも読む
     xmp_count = scan_xmp(data, item, col, pil_xmp)
     if max(w, h) < ctx.options.min_image_px:
@@ -949,7 +956,12 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
         raise Uncheckable("OCR を無効にして実行したため画像の中の文字を検査していない（要目視）")
     if not ocr.is_available():
         raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）: {ocr.unavailable_reason()}")
-    text = ocr.ocr_image_bytes(data)
+    try:
+        text = ocr.ocr_image_bytes(data)
+    except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）
+        if "画素数が大きすぎる" in str(e):
+            raise Uncheckable(f"画像の画素数が大きすぎるため検査していない（要目視）: {e}")
+        raise Uncheckable(f"画像を読み込めなかった（途中で切れているか壊れている可能性。{IMAGE_BROKEN_HELP}）: {e}")
     item.method = f"OCR（{w}×{h}px・{frames}ページ）"
     item.notes.append("画像の文字は OCR で読み取った（手書き・かすれ・小さい文字は読み落としうる）")
     col.add_lines(text, location_prefix="OCR ", method="OCR", ocr=True)
@@ -974,7 +986,9 @@ def _handle_jpeg_xr(ctx: ScanContext, data: bytes, item: ItemResult, col: Collec
     try:
         img = ocr.open_with_wic(data)
     except ValueError as e:
-        raise Uncheckable(f"画像（JPEG XR）を開けなかった: {e}")
+        if "画素数が大きすぎる" in str(e):
+            raise Uncheckable(f"画像（JPEG XR）の画素数が大きすぎるため検査していない（要目視）: {e}")
+        raise Uncheckable(f"画像（JPEG XR）を開けなかった（{IMAGE_BROKEN_HELP}）: {e}")
     w, h = img.size
     if max(w, h) < ctx.options.min_image_px:
         item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
@@ -1046,7 +1060,7 @@ def handle_image_unsupported(ctx: ScanContext, blob: Blob, item: ItemResult, col
         except Image.DecompressionBombError as pe:
             raise Uncheckable(f"画像（HEIC/AVIF）の画素数が大きすぎるため検査していない（要目視）: {pe}")
         except Exception as pe:  # pillow-heif の中の失敗（壊れている・未対応の符号化）
-            help_text = f"。{HEIF_HELP}" if no_codec else ""
+            help_text = f"。{HEIF_HELP}" if no_codec else f"。{IMAGE_BROKEN_HELP}"
             raise Uncheckable(f"画像（HEIC/AVIF）を開けなかった（壊れている可能性。要目視）{help_text}: {pe}")
         how = "pillow-heif"
         if img is None:

@@ -74,6 +74,7 @@ def test_tar_member_not_extractable(tmp_path, monkeypatch):
     reason = failed[0].reason
     assert reason.startswith("tar から取り出せなかった（通常のファイルでない項目か、壊れている可能性）。"), reason
     assert archive.ARCHIVE_BROKEN_HINT in reason, reason
+    assert "（詳細: " not in reason, reason  # 例外が無い経路なので、詳細を付けない
 
 
 def test_sqlite_tables_unreadable(tmp_path):
@@ -96,6 +97,7 @@ def test_dbase_header_truncated(tmp_path):
     item = _scan(tmp_path, "list.dbf", head)[0]
     assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
     _assert_detail_last(item.reason, "dBase の見出しを読めなかった（壊れている可能性）。", "取り直してください")
+    assert "index out of range" in item.reason, item.reason  # 生の文は詳細に残す
 
 
 def test_eml_part_not_decodable(tmp_path, monkeypatch):
@@ -174,4 +176,4 @@ def test_runner_unexpected_error(tmp_path, monkeypatch):
     r._save_result(_Raises(ValueError("boom")), path, 0.0, _Expired, 0)
     assert len(saved) == 1, saved
     _assert_detail_last(saved[0], "読み取りの途中で想定外のエラーになり、検査できなかった（要目視）。", UNEXPECTED_HINT)
-    assert "ValueError" in saved[0] and "boom" in saved[0], saved[0]
+    assert "ValueError: boom" in saved[0], saved[0]

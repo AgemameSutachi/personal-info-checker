@@ -78,13 +78,21 @@ def table_counts(rows) -> dict[str, int]:
         # 英語の名前のセルを横持ちの見出しにしない（前は Patel の右の番号を tel の見出しで読み、電話に数えていた）
         (
             [["Name", "Remarks"], ["Patel", "12345678"], ["Raj Patel", "0312345678"], ["Ismail", "abc"]],
-            {"name": 4, "phone": 0, "email": 0},
+            {"name": 3, "phone": 0, "email": 0},
         ),
         # 見出しの語を含む英語の項目名は横持ちの見出しのまま（Guardian Phone・HomePhone・Usermail）
         (
             [["Guardian Phone", "0312345678"], ["HomePhone", "0612345678"], ["Usermail", "taro@example.com"]],
             {"phone": 2, "email": 1},
         ),
+        # 英語の見出しの行の項目名（Remarks・Department・Job Title）を、左隣の Name の値（氏名）と読まない
+        (
+            [["Name", "Remarks", "Department", "Job Title", "Join Date"], ["Taro Yamada", "-", "Sales", "Manager", ""]],
+            {"name": 1},
+        ),
+        # 1行目が横持ちの申込書でも、値の英語の名前は今までどおり拾う（Roman・Kana は見出しの語だが名前にもある）
+        ([["Name", "Grant Price"], ["Phone", "090-1234-5678"]], {"name": 1, "phone": 1}),
+        ([["Name", "Roman"], ["Phone", "090-1234-5678"]], {"name": 1, "phone": 1}),
         # 横持ちの申込書
         (
             [["氏名", "鬼瓦権左衛門"], ["住所", "東京都港区六本木6-10-1"], ["電話", "0312345678"]],

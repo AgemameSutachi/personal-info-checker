@@ -806,7 +806,8 @@ class Collector:
                 self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
                 cur_score = score
                 cur_cells = cells
-                self._table_row(values, r_idx, [], location_fn, method)  # 見出し行自体も検査（見出しなしで）
+                # 見出し行自体も検査（見出しなしで）
+                self._table_row(values, r_idx, [], location_fn, method, header_row=True)
             else:
                 self._table_row(values, r_idx, headers, location_fn, method)
             prev_blank = False
@@ -826,8 +827,12 @@ class Collector:
             self._table_row(values, r_idx, headers, location_fn, method, sure)
         return n
 
-    def _table_row(self, values, r_idx, headers, location_fn, method, sure: list[bool] | None = None) -> None:
+    def _table_row(
+        self, values, r_idx, headers, location_fn, method, sure: list[bool] | None = None, header_row: bool = False
+    ) -> None:
         """表の1行を検査する。sure は列ごとの「見出しが個人情報の見出し語か」（無ければここで判定する）。
+
+        header_row は見出しと決めた行。その行の英語の項目名（Remarks・Department）は、左隣の見出しの値として読まない。
 
         場所の文字列は明細に載せるときだけ要るので、セルごとには作らず location_fn に任せる（明細はセルの数より
         ずっと少ない）。呼び出し側の location_fn は行・列だけで場所が決まること（後から呼んでも同じ文字列になること）。
@@ -846,7 +851,7 @@ class Collector:
                 header = None
                 has_category = False
             weak = False
-            if not has_category:
+            if not has_category and not (header_row and _is_en_label_cell(v)):
                 # 横持ち: 左隣（空白を挟んでもよい）のセルが見出し語なら、それを見出しにする。
                 # 左隣が「見出し語＋値」のセルなら、見出しのおかげで拾えた分は確度を低にする（座標を番号と取り違えないため）
                 for j in range(c_idx - 1, max(-1, c_idx - 3), -1):
@@ -979,6 +984,29 @@ RE_GENERIC_HEADER = re.compile(
     r"^(No\.?|NO|№|ID|番号|連番|通番|部署|部門|所属|役職|備考|区分|種別|日付|会社名?|社名|内容|メモ|状態|コード|"
     r"[一-龥]{1,4}日|第?\d{1,2}希望|.{1,6}番号)$"
 )
+
+
+# 見出しの行に並ぶ、個人情報でない英語の項目名の語。「Name | Remarks | Department」の Remarks・Department を
+# 左隣の Name の値（氏名）と読まないために使う。姓にもある語（Price・Branch・Rank・Grade・Class）は入れない
+_EN_LABEL_WORDS = frozenset(
+    "remarks remark notes note memo comment comments status department dept division section title position role "
+    "company organization organisation date id no number code type category team description item joined start end "
+    "created updated employee staff member job salary amount qty quantity total nationality country region "
+    "reference ref account join hire manager location order occupation hobby birthplace blood".split()
+)
+
+
+def _is_en_label_cell(v: str) -> bool:
+    """英字のセルが、項目名の語（_EN_LABEL_WORDS）を1つ以上含み、項目名の語と英語の見出しの語だけでできているか。
+
+    見出しの語だけのセル（Roman・Kana は名前にもある）はここでは外さない（見出しの語そのものは値の側で判定する）。
+    """
+    if not v.isascii():
+        return False
+    words = [w.lower() for w in detectors._RE_EN_WORD.findall(v)]
+    return any(w in _EN_LABEL_WORDS for w in words) and all(
+        w in _EN_LABEL_WORDS or w in detectors._EN_HEADER_WORDS for w in words
+    )
 
 
 def _header_row_score(values: list[str]) -> tuple[int, int]:

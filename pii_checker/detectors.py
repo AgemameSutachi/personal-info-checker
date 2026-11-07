@@ -1746,7 +1746,7 @@ def _name_label_in_header_row(text: str, h: Hit) -> str:
     見出し語と値の間が空白2つ以上・タブ・全角空白（表の列の区切り）で、その行が3つ以上のセルに分かれ、
     数字を1つも含まない（見出し行には値が無い）・_HEADER_ROW_MAX 文字までの行だけ。
     - "drop": 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）
-    - "low": 次の空でない行が同じ数のセルに分かれ、値と同じ列のセルに数字があり、最初のセルが見出しの語でない
+    - "low": 次の空でない行が同じ数のセルに分かれ、値の列から右のセルに数字があり、最初のセルが見出しの語でない
       （表のデータの行「ベンチ      5.2%    0.0%」）。帳票の「氏名    山田太郎    営業部」の次の行が
       「入社日    2024/01/01    正社員」のように同じ形になることがあるので、落とさずに 低 にする
     - "": 上のどれでもない。次の行が「電話    03-1234-5678    内線12」のように見出しの語で始まる帳票・
@@ -1779,7 +1779,11 @@ def _name_label_in_header_row(text: str, h: Hit) -> str:
             return ""
         nxt = _fixed_width_cells(text[pos : nxt_bounds[1]])
         if nxt:
-            if len(nxt) == len(cells) and any(c.isdigit() for c in nxt[column]) and header_category(nxt[0]) is None:
+            if (
+                len(nxt) == len(cells)
+                and any(c.isdigit() for cell in nxt[column:] for c in cell)
+                and header_category(nxt[0]) is None
+            ):
                 return "low"
             return ""
         pos = nxt_bounds[1] + 1

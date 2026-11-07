@@ -613,11 +613,24 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
         )
 
 
+def _expand_total_text(ctx: ScanContext, total: int) -> str:
+    """上限と比べる展開後の合計の書き方。判定はこれまでに展開した分も足すので、その分があれば合わせた数で示す。
+
+    今回の分だけを書くと、入れ子の書庫で「上限より小さい合計が上限を超えた」と読めてしまうため。
+    """
+    if ctx.expanded_bytes <= 0:
+        return f"展開後の合計（{size_text(total)}）"
+    return (
+        f"これまでに展開した分（{size_text(ctx.expanded_bytes)}）と合わせた展開後の合計"
+        f"（{size_text(ctx.expanded_bytes + total)}。この書庫の分は {size_text(total)}）"
+    )
+
+
 def _check_bomb(ctx: ScanContext, total: int, archive_size: int) -> None:
     """展開後の大きさが異常に大きいもの（zip 爆弾）を打ち切る。OS イメージのような正当な巨大さは通す。"""
     if ctx.expanded_bytes + total > ctx.options.max_expand_bytes:
         raise Uncheckable(
-            f"展開後の合計（{size_text(total)}）が上限（{size_text(ctx.options.max_expand_bytes)}）を超えるため打ち切り"
+            f"{_expand_total_text(ctx, total)}が上限（{size_text(ctx.options.max_expand_bytes)}）を超えるため打ち切り"
             "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
         )
     if total > 10 * 1024**3 and archive_size > 0 and total / archive_size > ctx.options.max_expand_ratio:
@@ -708,7 +721,7 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
                 total = sum(i.uncompressed or 0 for i in infos)
                 if ctx.expanded_bytes + total > ctx.options.max_expand_bytes:
                     raise Uncheckable(
-                        f"展開後の合計（{size_text(total)}）が上限（{size_text(ctx.options.max_expand_bytes)}）"
+                        f"{_expand_total_text(ctx, total)}が上限（{size_text(ctx.options.max_expand_bytes)}）"
                         "を超えるため打ち切り（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
                     )
                 outdir = ctx.new_tmp_subdir()
@@ -1002,12 +1015,12 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
                 ctx.ensure_space(256 * 1024**2, "展開の途中で")
             if ctx.expanded_bytes + written > ctx.options.max_expand_bytes:
                 raise Uncheckable(
-                    f"展開後の大きさが上限（{size_text(ctx.options.max_expand_bytes)}）を超えたため打ち切り"
-                    "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
+                    f"{_expand_total_text(ctx, written)}が上限（{size_text(ctx.options.max_expand_bytes)}）"
+                    "を超えたため打ち切り（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             if written > 10 * 1024**3 and written / max(1, blob.size) > ctx.options.max_expand_ratio:
                 raise Uncheckable(
-                    f"圧縮率が異常（{written / max(1, blob.size):.0f}倍）のため打ち切り"
+                    f"圧縮率が異常（{written / max(1, blob.size):.0f}倍・展開した分 {size_text(written)}）のため打ち切り"
                     "（圧縮爆弾の疑い。本物の圧縮ファイルなら、展開してから出てきたファイルを検査してください）"
                 )
             dst.write(chunk)

@@ -687,7 +687,11 @@ def _is_header_word_value(v: str) -> bool:
     if not v.isascii():
         return len(v) <= 12
     words = [w.lower() for w in _RE_EN_WORD.findall(v)]
-    return bool(words) and all(w in _EN_HEADER_WORDS for w in words)
+    if words and all(w in _EN_HEADER_WORDS for w in words):
+        return True
+    # 区切りの無い全部大文字・全部小文字の1語（HOMEPHONE・TELNO・emailaddress）は、見出しの語のつなぎも項目名とみなす。
+    # 頭だけ大文字の語（Ageno など、つなぎに当たる名前）は名前として残す
+    return len(words) == 1 and (v.isupper() or v.islower()) and _is_en_header_compound(words[0])
 
 
 def _is_en_header_compound(word: str) -> bool:

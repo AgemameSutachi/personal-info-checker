@@ -290,6 +290,7 @@ HEADER_EXACT = {
     "fullname": "name",
     "firstname": "name",
     "lastname": "name",
+    "surname": "name",
     "カナ": "name",
     "かな": "name",
     "セイ": "name",
@@ -313,6 +314,7 @@ HEADER_EXACT = {
     "宛名": "name",
     "受取人": "name",
     "address": "address",
+    "addr": "address",
 }
 HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
     # 「在留カード番号」はカード番号の語を、「雇用保険被保険者番号」は保険証の語（被保険者番号）を含むので先に見る。
@@ -320,10 +322,10 @@ HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(在留カード番号|在留カードno)", re.I), "residence_card"),
     (re.compile(r"(雇用保険.{0,6}番号)"), "employment_insurance"),
     (re.compile(r"(住民票コード)"), "resident_code"),
-    (re.compile(r"(マイナンバー|個人番号|mynumber)", re.I), "my_number"),
-    (re.compile(r"(カード番号|クレジット|cardno|cardnumber)", re.I), "credit_card"),
+    (re.compile(r"(マイナンバー|個人番号|mynumber|individualnumber)", re.I), "my_number"),
+    (re.compile(r"(カード番号|クレジット|cardno|cardnumber|creditcard|ccnumber)", re.I), "credit_card"),
     (re.compile(r"(口座番号|口座no|口座)", re.I), "bank_account"),
-    (re.compile(r"(免許証番号|免許番号|免許証)"), "drivers_license"),
+    (re.compile(r"(免許証番号|免許番号|免許証|drivers?'?s?license)", re.I), "drivers_license"),
     (re.compile(r"(旅券|パスポート|passport)", re.I), "passport"),
     (re.compile(r"(年金番号)"), "pension"),
     (re.compile(r"(被保険者番号|保険者番号|保険証|記号番号)"), "health_insurance"),
@@ -338,7 +340,11 @@ HEADER_CONTAINS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(住所|番地|address|居所)", re.I), "address"),
     (re.compile(r"(電話|携帯|連絡先|phone|mobile|tel)", re.I), "phone"),
     (re.compile(r"(メール|mail)", re.I), "email"),
-    (re.compile(r"(氏名|名前|フリガナ|ふりがな|ﾌﾘｶﾞﾅ|カナ氏名|姓名)", re.I), "name"),
+    # 英語の見出し（姓・名・ふりがな）。「name」だけの語は値の列（「file name」など）にも多いので完全一致の表で見る
+    (
+        re.compile(r"(氏名|名前|フリガナ|ふりがな|ﾌﾘｶﾞﾅ|カナ氏名|姓名|surname|givenname|familyname|furigana)", re.I),
+        "name",
+    ),
     # 顧客表・申込の控えでよく見る、人を指す見出し（2026-10-18 評価で、これらの列が氏名にならず住所・電話が 低 に落ちた）
     (
         re.compile(
@@ -658,6 +664,29 @@ def _looks_like_code(v: str) -> bool:
     return len(parts) >= 2 and any(p in _CODE_WORDS for p in parts[1:])
 
 
+# 英語の見出しに使う語。英字だけの値は、語がすべてこの中にあるときだけ見出し語そのもの（項目名）とみなす。
+# 見出しの判定は語の一部でも当たる（usermail・homephone を拾うため）ので、値の「Patel」「Ismail」「Dobson」が
+# tel・mail・dob を含むだけで項目名になり、氏名の列から落ちていた（2026-11-07）
+_EN_HEADER_WORDS = frozenset(
+    "name names full first last given family middle sur surname kana furigana kanji roman "
+    "address addr line street city zip code postal postcode zipcode home work office mailing current permanent "
+    "phone tel telephone mobile cell fax no number num contact emergency primary secondary "
+    "email mail e date of birth birthday birthdate dob gender sex age "
+    "card credit cc my individual passport driver drivers s license licence customer client user person".split()
+)
+_RE_EN_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+
+
+def _is_header_word_value(v: str) -> bool:
+    """表の値が「住所」「電話」「Date of Birth」などの見出し語そのもの（横持ちの表の項目名）か。"""
+    if cannot_be_header(v) or header_category(v) is None:
+        return False
+    if not v.isascii():
+        return len(v) <= 12
+    words = [w.lower() for w in _RE_EN_WORD.findall(v)]
+    return bool(words) and all(w in _EN_HEADER_WORDS for w in words)
+
+
 def _header_value_hit(category: str, value: str) -> Hit | None:
     """見出しが個人情報の列の値を、検出として扱うかを決める。"""
     v = value.strip()
@@ -665,7 +694,7 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
         return None
     if v.lower() in ("null", "none", "nan", "-", "ー", "なし", "無し", "n/a", "na", "0"):
         return None
-    if len(v) <= 12 and not cannot_be_header(v) and header_category(v) is not None:
+    if _is_header_word_value(v):
         return None  # 「住所」「電話」などの見出し語そのもの（横持ちの表の項目名）は値ではない
     if category in ("address", "name") and v.isascii() and _looks_like_code(v):
         return None  # コードを表として読んだときの識別子・文の断片は、住所・名前ではない

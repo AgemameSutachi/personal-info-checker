@@ -1438,6 +1438,10 @@ _DUMP_LINE_MAX = 200
 # （ASCII の英数字と「-._~/%:@+=」だけ。「?」「#」「;」「&」「,」・空白・引用符・日本語の文字などが来たら URL の外とみなす）
 _URL_PATH_MAX = 300
 _URL_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~/%:@+=")
+# AWS の ARN のアカウント番号の欄の手前（「arn:aws:iam::」「arn:aws-cn:lambda:cn-north-1:」）。
+# 区分（aws・aws-cn・aws-us-gov・aws-iso-b など）・サービス・地域（空のこともある）の後ろの「:」で終わる（_in_arn_account）
+_RE_ARN_ACCOUNT_BEFORE = re.compile(r"(?<![0-9A-Za-z])arn:aws(?:-[a-z]+)*:[a-z0-9-]{1,64}:[a-z0-9-]{0,32}:\Z")
+_ARN_PREFIX_MAX = 120
 # Wavefront OBJ の要素の行（頂点・面・線。「f 1074/12/3 1076/13/3 1075/14/3」）
 _RE_OBJ_LINE = re.compile(r"(?:v|vt|vn|vp|f|l|p)(?:[ \t]+-?[0-9.eE/+-]+){2,}")
 # IANA の一覧に無いが、社内のメールで使われる TLD（.local の Active Directory など）。
@@ -1624,8 +1628,8 @@ def _in_url_path(text: str, start: int, end: int) -> bool:
     句読点・カンマで URL の外とみなして残す。日本語を含むパスも同じく外とみなす（見落とすより残す側）。
     検出のすぐ前が「:」「=」のもの（「https://a.jp/x:123456789018」・「?」の無い「…/x=123456789018」）は、
     パスの一部ではなく項目の値として書いた形なので残す（配信の URL の番号は「/」「_」「-」の後ろに来る）。
-    パスの中の「token=」「sig=」「ts=」「order:」の後ろ・パスに入れた AWS の ARN の本物でない番号も拾うが、
-    形では分けられないので見落とさない側に倒す。
+    パスの中の「token=」「sig=」「ts=」「order:」の後ろの本物でない番号も拾うが、
+    形では分けられないので見落とさない側に倒す（パスに入れた AWS の ARN のアカウント番号は _in_arn_account で外す）。
     """
     if start > 0 and text[start - 1] in ":=":
         return False
@@ -1633,6 +1637,20 @@ def _in_url_path(text: str, start: int, end: int) -> bool:
     if i <= 0 or not (text[i - 1].isascii() and text[i - 1].isalpha()):
         return False
     return all(c in _URL_PATH_CHARS for c in text[i + 3 : end])
+
+
+def _in_arn_account(text: str, start: int, end: int) -> bool:
+    """検出が AWS の ARN のアカウント番号の欄（「arn:aws:iam::123456789012:role/x」の12桁・すぐ後ろが「:」）か。
+
+    アカウント番号は必ず12桁で、ARN の4つ目の「:」と5つ目の「:」の間に来る。IAM のポリシー・CloudFormation の
+    テンプレート・ログの JSON に多く、検査数字が合うとマイナンバーの形に見える（2026-11-08 に確かめた・
+    URL のパスに入れたものは _in_url_path が「:」の後ろとして残していた）。
+    すぐ後ろが「:」のものだけを見る（S3 の「arn:aws:s3:::<バケット名>」のようにアカウントの欄が空の ARN の、
+    資源の名前の12桁は外さない）。
+    """
+    if text[end : end + 1] != ":":
+        return False
+    return bool(_RE_ARN_ACCOUNT_BEFORE.search(text, max(0, start - _ARN_PREFIX_MAX), start))
 
 
 def _across_number_lines(text: str, start: int, end: int) -> bool:
@@ -1898,6 +1916,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     「名前」の語を含むもの（引数の説明の文）・「=」の形でコードの代入の続きのもの（関数の引数の中なら 低 に下げる・
     _name_label_code_shape）
     2026-11-08: 「氏名の見出し語＋名前」が固定幅の表の見出し行の隣の見出しのもの（_name_label_in_header_row）
+    2026-11-08: マイナンバー（手がかり語なし）が AWS の ARN のアカウント番号の欄のもの（_in_arn_account）
     """
     out = []
     for h in hits:
@@ -1920,6 +1939,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 or _RE_DATE_PREFIX_12.fullmatch(_RE_NON_DIGIT.sub("", h.value))
                 or _beside_long_digit_run(text, h.start, h.end)
                 or _in_url_path(text, h.start, h.end)
+                or _in_arn_account(text, h.start, h.end)
                 or _after_country_prefix(text, h.start)
             ):
                 continue

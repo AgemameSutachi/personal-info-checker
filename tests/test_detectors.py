@@ -103,6 +103,19 @@ def test_nothing_inside_hash(text):
     assert types_of(text) == {}
 
 
+def test_hash_in_long_text_next_to_japanese():
+    """並びは検出を含む語の中だけで探す。日本語が隣り合う並び・長い本文の離れた所の並びも捨て、ほかの検出は残す。"""
+    noise = "処理を確認しました。size=123 elapsed=0.5\n" * 2000
+    text = (
+        "電話 090-1234-5678\n"
+        + noise
+        + "メモ：0a1b2c3d-4e5f-4a6b-8c7d-123456789018です\n"
+        + noise
+        + "sha 4111111111111111abcdef0123456789abcdef0123456789abcdef01234567"
+    )
+    assert set(types_of(text)) == {"phone"}
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [

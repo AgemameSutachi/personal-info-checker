@@ -744,6 +744,19 @@ _RE_ORG_PREFIX = re.compile(r"株式会社|有限会社|合同会社|[(（](?:�
 _RE_KANJI = re.compile(r"[一-龥々]")
 
 
+def name_value_has_honorific(value: str) -> bool:
+    """氏名の列の値が敬称（様・殿・さん）を含むか（人宛ての宛名。会社名の列でも人として扱う）。"""
+    return bool(_RE_HONORIFIC_IN_VALUE.search(value))
+
+
+def org_name_marked(value: str) -> bool:
+    """氏名の列の値が会社の印（法人格・持株会社・金融機関など）を含むか。敬称つきは人宛てなので含めない。
+
+    表の列ごとの「会社名の列か」の判定（engine の _ColumnOrgs）に使う。
+    """
+    return not _RE_HONORIFIC_IN_VALUE.search(value) and bool(_RE_ORG_NAME.search(value))
+
+
 def _header_value_hit(category: str, value: str) -> Hit | None:
     """見出しが個人情報の列の値を、検出として扱うかを決める。"""
     v = value.strip()

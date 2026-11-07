@@ -30,6 +30,7 @@ from ..engine import (
     ScanContext,
     Uncheckable,
     _ColumnDigits,
+    _ColumnOrgs,
     long_path,
 )
 from ..models import Status
@@ -352,6 +353,7 @@ def _read_access_helper32(
         pass
     columns_by_table: dict[str, list[str]] = {}
     digits_by_table: dict[str, _ColumnDigits] = {}
+    orgs_by_table: dict[str, _ColumnOrgs] = {}
     opened = None
     error = None
     done = False
@@ -379,6 +381,9 @@ def _read_access_helper32(
                 digits = digits_by_table.get(table)
                 if digits is None:
                     digits = digits_by_table[table] = _ColumnDigits()
+                orgs = orgs_by_table.get(table)
+                if orgs is None:
+                    orgs = orgs_by_table[table] = _ColumnOrgs()
                 for ci, v in enumerate(values):
                     if v in (None, ""):
                         continue
@@ -392,6 +397,7 @@ def _read_access_helper32(
                             header=header,
                             method="表のレコード（32bit）",
                             id_column=digits.cell(ci, s),
+                            org_column=orgs.cell(ci, header, s),
                         )
                     finally:
                         col.cell_pos = None

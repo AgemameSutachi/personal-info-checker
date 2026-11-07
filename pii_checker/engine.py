@@ -85,6 +85,12 @@ COLUMN_ID_TRACK = 200  # 1列で数える異なる値の上限（ここで判定
 # 変わる表のため）。番号の列で偶然続く見込みは約 0.1 の8乗（1億分の1）
 COLUMN_ID_RELEASE_STREAK = 8
 RE_TWELVE_DIGITS = re.compile(r"\d{12}")
+# 氏名の列が会社名の列か（株の表の英語の見出し「name」の銘柄名・2026-11-07）。列の異なる値のうち会社の印（法人格など）を
+# 含むものが COLUMN_ORG_MIN 個以上、かつ COLUMN_ORG_MIN_RATIO 以上なら、その列で見出しのおかげで拾えた氏名を 低 に下げる
+# （人の名前の列に会社の印はまず入らない。法人格の無い社名「トヨタ自動車」は1つずつでは人の名前と見分けられない）
+COLUMN_ORG_MIN = 3
+COLUMN_ORG_MIN_RATIO = 0.05
+HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
 
 
 def checkpoint_path(options: ScanOptions, top_path: str) -> str:
@@ -313,6 +319,7 @@ class Collector:
         skip_seen: bool = False,
         weak_header: bool = False,
         id_column: bool = False,
+        org_column: bool = False,
     ) -> None:
         """文字列を検査して結果に加える。
 
@@ -322,6 +329,7 @@ class Collector:
         weak_header=True は見出しが確かでない（左隣が「見出し語＋値」のセル）とき。見出しのおかげで拾えた分は確度を低にする。
         id_column=True は番号の列のセル（_ColumnDigits）。手がかり語の無い12桁のマイナンバーを拾わない
         （外した値は覚えておき、raw・skip_seen の読み直しでも拾わない）。
+        org_column=True は会社名の列のセル（_ColumnOrgs）。見出しのおかげで拾えた氏名を 低 にする（敬称つきは下げない）。
         """
         if text is None:
             return
@@ -382,6 +390,8 @@ class Collector:
             confidence = hit.confidence
             if plain is not None and hit.pii_type != "custom":
                 confidence = plain.get((hit.pii_type, hit.value), Confidence.LOW)
+            if org_column and hit.rule == HEADER_NAME_RULE and not detectors.name_value_has_honorific(hit.value):
+                confidence = Confidence.LOW  # 銘柄名の列の、法人格の無い社名
             if raw and confidence == Confidence.HIGH:
                 confidence = Confidence.MEDIUM  # 残留データは値の区切りが失われていて取り違えうるので1段下げる
             elif raw and confidence == Confidence.MEDIUM and hit.pii_type in ("credit_card", "my_number", "phone"):
@@ -782,6 +792,7 @@ class Collector:
         """
         self._skip_seen = skip_seen
         self._col_digits = _ColumnDigits()
+        self._col_orgs = _ColumnOrgs()
         headers: list[str | None] = []
         cur_score = 0
         cur_cells = 0
@@ -804,6 +815,7 @@ class Collector:
             if switch:
                 headers = [v or None for v in values]
                 self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
+                self._col_orgs = _ColumnOrgs()
                 cur_score = score
                 cur_cells = cells
                 # 見出し行自体も検査（見出しなしで）
@@ -817,6 +829,7 @@ class Collector:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""
         self._skip_seen = False
         self._col_digits = _ColumnDigits()
+        self._col_orgs = _ColumnOrgs()
         headers = list(columns)
         # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
         sure = [bool(h and detectors.header_category(h)) for h in headers]
@@ -839,6 +852,7 @@ class Collector:
         """
         skip_seen = getattr(self, "_skip_seen", False)
         col_digits = getattr(self, "_col_digits", None)
+        col_orgs = getattr(self, "_col_orgs", None)
         n_headers = len(headers)
         for c_idx, v in enumerate(values):
             if not v:
@@ -850,6 +864,8 @@ class Collector:
             else:
                 header = None
                 has_category = False
+            # 会社名の列かは、列の見出しで決まる氏名の列だけで数える（横持ちの左隣の見出しは列の意味ではない）
+            org_column = has_category and col_orgs is not None and col_orgs.cell(c_idx, header, v)
             weak = False
             if not has_category and not (header_row and _is_en_label_cell(v)):
                 # 横持ち: 左隣（空白を挟んでもよい）のセルが見出し語なら、それを見出しにする。
@@ -871,9 +887,47 @@ class Collector:
                     skip_seen=skip_seen,
                     weak_header=weak,
                     id_column=id_column,
+                    org_column=org_column,
                 )
             finally:
                 self.cell_pos = None
+
+
+class _ColumnOrgs:
+    """表の氏名の列ごとに、異なる値と、そのうち会社の印を含む数を数え、会社名の列（銘柄の一覧など）かを決める。
+
+    _ColumnDigits と同じく表ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで（そこで判定を固める）。
+    判定が付く前に読んだ値は今までどおり（中）。
+    """
+
+    __slots__ = ("_values", "_orgs", "_decided", "_is_name", "verdict")
+
+    def __init__(self) -> None:
+        self._values: dict[int, set[str]] = {}
+        self._orgs: dict[int, int] = {}
+        self._decided: set[int] = set()  # 判定を固めた列（異なる値が上限に届いた）
+        self._is_name: dict[int, bool] = {}  # 列の見出しが氏名か（見出しは表の中で変わらないので1回だけ調べる）
+        self.verdict: dict[int, bool] = {}  # 列ごとの今の判定（会社名の列なら True）
+
+    def cell(self, c_idx: int, header: str | None, v: str) -> bool:
+        """表のセルを1つ見て、この列が今のところ会社名の列か（org_column に渡す値）を返す。header は列の見出し。"""
+        is_name = self._is_name.get(c_idx)
+        if is_name is None:
+            is_name = self._is_name[c_idx] = bool(header) and detectors.header_category(header) == "name"
+        if not is_name or c_idx in self._decided:
+            return self.verdict.get(c_idx, False)
+        v = v.strip()
+        values = self._values.get(c_idx)
+        if values is None:
+            values = self._values[c_idx] = set()
+        if v and v not in values:
+            values.add(v)
+            orgs = self._orgs[c_idx] = self._orgs.get(c_idx, 0) + detectors.org_name_marked(v)
+            self.verdict[c_idx] = orgs >= COLUMN_ORG_MIN and orgs >= len(values) * COLUMN_ORG_MIN_RATIO
+            if len(values) >= COLUMN_ID_TRACK:
+                self._decided.add(c_idx)
+                del self._values[c_idx]
+        return self.verdict.get(c_idx, False)
 
 
 class _ColumnDigits:

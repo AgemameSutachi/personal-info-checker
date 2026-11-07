@@ -125,29 +125,43 @@ def _cli_flags() -> set[str]:
 
 
 def test_hint_labels_exist_on_screen_and_cli():
-    """理由の文で「」に入れた設定の名前は画面の項目名そのまま、括弧の引数はコマンドの版に実在する。
+    """理由の文で「」に入れた設定の名前は画面の項目名そのまま、引数はコマンドの版に実在する。
 
     「設定で〜」とだけ書くと、どこを変えればよいか分からない（7z.exe の場所のように、画面に無い設定を案内していたこともある）。
     """
     import re
 
     from pii_checker import runner
-    from pii_checker.engine import OCR_OFF_HINT
+    from pii_checker.engine import DEEP_SWEEP_HINT, OCR_OFF_HINT, TEMP_DIR_HINT
 
-    archive_src = (ROOT / "pii_checker" / "formats" / "archive.py").read_text(encoding="utf-8")
-    hints = [runner.TIMEOUT_HINT, OCR_OFF_HINT]
-    hints += re.findall(r"「(?:展開に使う一時フォルダ|ディスクイメージの[^」]+)」[^\"]*", archive_src)
-    assert len(hints) == 4, hints
-    screen = _screen_text()
+    screen = re.sub(r"<[^>]+>", "", _screen_text())
     flags = _cli_flags()
-    for hint in hints:
+    for hint in (runner.TIMEOUT_HINT, OCR_OFF_HINT, TEMP_DIR_HINT, DEEP_SWEEP_HINT):
         labels = re.findall(r"「([^」]+)」", hint)
         assert labels, hint
         for label in labels:
-            assert label in re.sub(r"<[^>]+>", "", screen), label
-        for flag in re.findall(r"--[a-z0-9-]+", hint):
+            assert label in screen, label
+        hint_flags = re.findall(r"--[a-z0-9-]+", hint)
+        assert hint_flags, hint
+        for flag in hint_flags:
             assert flag in flags, flag
-        assert "設定で" not in hint, hint
+    # 画面は分・コマンドの版は秒。取り違えて案内しない
+    assert "（分）" in runner.TIMEOUT_HINT and "秒で指定" in runner.TIMEOUT_HINT
+
+
+def test_disk_image_note_only_when_sweep_is_off(tmp_path, monkeypatch):
+    """削除されたファイルの走査をオンにして検査したときは、「オンにして再検査」と案内しない。"""
+    from pii_checker.engine import DEEP_SWEEP_HINT
+    from pii_checker.formats import archive
+
+    monkeypatch.setattr(archive, "find_7z", lambda configured: "7z.exe")
+    monkeypatch.setattr(archive, "handle_with_7z_exe", lambda *a, **k: None)  # 展開は何もしない
+    p = tmp_path / "disk.vmdk"
+    p.write_bytes(b"KDMV" + bytes(1024))  # VMDK の頭
+    for sweep, shown in ((False, True), (True, False)):
+        res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), deep_image_sweep=sweep))
+        notes = " ".join(n for i in res.items for n in i.notes)
+        assert (DEEP_SWEEP_HINT in notes) is shown, (sweep, res.items[0].kind, notes)
 
 
 def test_ocr_off_image_reason_names_setting(tmp_path):
@@ -159,7 +173,7 @@ def test_ocr_off_image_reason_names_setting(tmp_path):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
     assert item.status == Status.UNCHECKABLE, item.reason
     assert "OCR を無効にして実行したため" in item.reason, item.reason
-    assert "をオンにして（コマンドの版は --no-ocr を外して）再検査してください" in item.reason, item.reason
+    assert "をオンにして再検査してください。コマンドの版は --no-ocr を外します" in item.reason, item.reason
 
 
 def test_ocr_off_pdf_reason_names_setting(tmp_path):
@@ -179,4 +193,4 @@ def test_ocr_off_pdf_reason_names_setting(tmp_path):
     doc.close()
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
     assert "OCR を無効にして実行した。" in item.reason, item.reason
-    assert "--no-ocr を外して" in item.reason, item.reason
+    assert "--no-ocr を外します" in item.reason, item.reason

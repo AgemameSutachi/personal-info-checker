@@ -42,7 +42,16 @@ TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目�
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
 # OCR を切って検査したときの次の手（画面の項目名と、コマンドの版の引数）
 OCR_OFF_HINT = (
-    "「画像とスキャンした PDF の文字を OCR で読む」をオンにして（コマンドの版は --no-ocr を外して）再検査してください"
+    "「画像とスキャンした PDF の文字を OCR で読む」をオンにして再検査してください。コマンドの版は --no-ocr を外します"
+)
+# 一時フォルダの空きが足りないときの次の手
+TEMP_DIR_HINT = (
+    "「展開に使う一時フォルダ」を空きの多いドライブにして再検査してください。コマンドの版は --temp-dir で指定します"
+)
+# ディスクイメージの削除されたファイルも見るときの手
+DEEP_SWEEP_HINT = (
+    "削除されたファイルも見るなら「ディスクイメージの空き領域（削除されたファイル）も調べる」を"
+    "オンにして再検査してください。コマンドの版は --deep-image-sweep を付けます"
 )
 # 画素数が大きすぎる画像の次の手
 IMAGE_TOO_LARGE_HINT = "画像を縮小した写しを検査するか、目視で確かめてください"
@@ -1158,10 +1167,7 @@ class ScanContext:
 
             item.status = Status.UNCHECKABLE
             if is_disk_full(e):
-                item.reason = (
-                    "一時フォルダのドライブが満杯になり、展開・書き出しができなかった。"
-                    "空きの多いドライブを「展開に使う一時フォルダ」に指定して再検査する"
-                )
+                item.reason = "一時フォルダのドライブが満杯になり、展開・書き出しができなかった。" f"{TEMP_DIR_HINT}"
                 return item
             tb = traceback.extract_tb(e.__traceback__)
             where = f"{Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else ""
@@ -1188,7 +1194,8 @@ class ScanContext:
             item.status = Status.UNCHECKABLE
             item.reason = (
                 f"{why}ため形式どおりに読めず、文字列だけを拾う走査もメモリ不足で失敗した。"
-                "作ったアプリで開けるなら、小さく分けた写しを検査するか、中身を目視で確かめてください"
+                "作ったアプリで開けるなら、小さく分けた写しを検査するか、中身を目視で確かめてください。"
+                "開けなければ壊れている可能性があるので元のファイルを取り直してください"
             )
             return
         except Exception as e:

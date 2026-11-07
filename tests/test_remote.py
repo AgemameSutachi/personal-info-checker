@@ -36,6 +36,7 @@ def _serve(root, handler_cls=FTPHandler):
     handler = type("H", (handler_cls,), {})
     handler.authorizer = auth
     handler.encoding = "utf-8"
+    handler.auth_failed_timeout = 0  # 既定はログインの失敗の返事を3秒遅らせる（試験が「違う」を試すたびに3秒待つ）
     server = ThreadedFTPServer(("127.0.0.1", 0), handler)
     th = threading.Thread(target=server.serve_forever, kwargs={"timeout": 0.2}, daemon=True)
     th.start()
@@ -238,7 +239,7 @@ def _job(tmp_path, conn, db, password="secret-pw"):
 def _serve_with(root, handler_base, **attrs):
     auth = DummyAuthorizer()
     auth.add_user("taro", "secret-pw", str(root), perm="elr")
-    handler = type("H", (handler_base,), {"authorizer": auth, "encoding": "utf-8", **attrs})
+    handler = type("H", (handler_base,), {"authorizer": auth, "encoding": "utf-8", "auth_failed_timeout": 0, **attrs})
     server = ThreadedFTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, kwargs={"timeout": 0.2}, daemon=True).start()
     return server, server.socket.getsockname()[1], auth

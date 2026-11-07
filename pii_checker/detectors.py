@@ -730,6 +730,31 @@ def en_header_word_backed(core: str) -> bool:
 # 電話の列で、英字の頭に数字が続くだけの値はコード（TEL・FAX・No の頭の電話番号は残す）
 _RE_URL_LIKE = re.compile(r"://|www\.", re.I)
 _RE_LETTER_CODE = re.compile(r"(?!(?:tel|fax|no)[.:]?[0-9])[A-Za-z]{1,4}[0-9]{3,}", re.I)
+# 氏名の列の値のうち会社名とわかる語（法人格・持株会社・金融機関など。2026-11-07・株のデータの銘柄名の列）。
+# 「工業」「産業」のような語は社名の一部でも人の名前と紛れないが、印として弱いので入れない（法人格の無い社名は見落とす）
+_RE_ORG_NAME = re.compile(
+    r"株式会社|有限会社|合同会社|合資会社|合名会社|一般社団法人|一般財団法人|公益社団法人|公益財団法人|"
+    r"[(（](?:株|有|同)[)）]|㈱|㈲|ホールディングス|投資法人|銀行|証券|信託|生命保険|損害保険|"
+    r"(?<![A-Za-z])(?:Inc|Corp|Corporation|Co\.,? ?Ltd|Ltd|LLC|Holdings|PLC)(?![A-Za-z])",
+    re.I,
+)
+_RE_HONORIFIC_IN_VALUE = re.compile(r"様|殿|さん")
+_RE_WHITESPACE = re.compile(r"\s+")
+_RE_ORG_PREFIX = re.compile(r"株式会社|有限会社|合同会社|[(（](?:株|有|同)[)）]|㈱|㈲")
+_RE_KANJI = re.compile(r"[一-龥々]")
+
+
+def name_value_has_honorific(value: str) -> bool:
+    """氏名の列の値が敬称（様・殿・さん）を含むか（人宛ての宛名。会社名の列でも人として扱う）。"""
+    return bool(_RE_HONORIFIC_IN_VALUE.search(value))
+
+
+def org_name_marked(value: str) -> bool:
+    """氏名の列の値が会社の印（法人格・持株会社・金融機関など）を含むか。敬称つきは人宛てなので含めない。
+
+    表の列ごとの「会社名の列か」の判定（engine の _ColumnOrgs）に使う。
+    """
+    return not _RE_HONORIFIC_IN_VALUE.search(value) and bool(_RE_ORG_NAME.search(value))
 
 
 def _header_value_hit(category: str, value: str) -> Hit | None:
@@ -751,6 +776,17 @@ def _header_value_hit(category: str, value: str) -> Hit | None:
             return None
         # 横持ちの表の項目名（入社日・所属・備考など）は名前ではない
         if len(v) <= 8 and RE_LABEL_WORD.fullmatch(v):
+            return None
+        # 法人格・会社の語で終わる値は会社名（株の表の英語の見出し「name」の列の銘柄名）。空白で区切った最後の語に
+        # 会社の語があるときだけ落とし、会社名の後に人の名前が続くもの（「三井住友銀行 山田太郎」）と敬称つきは残す。
+        # 記号だけの語（銘柄の表の注の印「（株） *」）は語に数えない
+        # 頭に法人格のある社名（「（株）Sun Asterisk」「（株）ライフドリンク カンパニー」）も、2つ目より後ろの語に
+        # 漢字が無ければ会社名とみなす（「株式会社サンプル 山田太郎」は残す）
+        words = [w for w in _RE_WHITESPACE.split(v) if _RE_WORD_CHAR.search(w)]
+        if not _RE_HONORIFIC_IN_VALUE.search(v) and (
+            _RE_ORG_NAME.search(words[-1])
+            or (_RE_ORG_PREFIX.match(v) and not any(_RE_KANJI.search(w) for w in words[1:]))
+        ):
             return None
     elif category == "my_number":
         if my_number_is_valid(digits):
@@ -1644,6 +1680,15 @@ def _era_date_is_broken(text: str, h: Hit) -> bool:
     return text[h.end : h.end + 1] == "." and text[h.end + 1 : h.end + 2].isdigit()
 
 
+# 「よくある姓＋空白＋名」の名の側に来る一般の語（2026-11-07・株のデータの報告の文。証券会社「松井」「野村」の後の語）。
+# 1字の名（実・勉・茂・等・計・全）があるので、名にまず使わない語だけを並べる
+_NOT_GIVEN_NAMES = frozenset(
+    "約 他 各 当選 落選 手数料 銘柄 最低 最高 総合 合計 平均 通常 以上 以下 以外 比較 株価 口座 証券 信託 "
+    "資産 指数 銀行 本店 支店 経由 単元 現物 信用 新規".split()
+)
+_RE_SPACE = re.compile(r"[ 　]")
+
+
 def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     """実物の検査（2026-10-21・ドライブ全体）で多かった、形だけ当たる誤検出を除く。
 
@@ -1662,7 +1707,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     （固定長のレコードの0詰めの欄）・URL のパスの中のもの（_in_url_path。クエリの値は残す）。
     カード番号（確度 高 でないもの）の小数の途中のもの。メールアドレスの形の直後に「_＋小文字」が続くもの
     （識別子の途中で TLD が切れた形・_email_before_identifier）。マイナンバー（手がかり語なし）の直前が
-    大文字の英字2文字のもの（国の頭のついたコード「JP」＋12桁・_after_country_prefix）
+    大文字の英字2文字のもの（国の頭のついたコード「JP」＋12桁・_after_country_prefix）。
+    「よくある姓＋空白＋名」の名の側が一般の語のもの（_NOT_GIVEN_NAMES）・「氏名の見出し語＋名前」の値に
+    「名前」の語を含むもの（引数の説明の文）
     """
     out = []
     for h in hits:
@@ -1716,6 +1763,15 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if decimal_before and text[max(0, h.start - 4) : h.start] == "+81.":
                 decimal_before = False  # 「+81.90-…」の国番号の区切り（小数ではない）
             if decimal_before or (len(after) == 2 and after[0] == "." and after[1].isdigit()):
+                continue
+        elif h.rule == "よくある姓＋空白＋名":
+            # 名の側が一般の語（「松井 約12,600円」「松井 当選 50」「野村 総合バリュー」の証券会社・指数の名前の後の語）
+            if _RE_SPACE.split(h.value, maxsplit=1)[-1] in _NOT_GIVEN_NAMES:
+                continue
+        elif h.rule == "氏名の見出し語＋名前":
+            # 説明の文の「名前: 戦略の名前。」「名前: 表示用の名前。」（引数の説明）。人の名前に「名前」の語は入らない。
+            # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
+            if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
                 continue
         elif h.rule == "よくある姓＋敬称":
             # 「関係者様」は姓の「関」で始まるだけの語。敬称の前がまるごと除外の語なら名前ではない

@@ -988,3 +988,78 @@ def test_member_id_alone_is_low_risk():
 def test_confusing_numbers_are_not_high_or_medium(text):
     found = types_of(text)
     assert not {k for k, v in found.items() if v in ("high", "medium")}, found
+
+
+# ---------------------------------------------------------------- 網羅で通っていなかった分岐（T4・2026-11-07）
+
+
+@pytest.mark.parametrize(
+    "category, value, expected",
+    [
+        ("birthdate", "31138", "high"),  # Excel の日付シリアル値（1985/04/01）
+        ("birthdate", "999", None),  # シリアル値の範囲の外
+        ("birthdate", "60001", None),
+        ("drivers_license", "A-1", None),  # 英数字が4つ未満
+        ("drivers_license", "123456789012", "high"),
+        ("passport", "TK1234567", "high"),
+        ("health_insurance", "1-2", None),
+        ("health_insurance", "12345678", "medium"),  # 保険証の番号は人を特定しにくいので 中
+        ("residence_card", "AB12-34", None),  # 英数字が8つ未満
+        ("residence_card", "ABCDEFGHIJ", None),  # 数字を含まない
+        ("residence_card", "AB12345678CD", "high"),
+        ("employment_insurance", "1234-567890-1", "high"),
+        ("employment_insurance", "1234-567890", None),  # 11桁でない
+        ("address", "---", None),  # 記号だけ
+    ],
+)
+def test_header_value_hit_by_category(category, value, expected):
+    from pii_checker.detectors import _header_value_hit
+
+    hit = _header_value_hit(category, value)
+    assert (hit.confidence.value if hit else None) == expected
+
+
+def test_diners_card_prefix():
+    from pii_checker.detectors import card_prefix_is_plausible
+
+    assert card_prefix_is_plausible("30569309025904")  # 300〜305 で始まる14桁
+    assert card_prefix_is_plausible("36227206271667")  # 36 で始まる14桁
+    assert types_of("カード番号 30569309025904") == {"credit_card": "high"}
+
+
+def test_mask_value_of_blank_is_blank():
+    assert mask_value("phone", "   ") == ""
+
+
+@pytest.mark.parametrize("text", ["関係者様", "ご関係者様各位", "関係者殿", "関係者さんへ", "関 係者様"])
+def test_role_word_starting_with_surname_is_not_name(text):
+    # 「関係者」は姓の「関」で始まるだけの語（以前は「よくある姓＋敬称」で氏名 中 になっていた）
+    assert "name" not in types_of(text)
+
+
+@pytest.mark.parametrize("text", ["関口様", "関様へ", "田中部長殿", "関 太郎様"])
+def test_surname_with_honorific_still_found(text):
+    assert "name" in types_of(text)
+
+
+@pytest.mark.parametrize(
+    "text, absent",
+    [
+        ("口座残高 1234567円", "bank_account"),  # 口座の語の後ろが金額
+        ("口座 支払 1234567", "bank_account"),  # 前に金額の語
+        ("振込先 0009-123-1234567円", "bank_account"),
+        ("振込先 請求 0009-123-1234567", "bank_account"),
+        ("製造番号 09012345678", "phone"),  # 区切りの無い11桁が注文・製造の番号の語の後ろ
+        ("電話 0120123456 TEL 0570123456", "phone"),  # 個人の電話ではない番号
+        ("被保険者番号 ABCD-EFGH", "health_insurance"),  # 数字を含まない
+        ("運転免許 有 個人番号 123456789018", "drivers_license"),  # 個人番号の判定に回す
+    ],
+)
+def test_excluded_forms(text, absent):
+    assert absent not in types_of(text)
+
+
+def test_bare_mobile_and_model_word_are_low():
+    assert types_of("番号 09012345678") == {"phone": "low"}  # 区切りも電話の語も無い11桁
+    assert types_of("電話 型番 0312345678") == {"phone": "low"}  # 電話の語の後ろに型番の語
+    assert types_of("運転免許 有 個人番号 123456789018") == {"my_number": "high"}

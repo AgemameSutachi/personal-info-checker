@@ -498,7 +498,7 @@ def handle_with_7z_exe(
                     f"{blob.display}!{e['Path']}",
                     Status.UNCHECKABLE,
                     f"一時領域の空きが足りず展開できない（必要 {batch_size / 1024**3:.1f}GB・空き {free / 1024**3:.1f}GB）。"
-                    f"{TEMP_DIR_HINT}",
+                    + TEMP_DIR_HINT,
                     depth + 1,
                     size=int(e.get("Size") or 0),
                 )

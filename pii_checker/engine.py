@@ -1167,7 +1167,7 @@ class ScanContext:
 
             item.status = Status.UNCHECKABLE
             if is_disk_full(e):
-                item.reason = "一時フォルダのドライブが満杯になり、展開・書き出しができなかった。" f"{TEMP_DIR_HINT}"
+                item.reason = "一時フォルダのドライブが満杯になり、展開・書き出しができなかった。" + TEMP_DIR_HINT
                 return item
             tb = traceback.extract_tb(e.__traceback__)
             where = f"{Path(tb[-1].filename).name}:{tb[-1].lineno}" if tb else ""

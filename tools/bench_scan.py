@@ -31,6 +31,7 @@ import json
 import os
 import platform
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -43,7 +44,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # 材料の乱数の種（変えると別の材料になり、前に測った結果と比べられなくなる）
 SEED = 20261108
 # 材料の版。作り方を変えたら上げる（違う版の材料で測った結果どうしは compare が断る）
-CORPUS_VERSION = 1
+# 2: docx・pptx の縮小画像を除いた（OCR の有無で結果が変わらないように）
+CORPUS_VERSION = 2
 
 SURNAMES = ["佐藤", "鈴木", "高橋", "田中", "伊藤", "渡辺", "山本", "中村", "小林", "加藤"]
 GIVEN = ["太郎", "花子", "一郎", "美咲", "健司", "陽翔", "結衣", "蓮", "葵", "大輝"]
@@ -139,6 +141,25 @@ def _doc_paragraphs(rnd: random.Random, n: int) -> list[str]:
     return out
 
 
+def _drop_thumbnail(data: bytes) -> bytes:
+    """docx・pptx の zip から縮小画像（docProps/thumbnail.*）とその関係を除く。
+
+    縮小画像は画像なので OCR に回り、日本語の OCR が無い環境（CI 等）では「検査できない」になって時間も件数も
+    環境で変わる。材料は環境に依らず同じ処理を通るようにしたいので除く。
+    """
+    src = zipfile.ZipFile(io.BytesIO(data))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for info in src.infolist():
+            if info.filename.startswith("docProps/thumbnail."):
+                continue
+            body = src.read(info)
+            if info.filename == "_rels/.rels":
+                body = re.sub(rb"<Relationship [^>]*Target=\"docProps/thumbnail\.[^\"]*\"[^>]*/>", b"", body)
+            z.writestr(info, body, compress_type=zipfile.ZIP_DEFLATED)
+    return buf.getvalue()
+
+
 def make_corpus(out: Path, scale: float = 1.0) -> list[str]:
     """材料を out に作り、作ったファイルの名前を返す。scale は件数の倍率（試験では小さくする）。"""
     out.mkdir(parents=True, exist_ok=True)
@@ -201,7 +222,7 @@ def make_corpus(out: Path, scale: float = 1.0) -> list[str]:
             c.text = v
     buf = io.BytesIO()
     d.save(buf)
-    put("report.docx", buf.getvalue())
+    put("report.docx", _drop_thumbnail(buf.getvalue()))
 
     import pptx
 
@@ -213,7 +234,7 @@ def make_corpus(out: Path, scale: float = 1.0) -> list[str]:
         slide.placeholders[1].text = "\n".join(paras[k : k + 10])
     buf = io.BytesIO()
     pres.save(buf)
-    put("slides.pptx", buf.getvalue())
+    put("slides.pptx", _drop_thumbnail(buf.getvalue()))
 
     import pymupdf
 

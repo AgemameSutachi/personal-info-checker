@@ -1300,6 +1300,9 @@ class ScanContext:
         self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
         self._last_checkpoint = time.time()
         self._checkpoint_gap = 0.0  # 書き出しの重さから決めた間隔（CHECKPOINT_SECONDS より短くはしない）
+        # 途中経過を書き出そうとしたか（書いていなければ終わりの片付けで消しに行かない。無いファイルの削除でも
+        # 1回約0.2ms掛かり、小さなファイルでは1件の検査の約2割だった・実測）
+        self.checkpoint_written = False
         self.expanded_bytes = 0
         self.entries = 0
         self._tmp: str | None = None
@@ -1394,6 +1397,7 @@ class ScanContext:
         import pickle
 
         tmp = self.checkpoint_file + ".tmp"
+        self.checkpoint_written = True  # 開く前に立てる（書きかけの .tmp が残っても終わりに消す）
         try:
             with open(tmp, "wb") as f:
                 pickle.dump(self.items, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1907,7 +1911,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     finally:
         ctx.cleanup()
         # 最後まで（または例外で）終わったら途中経過は要らない。打ち切られたときだけ残り、実行器が読む
-        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp") if ctx.checkpoint_file else ():
+        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp") if ctx.checkpoint_written else ():
             try:
                 os.remove(p)
             except OSError:

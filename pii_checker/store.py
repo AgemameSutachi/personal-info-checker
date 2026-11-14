@@ -308,6 +308,8 @@ class Store:
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._sync_mode = "FULL"  # tx が切り替える（durable の説明）
         self._conn.executescript(SCHEMA)
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(items)")}
         if "conf_counts" not in cols:  # 古い版の DB に列を足す
@@ -357,8 +359,22 @@ class Store:
         c.execute("UPDATE files SET flags='' WHERE state='done' AND flags IS NULL")
 
     @contextmanager
-    def tx(self):
+    def tx(self, durable: bool = True):
+        """1つのトランザクションで書く。
+
+        durable=False は検査の結果の保存だけに使う: 確定のたびにディスクへの同期を待たない（WAL の synchronous=NORMAL）。
+        電源断のときに最後の数件が巻き戻るだけで DB は壊れず、巻き戻ったファイルは未検査に戻って再開で読み直される。
+        同期を待つと1件ごとに約0.8ms掛かり、小さなファイルばかりの検査では配る側の時間の大半だった（実測）。
+        対処の記録など、取り返しのつかない操作と組になる書き込みは既定（FULL）のまま同期を待つ。FULL の確定は
+        それより前の WAL の書き込みもまとめてディスクへ送る。
+        """
         with self._lock:
+            mode = "FULL" if durable else "NORMAL"
+            if self._sync_mode != mode:
+                if self._conn.in_transaction:
+                    self._conn.rollback()  # 中断（KeyboardInterrupt 等）で開いたまま残った分。PRAGMA が断られないように
+                self._conn.execute(f"PRAGMA synchronous={mode}")  # トランザクションの外でしか効かない
+                self._sync_mode = mode
             try:
                 yield self._conn
                 self._conn.commit()
@@ -709,7 +725,7 @@ class Store:
                 return json.dumps(value if clean is None else _deep_clean(value, clean), ensure_ascii=False)
 
             marks["asked"] = time.perf_counter()
-            with self.tx() as c:
+            with self.tx(durable=False) as c:
                 marks["locked"] = time.perf_counter()
                 c.execute(
                     "DELETE FROM items WHERE job_id=? AND top_path=?",
@@ -834,7 +850,7 @@ class Store:
     def copy_result(self, src: dict, job_id: str) -> None:
         """前回のジョブの結果（項目・検出）を、このジョブの結果として写す。元のジョブを消しても困らないよう行ごと写す。"""
         top = src["top_path"]
-        with self.tx() as c:
+        with self.tx(durable=False) as c:
             c.execute("DELETE FROM items WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
@@ -888,8 +904,8 @@ class Store:
             )
 
     def set_access(self, job_id: str, top_path: str, access: str, who: str = "", owner: str = "") -> None:
-        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する。"""
-        with self.tx() as c:
+        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する（検査の結果の一部なので同期を待たない）。"""
+        with self.tx(durable=False) as c:
             c.execute(
                 "UPDATE files SET access=?, access_who=?, access_owner=? WHERE job_id=? AND top_path=?",
                 (access, who, owner, job_id, top_path),

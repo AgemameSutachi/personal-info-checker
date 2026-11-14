@@ -146,6 +146,7 @@ class JobRunner:
         self.passwords_tried = 0  # 受け取ったパスワードの数（値は持ち出さない）
         self.halt_reason = ""  # 安全のために自分から止めた理由（ドライブの満杯等）
         self._space_checked = 0.0
+        self._sizes: dict[str, int] = {}  # 未検査の一覧で受け取った大きさ（_timeout_for）
         self.engine_sig = engine_signature(self.options)  # 検査器の版（前回の結果を使い回してよいかの判定）
         self._net_streak_paths: set[str] = set()  # 続けて「接続が切れた」になった（別々の）ファイル
         self._net_retries: dict[str, int] = {}  # ファイルごとの「接続が切れた」の回数
@@ -354,10 +355,12 @@ class JobRunner:
         limit = (
             self.timeout * GIT_PACK_TIMEOUT_FACTOR if "/objects/pack/" in p and p.endswith(".pack") else self.timeout
         )
-        try:
-            size = self.store.file_size(self.job_id, path) or 0
-        except Exception:  # noqa: BLE001  大きさが分からなければ設定の値のまま
-            size = 0
+        size = self._sizes.get(path)
+        if size is None:
+            try:
+                size = self.store.file_size(self.job_id, path) or 0
+            except Exception:  # noqa: BLE001  大きさが分からなければ設定の値のまま
+                size = 0
         return max(limit, int(size / TIMEOUT_MIN_BYTES_PER_SEC))
 
     def _heartbeat_loop(self, done: threading.Event) -> None:
@@ -412,6 +415,9 @@ class JobRunner:
                     self._requeue.clear()
                 if not pending:
                     break
+                # 時間制限を決める大きさは、未検査の一覧で受け取った値を使う（1件ごとに DB へ聞くと、小さなファイルばかりの
+                # 検査で配る側の時間の1割を超えた・実測）
+                self._sizes = dict(pending)
                 futures = {}
                 queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
                 exhausted = False

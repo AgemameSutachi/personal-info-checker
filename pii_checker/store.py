@@ -371,6 +371,8 @@ class Store:
         with self._lock:
             mode = "FULL" if durable else "NORMAL"
             if self._sync_mode != mode:
+                if self._conn.in_transaction:
+                    self._conn.rollback()  # 中断（KeyboardInterrupt 等）で開いたまま残った分。PRAGMA が断られないように
                 self._conn.execute(f"PRAGMA synchronous={mode}")  # トランザクションの外でしか効かない
                 self._sync_mode = mode
             try:
@@ -902,8 +904,8 @@ class Store:
             )
 
     def set_access(self, job_id: str, top_path: str, access: str, who: str = "", owner: str = "") -> None:
-        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する。"""
-        with self.tx() as c:
+        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する（検査の結果の一部なので同期を待たない）。"""
+        with self.tx(durable=False) as c:
             c.execute(
                 "UPDATE files SET access=?, access_who=?, access_owner=? WHERE job_id=? AND top_path=?",
                 (access, who, owner, job_id, top_path),

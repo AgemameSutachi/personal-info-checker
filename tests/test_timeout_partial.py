@@ -131,3 +131,8 @@ def test_scan_results_commit_without_sync_but_others_stay_full(tmp_path):
     assert store.query("SELECT state FROM files WHERE job_id=?", (job,))[0][0] == "done"
     store.add_remediation(job, path, "mask", {}, {})
     assert sync() == 2
+    # 中断で開いたまま残ったトランザクションがあっても、切り替えで止まらない（巻き戻してから切り替える）
+    store._conn.execute("UPDATE files SET size=99 WHERE job_id=?", (job,))
+    assert store._conn.in_transaction
+    store.save_failure(job, path, "試験", 0.1)
+    assert sync() == 1 and not store._conn.in_transaction

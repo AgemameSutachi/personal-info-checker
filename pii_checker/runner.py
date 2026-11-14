@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED
@@ -18,7 +17,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from concurrent.futures import wait as wait_futures
 from dataclasses import fields
 
-from .engine import UNEXPECTED_HINT, checkpoint_path, error_detail, read_checkpoint, scan_file, split_siblings
+from .engine import UNEXPECTED_HINT, checkpoint_path, depends_on_neighbors, error_detail, read_checkpoint, scan_file
 from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
@@ -56,23 +55,6 @@ NETWORK_HALT_MESSAGE = (
     "NAS・共有フォルダへ接続できなくなった（回線断・ログインできなくなった等）ため、検査を中断した。読めなかった"
     "ファイルは未検査のまま残してある。原因を除いてから「再開」すると、続きから検査する"
 )
-
-
-RE_PG_DATA = re.compile(r"\d+\.dat(\.gz)?")
-RE_SPLIT_CONTINUATION = re.compile(r"\.(?!0*1$)\d{3}$|\.z\d{2}$|\.r\d{2}$|\.part(?!0*1\.rar$)\d+\.rar$")
-
-
-def depends_on_neighbors(path: str) -> bool:
-    """結果が隣のファイルにも左右される（そのファイルの識別情報だけでは使い回せない）か。
-
-    分割アーカイブの1つ目（続きのファイルも読む）と、pg_dump の directory 形式のデータ（隣の toc.dat で列名を引く）。
-    """
-    if split_siblings(path):
-        return True
-    name = os.path.basename(path)
-    if RE_SPLIT_CONTINUATION.search(name.lower()):
-        return True  # 続き（.002・.z01・.part2.rar・.r00）: 1つ目の有無で「対象外」か「検査不能」かが変わる
-    return bool(RE_PG_DATA.fullmatch(name)) and os.path.exists(os.path.join(os.path.dirname(path), "toc.dat"))
 
 
 # 大きなファイル（この大きさ以上）は先に配る。名前の順に配ると、最後のほうに残った数 GB の zip 1〜2個だけが

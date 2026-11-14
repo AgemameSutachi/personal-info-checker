@@ -58,6 +58,26 @@ def test_scan_file_removes_checkpoint_when_finished(tmp_path, monkeypatch):
     assert not os.path.exists(engine.checkpoint_path(opts, str(p)))
 
 
+def test_scan_file_skips_cleanup_when_no_checkpoint(tmp_path, monkeypatch):
+    """途中経過を書き出さなかった検査は、終わりに途中経過のファイルを消しに行かない（前の残りを消す1回だけ）。"""
+    p = tmp_path / "a.txt"
+    p.write_text("携帯 090-1234-5678\n", encoding="utf-8")
+    opts = ScanOptions(temp_dir=str(tmp_path / "t"))
+    (tmp_path / "t").mkdir()
+    ck = engine.checkpoint_path(opts, str(p))
+    removed = []
+    orig = os.remove
+
+    def spy(path, *a, **kw):
+        removed.append(str(path))
+        return orig(path, *a, **kw)
+
+    monkeypatch.setattr(engine.os, "remove", spy)
+    res = engine.scan_file(str(p), opts)
+    assert res.items[0].finding_counts.get("phone")
+    assert [x for x in removed if x.startswith(ck)] == [ck]
+
+
 def test_save_failure_keeps_partial_findings(tmp_path):
     """時間切れのとき、途中までの検出を残したまま検査不能として記録する（「なし」に見えない）。"""
     opts, ctx, item = _ctx_with_findings(tmp_path)
@@ -86,3 +106,28 @@ def test_timeout_grows_with_file_size(tmp_path):
     assert r._timeout_for(small) == 1800
     assert r._timeout_for(big) == int(3 * 1024**3 / runner.TIMEOUT_MIN_BYTES_PER_SEC) > 1800
     assert r._timeout_for(str(tmp_path / "unknown")) == 1800
+
+
+def test_timeout_uses_sizes_from_pending_list(tmp_path):
+    """配るときは未検査の一覧で受け取った大きさを使う（1件ごとに DB へ聞かない）。"""
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    big = str(tmp_path / "big.dmp")
+    r = runner.JobRunner(store, job, timeout=1800)
+    r._sizes = {big: 3 * 1024**3}  # DB には登録していない
+    assert r._timeout_for(big) == int(3 * 1024**3 / runner.TIMEOUT_MIN_BYTES_PER_SEC)
+
+
+def test_scan_results_commit_without_sync_but_others_stay_full(tmp_path):
+    """検査の結果の保存だけ同期を待たず（NORMAL）、ほかの書き込み（対処の記録など）は FULL に戻して書く。"""
+    store = Store(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job([str(tmp_path)], ScanOptions(temp_dir=str(tmp_path)))
+    path = str(tmp_path / "a.txt")
+    store.add_files(job, [(path, 10, None)])
+    sync = lambda: store.query("PRAGMA synchronous")[0][0]  # noqa: E731  1=NORMAL・2=FULL
+    assert sync() == 2
+    store.save_failure(job, path, "試験", 0.1)
+    assert sync() == 1
+    assert store.query("SELECT state FROM files WHERE job_id=?", (job,))[0][0] == "done"
+    store.add_remediation(job, path, "mask", {}, {})
+    assert sync() == 2

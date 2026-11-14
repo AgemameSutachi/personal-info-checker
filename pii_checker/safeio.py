@@ -468,19 +468,84 @@ def snapshot(path: str, dest: str, temp_folder: str, allow_recall: bool = False,
         finally:
             if handle is not None:
                 _k32.CloseHandle(handle)
-        if before.same_as(after) and copied == after.size:
-            after.sha256 = digest.hexdigest()
-            after.atime_kept = atime_kept
-            if not atime_kept:
-                after.atime_lost_reason = "no_permission"
-            elif before.atime_ns and after.atime_ns != before.atime_ns:
-                # 保つ指示（SetFileTime -1）は受け付けたが、サーバーが読み取りで日時を更新した（Samba は守らない・
-                # VM の Samba で実測 2026-10-18）。「保てた」と記録すると事実と違うので、保てなかったと記録する
-                after.atime_kept = False
-                after.atime_lost_reason = "server_updated"
+        if _settle(before, after, copied, digest, atime_kept):
             return after
         if attempt == retries:
             break
-    raise ChangedWhileReading(
-        "読んでいる間に元のファイルが書き換えられた（何度読み直しても変わり続けた）。使われていない時間に再検査する"
-    )
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+
+
+CHANGED_WHILE_READING_MSG = (
+    "読んでいる間に元のファイルが書き換えられた（何度読み直しても変わり続けた）。使われていない時間に再検査する"
+)
+
+
+def _settle(before: SourceInfo, after: SourceInfo, copied: int, digest, atime_kept: bool) -> bool:
+    """読む前後の識別情報が同じで読み切れていれば、after に SHA-256 と最終アクセス日時の扱いを書いて True。"""
+    if not (before.same_as(after) and copied == after.size):
+        return False
+    after.sha256 = digest.hexdigest()
+    after.atime_kept = atime_kept
+    if not atime_kept:
+        after.atime_lost_reason = "no_permission"
+    elif before.atime_ns and after.atime_ns != before.atime_ns:
+        # 保つ指示（SetFileTime -1）は受け付けたが、サーバーが読み取りで日時を更新した（Samba は守らない・
+        # VM の Samba で実測 2026-10-18）。「保てた」と記録すると事実と違うので、保てなかったと記録する
+        after.atime_kept = False
+        after.atime_lost_reason = "server_updated"
+    return True
+
+
+def read_small(path: str, limit: int, allow_recall: bool = False, retries: int = 2) -> tuple[SourceInfo, bytes] | None:
+    """元のファイルが limit バイト以下なら、一時フォルダへ写さずにメモリへ読む（約束は snapshot と同じ）。
+
+    共有をすべて許す・最終アクセス日時を保つ・読む間の書き換えを検知する・SHA-256 を取る。次のときは None を
+    返す（呼び出し側は snapshot で写し、断る理由もそちらで出す）: limit を超えている（何も読まない）・クラウドの
+    代替ファイル（中身を読まない）・読む間に limit を超えて大きくなった。小さなファイルは写しの作成と開き直し（新しいファイルを
+    ウイルス対策が調べる）に検査の大半の時間を取られていた（数 KB の文で 1件 約 13ms のうち約 9ms・実測 2026-11-15）。
+    """
+    from .engine import long_path
+
+    if os.name != "nt":
+        info = stat_identity(path)
+        if info.size > limit:
+            return None
+        with open(path, "rb") as src:
+            data = src.read(limit + 1)
+        if len(data) > limit:
+            return None  # 読む間に大きくなった: 写すほうで扱う
+        info.sha256 = hashlib.sha256(data).hexdigest()
+        info.atime_kept = False
+        return info, data
+
+    lp = long_path(path)
+    for attempt in range(retries + 1):
+        handle, atime_kept = _open_shared(lp)
+        try:
+            before = _handle_info(handle)
+            if before.attributes & RECALL_ATTRS and not allow_recall:
+                return None  # 代替ファイルの断りの理由は snapshot が出す（中身は読まない）
+            if before.size > limit:
+                return None
+            # 小さなファイルに 1MB の領域を毎回取ると、それだけで 1件 約 0.3ms かかる。読む間に大きくなっても
+            # 細切れの読みにならないよう、最低 64KB にする
+            buf = ctypes.create_string_buffer(min(CHUNK, max(64 * 1024, before.size + 1)))
+            parts: list[bytes] = []
+            copied = 0
+            while copied <= limit:
+                n = _read_chunk(handle, buf)
+                if not n:
+                    break
+                parts.append(buf.raw[:n])
+                copied += n
+            after = _handle_info(handle)
+        finally:
+            _k32.CloseHandle(handle)
+        if copied > limit:
+            return None  # 読む間に大きくなった: 写すほうで扱う（書き換えの検知もそちらで）
+        data = b"".join(parts)
+        if _settle(before, after, copied, hashlib.sha256(data), atime_kept):
+            return after, data
+        if attempt == retries:
+            break
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)

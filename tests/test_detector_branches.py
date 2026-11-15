@@ -1,4 +1,4 @@
-"""detectors の網羅で通っていなかった分岐の試験（2026-11-16）。
+"""detectors の網羅で通っていなかった分岐の試験（2026-11-15）。
 
 Rust 拡張が入っているのに読めない・範囲の設定で落ちるときに Python の経路へ切り替える分岐、engine.log が書けないとき、
 型番の語が前にある固定電話、末尾を外すと不自然なドメインになるメールの形。
@@ -74,7 +74,7 @@ def test_engine_log_unwritable_does_not_stop(monkeypatch, tmp_path):
     blocker = tmp_path / "blocked"
     blocker.write_text("", encoding="utf-8")  # LOCALAPPDATA がファイルなので、その下にフォルダを作れない
     monkeypatch.setenv("LOCALAPPDATA", str(blocker))
-    detectors._record_engine_event("書けないことの試験")
+    detectors._record_engine_event("書けないことの試験")  # 主眼: 例外が出ないこと
     assert blocker.read_text(encoding="utf-8") == ""
 
 
@@ -104,7 +104,7 @@ def test_email_tail_trim_that_leaves_implausible_domain_is_dropped():
 
 @pytest.mark.skipif(os.name != "nt", reason="拡張パス形式は Windows だけ")
 def test_long_unc_path_uses_unc_prefix():
-    """240文字以上の UNC パス（\\\\サーバー\\共有\\…）は「\\\\?\\UNC\\」の形にする（「\\\\?\\\\\\」にしない）。"""
+    r"""240文字以上の UNC パス（\\サーバー\共有\…）は、頭の「\\」を「\\?\UNC\」に置き換えた形にする。"""
     long = "\\\\server\\share\\" + "\\".join(["d" * 100] * 3) + "\\a.txt"
     assert engine.long_path(long) == "\\\\?\\UNC\\" + long[2:]
     assert engine.long_path("\\\\server\\share\\a.txt") == "\\\\server\\share\\a.txt"  # 短ければそのまま
@@ -127,3 +127,8 @@ def test_worst_status_and_risk_of_without_findings():
     assert engine.worst_status([]) == Status.SCANNED
     item = ItemResult(path="t", kind="", status=Status.SCANNED, conf_counts={"phone:medium": 0})
     assert engine.risk_of([item]) == "なし"
+    # 対照: 件数0の 中 は飛ばし、ほかの内訳で決める（件数を見ずに 中 にしない）
+    item = ItemResult(path="t", kind="", status=Status.SCANNED, conf_counts={"phone:medium": 0, "phone:low": 1})
+    assert engine.risk_of([item]) == "低"
+    item = ItemResult(path="t", kind="", status=Status.SCANNED, conf_counts={"phone:medium": 1})
+    assert engine.risk_of([item]) == "中"

@@ -307,13 +307,28 @@ def _looks_like_source(lines: list[str]) -> bool:
     return hits >= max(2, len(lines) * 0.3)
 
 
+# JSON の行の印（整形した JSON は各行に「"キー": "値",」とカンマが1つずつあり、表と読み違えていた）。括弧だけの行・
+# 「"キー":」で始まる行・1行の {…}（JSON Lines）・1行の […]（配列の配列）・字下げした配列の要素（文字列・数・真偽・null）。
+# CSV の行はこの形にならない（字下げしないので、1列の CSV の「"Smith",」は表のまま）
+_RE_JSON_LINE = re.compile(
+    r'^\s*(?:[\[\]{}]+,?|"(?:[^"\\]|\\.)*"\s*:.*|\{.*\},?|\[.*\],?)\s*$'
+    r'|^[ \t]+(?:"(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*|true|false|null)\s*,?\s*$'
+)
+
+
+def _looks_like_json(lines: list[str]) -> bool:
+    """見た行の過半が JSON の形なら JSON とみなす（拡張子でなく中身で見る。.json の名の本物の CSV は表のまま）。"""
+    hits = sum(1 for ln in lines if _RE_JSON_LINE.match(ln))
+    return hits > len(lines) * 0.5
+
+
 def _looks_tabular(text: str) -> bool:
     from collections import Counter
 
     lines = [ln for ln in text[:50000].splitlines()[:30] if ln.strip()]
     if len(lines) < 2:
         return False
-    if _looks_like_source(lines):
+    if _looks_like_source(lines) or _looks_like_json(lines):
         return False
     for sep in (",", "\t"):
         counts = [ln.count(sep) for ln in lines]

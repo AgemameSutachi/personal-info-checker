@@ -7,8 +7,9 @@
 //!   後読みは開始位置の直前の文字で、末尾の否定先読みは「消費する末尾」(?P<t>) で表す。
 //! - 文脈の窓（前20字・後6字など）は、Python と同じく「見出し＋空白＋本文」の context_text の上で取る。
 
-use regex::{Captures, Regex, RegexBuilder};
+use regex::{Captures, Regex, RegexBuilder, RegexSet, RegexSetBuilder, SetMatches};
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 pub const TYPES: [&str; 22] = [
@@ -83,6 +84,8 @@ fn hit_owned(ty: u8, conf: u8, start: usize, end: usize, rule: String) -> Hit {
 pub struct Rg {
     re: Regex,
     t: Option<usize>,
+    /// Rules.set の中での番号（本文のどこかで当たるかを、まとめて1回で調べた結果を引く）
+    idx: usize,
 }
 
 fn build(src: &str, ci: bool) -> Result<Regex, String> {
@@ -95,6 +98,9 @@ fn build(src: &str, ci: bool) -> Result<Regex, String> {
 }
 
 pub struct Rules {
+    /// 走査する正規表現（Rg）を全部まとめたもの。本文に1回だけ当て、どこにも当たらない Rg の走査を飛ばす
+    /// （生データ走査の短い文字列はほとんど何にも当たらず、Rg を1本ずつ当てる手間が検出の時間の大半だった）
+    set: RegexSet,
     /// 「+81 の後（区切り・括弧・0 のあと）に [5789]0 が続く形」の探知用。RE_LANDLINE_INTL の途中の先読み
     /// (?![5789]0) は、Python が前の部分を取り直して通る場合があり、Rust では同じ結果にできないため、
     /// この形を含む本文は Rust で扱わず Python に回す
@@ -162,17 +168,23 @@ impl Rules {
             let flags = a[1].as_str().ok_or_else(|| format!("patterns.json の {name} の旗がありません"))?;
             Ok((src.to_string(), flags.contains('i')))
         };
+        // Rg の元の式（大文字小文字を区別しないものは (?i:…) で包む）を作った順に覚え、最後に RegexSet にする
+        let set_src: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let rg = |name: &str| -> Result<Rg, String> {
             let (s, ci) = get(name)?;
             let re = build(&s, ci)?;
             let t = re.capture_names().position(|n| n == Some("t"));
-            Ok(Rg { re, t })
+            let mut srcs = set_src.borrow_mut();
+            let idx = srcs.len();
+            srcs.push(if ci { format!("(?i:{s})") } else { s });
+            Ok(Rg { re, t, idx })
         };
         let plain = |name: &str| -> Result<Regex, String> {
             let (s, ci) = get(name)?;
             build(&s, ci)
         };
-        Ok(Rules {
+        let mut rules = Rules {
+            set: RegexSet::empty(),
             landline_intl_guard: plain("LANDLINE_INTL_GUARD")?,
             license: rg("RE_LICENSE")?,
             my_number: rg("RE_MY_NUMBER")?,
@@ -223,7 +235,13 @@ impl Rules {
             personal_address_kw: plain("PERSONAL_ADDRESS_KW")?,
             facility_kw: plain("FACILITY_KW")?,
             mobile_prefix: plain("RE_MOBILE_PREFIX")?,
-        })
+        };
+        rules.set = RegexSetBuilder::new(set_src.borrow().iter())
+            .size_limit(512 << 20)
+            .dfa_size_limit(256 << 20)
+            .build()
+            .map_err(|e| format!("正規表現のまとめが作れません: {e}"))?;
+        Ok(rules)
     }
 }
 
@@ -316,7 +334,11 @@ fn post_member(_t: &str, _s: usize, c: &Captures) -> bool {
 }
 
 /// finditer 相当。後読み（lb）・先読み（post）が合わない当たりは、開始を1文字進めて探し直す。
-fn scan(rg: &Rg, text: &str, lb: &Chk, post: &Chk, f: &mut dyn FnMut(&Captures, usize)) {
+/// hs は text に Rules.set を当てた結果。どこにも当たらない式は captures_at を呼ばずに終える（結果は同じ）。
+fn scan(hs: &SetMatches, rg: &Rg, text: &str, lb: &Chk, post: &Chk, f: &mut dyn FnMut(&Captures, usize)) {
+    if !hs.matched(rg.idx) {
+        return;
+    }
     let mut pos = 0;
     while pos <= text.len() {
         let Some(c) = rg.re.captures_at(text, pos) else { break };
@@ -569,13 +591,14 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
         (&joined, prefix.len())
     };
     let d = D { r, cx, off, text, category };
+    let hs = r.set.matches(text);
     let cat = category;
 
     let has_digit = text.bytes().any(|b| b.is_ascii_digit());
     if has_digit {
         // 運転免許証（12桁）はマイナンバーより先に判定する
         let mut lic: Vec<(usize, usize)> = Vec::new();
-        scan(&r.license, text, &lb_none, &lb_none, &mut |c, _| {
+        scan(&hs, &r.license, text, &lb_none, &lb_none, &mut |c, _| {
             let g = c.get(1).unwrap();
             let m0 = c.get(0).unwrap();
             if r.my_number_kw.is_match(&text[m0.start()..g.start()]) && my_number_valid(g.as_str()) {
@@ -584,7 +607,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             hits.push(hit(LIC, HIGH, g.start(), g.end(), "免許証の語＋12桁"));
             lic.push((g.start(), g.end()));
         });
-        scan(&r.my_number, text, &lb_my_number, &lb_none, &mut |c, end| {
+        scan(&hs, &r.my_number, text, &lb_my_number, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let digits = format!("{}{}{}", &c[1], &c[2], &c[3]);
             if lic.iter().any(|&(s, e)| s <= ms && ms < e) {
@@ -607,7 +630,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             };
             hits.push(hit(MY, conf, ms, end, rule));
         });
-        scan(&r.card, text, &lb_digit, &lb_none, &mut |c, end| {
+        scan(&hs, &r.card, text, &lb_digit, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let raw = &text[ms..end];
             let digits = digits_only(raw);
@@ -640,7 +663,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             };
             hits.push(Hit { ty: CARD, conf, start: ms, end, rule, needs: false, hdr: false });
         });
-        scan(&r.mobile, text, &lb_digit_h, &lb_none, &mut |c, end| {
+        scan(&hs, &r.mobile, text, &lb_digit_h, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let separated = text[ms..end].bytes().any(|b| !b.is_ascii_digit());
             let mut rule: Cow<'static, str> = Cow::Borrowed("携帯電話番号の形");
@@ -660,10 +683,10 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             }
             hits.push(Hit { ty: PHONE, conf, start: ms, end, rule, needs: false, hdr: false });
         });
-        scan(&r.mobile_intl, text, &lb_none, &lb_none, &mut |c, end| {
+        scan(&hs, &r.mobile_intl, text, &lb_none, &lb_none, &mut |c, end| {
             hits.push(hit(PHONE, MED, c.get(0).unwrap().start(), end, "携帯電話番号（+81）"));
         });
-        scan(&r.landline_intl, text, &lb_alnum, &lb_none, &mut |c, end| {
+        scan(&hs, &r.landline_intl, text, &lb_alnum, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let dg = digits_only(&text[ms..end]);
             let dg = &dg[2..];
@@ -685,7 +708,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             }
             hits.push(hit_owned(PHONE, conf, ms, end, rule));
         });
-        scan(&r.landline, text, &lb_digit_h, &lb_none, &mut |c, end| {
+        scan(&hs, &r.landline, text, &lb_digit_h, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let dg = digits_only(&text[ms..end]);
             if dg.len() != 10 || starts_nonpersonal(&dg) {
@@ -711,7 +734,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             }
             hits.push(hit_owned(PHONE, conf, ms, end, rule));
         });
-        scan(&r.landline_space, text, &lb_digit, &lb_none, &mut |c, end| {
+        scan(&hs, &r.landline_space, text, &lb_digit, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             if starts_nonpersonal(&digits_only(&text[ms..end])) {
                 return;
@@ -720,7 +743,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
                 hits.push(d.phone_unless_model(ms, end, "電話の語＋空白区切りの番号"));
             }
         });
-        scan(&r.phone_bare, text, &lb_digit, &lb_none, &mut |c, end| {
+        scan(&hs, &r.phone_bare, text, &lb_digit, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             if d.has(ms, end, &r.phone_kw) || cat == Some("phone") {
                 if starts_nonpersonal(&text[ms..end]) {
@@ -729,17 +752,17 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
                 hits.push(d.phone_unless_model(ms, end, "電話の語＋区切りなし番号"));
             }
         });
-        scan(&r.postal_mark, text, &lb_none, &lb_none, &mut |c, end| {
+        scan(&hs, &r.postal_mark, text, &lb_none, &lb_none, &mut |c, end| {
             hits.push(hit(POSTAL, MED, c.get(0).unwrap().start(), end, "〒＋7桁"));
         });
-        scan(&r.postal_before_pref, text, &lb_digit_h, &lb_none, &mut |c, end| {
+        scan(&hs, &r.postal_before_pref, text, &lb_digit_h, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             if d.has(ms, end, &r.order_kw) {
                 return;
             }
             hits.push(hit(POSTAL, MED, ms, end, "7桁＋都道府県"));
         });
-        scan(&r.date, text, &lb_none, &lb_none, &mut |c, end| {
+        scan(&hs, &r.date, text, &lb_none, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             if d.has(ms, end, &r.birth_kw) || cat == Some("birthdate") {
                 hits.push(hit(BIRTH, HIGH, ms, end, "生年月日の語＋日付"));
@@ -753,7 +776,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             }
         });
         for (rg, rule) in [(&r.bank, "口座の語＋7桁"), (&r.bank_full, "口座の語＋金融機関コード-支店番号-口座番号")] {
-            scan(rg, text, &lb_none, &lb_none, &mut |c, _| {
+            scan(&hs, rg, text, &lb_none, &lb_none, &mut |c, _| {
                 let g = c.get(1).unwrap();
                 let ms = c.get(0).unwrap().start();
                 let after = &text[g.end()..fwd_chars(text, g.end(), 3)];
@@ -769,18 +792,18 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             (&r.residence_card, RES, "在留カードの語＋番号"),
             (&r.resident_code, RCODE, "住民票コードの語＋11桁"),
         ] {
-            scan(rg, text, &lb_none, &lb_none, &mut |c, _| {
+            scan(&hs, rg, text, &lb_none, &lb_none, &mut |c, _| {
                 let g = c.get(1).unwrap();
                 hits.push(hit(ty, HIGH, g.start(), g.end(), rule));
             });
         }
         let mut emp: Vec<(usize, usize)> = Vec::new();
-        scan(&r.employment, text, &lb_none, &lb_none, &mut |c, _| {
+        scan(&hs, &r.employment, text, &lb_none, &lb_none, &mut |c, _| {
             let g = c.get(1).unwrap();
             emp.push((g.start(), g.end()));
             hits.push(hit(EMP, HIGH, g.start(), g.end(), "雇用保険の番号の語＋11桁"));
         });
-        scan(&r.insurance, text, &lb_none, &lb_none, &mut |c, _| {
+        scan(&hs, &r.insurance, text, &lb_none, &lb_none, &mut |c, _| {
             let g = c.get(1).unwrap();
             if !g.as_str().bytes().any(|b| b.is_ascii_digit()) {
                 return;
@@ -796,55 +819,55 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             }
             hits.push(hit(HEALTH, MED, gs, ge, "保険証の語＋番号"));
         });
-        scan(&r.member_id, text, &lb_none, &post_member, &mut |c, _| {
+        scan(&hs, &r.member_id, text, &lb_none, &post_member, &mut |c, _| {
             let g = c.get(1).unwrap();
             hits.push(hit(MEMBER, LOW, g.start(), g.end(), "会員・社員などの番号の語＋番号"));
         });
     }
     // 住所は漢数字だけの番地（六丁目十番一号）もあるので、算用数字の有無に関係なく調べる
     if has_digit || text.contains(['丁', '番', '号']) {
-        scan(&r.address, text, &lb_none, &lb_none, &mut |c, end| {
+        scan(&hs, &r.address, text, &lb_none, &lb_none, &mut |c, end| {
             hits.push(hit(ADDR, MED, c.get(0).unwrap().start(), end, "都道府県＋市区町村＋番地"));
         });
-        scan(&r.address_no_pref, text, &lb_kanji, &lb_none, &mut |c, end| {
+        scan(&hs, &r.address_no_pref, text, &lb_kanji, &lb_none, &mut |c, end| {
             hits.push(hit(ADDR, LOW, c.get(0).unwrap().start(), end, "市区＋町名＋番地"));
         });
     }
     if text.as_bytes().contains(&b'@') {
-        scan(&r.email, text, &lb_email, &lb_none, &mut |c, end| {
+        scan(&hs, &r.email, text, &lb_email, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             let role = r.role_email.is_match(&text[ms..end]);
             hits.push(hit(EMAIL, if role { LOW } else { MED }, ms, end, "メールアドレスの形"));
         });
     }
-    scan(&r.name_label, text, &lb_none, &lb_none, &mut |c, _| {
+    scan(&hs, &r.name_label, text, &lb_none, &lb_none, &mut |c, _| {
         let g = c.get(1).unwrap();
         hits.push(hit(NAME, MED, g.start(), g.end(), "氏名の見出し語＋名前"));
     });
-    scan(&r.name_label_tight, text, &lb_tight, &lb_none, &mut |c, _| {
+    scan(&hs, &r.name_label_tight, text, &lb_tight, &lb_none, &mut |c, _| {
         let g = c.get(1).unwrap();
         hits.push(hit(NAME, MED, g.start(), g.end(), "氏名の見出し語＋よくある姓の名前"));
     });
-    scan(&r.name_label_en, text, &lb_name_en, &lb_none, &mut |c, _| {
+    scan(&hs, &r.name_label_en, text, &lb_name_en, &lb_none, &mut |c, _| {
         let g = c.get(1).unwrap();
         hits.push(hit(NAME, MED, g.start(), g.end(), "英語の氏名の見出し語＋よくある姓の名前"));
     });
-    scan(&r.name_honorific, text, &lb_kanji, &lb_none, &mut |c, end| {
+    scan(&hs, &r.name_honorific, text, &lb_kanji, &lb_none, &mut |c, end| {
         let ms = c.get(0).unwrap().start();
         let n = text[ms..end].chars().count();
         hits.push(hit(NAME, if n >= 4 { MED } else { LOW }, ms, end, "よくある姓＋敬称"));
     });
     if text.contains(['様', '殿']) {
-        scan(&r.name_honorific_any, text, &lb_kanji_odori, &lb_none, &mut |c, end| {
+        scan(&hs, &r.name_honorific_any, text, &lb_kanji_odori, &lb_none, &mut |c, end| {
             if !r.honorific_stop.is_match(&c[1]) {
                 hits.push(hit(NAME, LOW, c.get(0).unwrap().start(), end, "漢字の名前＋様・殿"));
             }
         });
     }
-    scan(&r.name_spaced, text, &lb_kanji, &lb_none, &mut |c, end| {
+    scan(&hs, &r.name_spaced, text, &lb_kanji, &lb_none, &mut |c, end| {
         hits.push(hit(NAME, LOW, c.get(0).unwrap().start(), end, "よくある姓＋空白＋名"));
     });
-    scan(&r.sensitive, text, &lb_none, &lb_none, &mut |c, end| {
+    scan(&hs, &r.sensitive, text, &lb_none, &lb_none, &mut |c, end| {
         hits.push(hit(SENS, MED, c.get(0).unwrap().start(), end, "要配慮の見出し語＋記載"));
     });
 

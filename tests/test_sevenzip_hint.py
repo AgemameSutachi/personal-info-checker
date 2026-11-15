@@ -64,6 +64,30 @@ def test_executable_without_7z_names_what_the_user_can_do(tmp_path, monkeypatch)
     assert_hint(item.reason)
 
 
+def test_find_7z_skips_path_search_when_a_candidate_exists(tmp_path, monkeypatch):
+    """設定の 7z.exe が在れば PATH を探さない（shutil.which は1回 約 0.1 秒で、実行ファイル1件ごとに呼ばれていた）。"""
+    exe = tmp_path / "7z.exe"
+    exe.write_bytes(b"MZ")
+
+    def no_which(name):
+        raise AssertionError("PATH を探した")
+
+    monkeypatch.setattr(archive.shutil, "which", no_which)
+    assert archive.find_7z(str(exe)) == str(exe)
+
+
+def test_find_7z_falls_back_to_path(tmp_path, monkeypatch):
+    """ほかの候補がどれも無ければ、これまでどおり PATH の 7z を使う。"""
+    exe = tmp_path / "bin" / "7z.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(archive.os.path, "isfile", lambda p: p == str(exe))
+    monkeypatch.setattr(archive.shutil, "which", lambda name: str(exe))
+    assert archive.find_7z(None) == str(exe)
+    monkeypatch.setattr(archive.shutil, "which", lambda name: None)
+    assert archive.find_7z(None) is None
+
+
 # 打ち切りの理由にも次の手を出す（入れ子の上限・圧縮率の上限は画面・コマンドのどちらでも変えられない）
 NEXT_STEP = "展開して、そのフォルダを検査してください"
 

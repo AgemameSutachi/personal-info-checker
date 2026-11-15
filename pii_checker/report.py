@@ -158,6 +158,8 @@ def overview_rows(job: dict, summary: dict, diff: dict | None = None) -> list[tu
         ),
         ("前回の結果を使ったファイル", summary.get("reused", 0)),
     ]
+    if summary.get("reused_same"):  # 同じ検査の中で、中身が同じだった別のパスの結果を写したファイル
+        rows.append(("同じ中身のファイルの結果を使ったファイル", summary["reused_same"]))
     for s in Status:
         rows.append((f"項目の状態: {s.label}", summary["item_status"].get(s.value, 0)))
     rows += [

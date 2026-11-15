@@ -95,6 +95,11 @@ def test_scan_file_temp_full(tmp_path, monkeypatch):
     src = tmp_path / "a.txt"
     src.write_text("山田太郎", encoding="utf-8")
     monkeypatch.setattr(safeio, "free_bytes", lambda folder: 1)
+    # メモリで読む小さなファイルは、一時フォルダを使わないので空きが無くても検査できる
+    res = engine.scan_file(str(src), ScanOptions(temp_dir=str(tmp_path)))
+    assert res.items[0].status == Status.SCANNED
+    # 写して読む大きさのファイルは、空きが無ければ理由つきの「検査不能」
+    monkeypatch.setattr(engine, "DIRECT_READ_LIMIT", 0)
     res = engine.scan_file(str(src), ScanOptions(temp_dir=str(tmp_path)))
     assert res.items[0].status == Status.UNCHECKABLE
     assert "空きが足りない" in res.items[0].reason

@@ -119,7 +119,9 @@ FILE_EXTRA_COLUMNS = {
     "sha256": "TEXT",  # 検査した中身のハッシュ
     "engine_sig": "TEXT",  # 検査器の版（signature.engine_signature）
     "reusable": "INTEGER DEFAULT 0",  # 次の検査で使い回してよいか（言い切りを妨げる状態を含まない）
-    "reused_from": "TEXT",  # 使い回した元のジョブ
+    "reused_from": "TEXT",  # 使い回した元のジョブ（reuse_kind が "same" のときは、同じ中身だった検査済みのファイルのパス）
+    # 使い回しの種類。NULL=前回のジョブの同じパスの結果（変わっていない）/ "same"=同じジョブの、同じ中身の別のパスの結果
+    "reuse_kind": "TEXT",
     "scanned_at": "REAL",  # 実際に中身を検査した時刻（使い回しても元の時刻を残す）
     "atime_kept": "INTEGER",  # 最終アクセス日時を保てたか
     # 異なる値の数（「種類:確度」→数の JSON。値もハッシュも持たない）。NULL は数えていない古い版の検査
@@ -232,6 +234,11 @@ def default_db_path() -> str:
     return str(d / "jobs.sqlite3")
 
 
+def leaf_name(path: str) -> str:
+    """パスの最後の名前（フォルダを除いたファイル名）。区切りは \\ も / も見る。"""
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 class StoreOpenError(sqlite3.OperationalError):
     """検査結果の保存先を開けない（フォルダが作れない・書き込めない・使用中・満杯など）。文面はそのまま人に見せる。"""
 
@@ -308,6 +315,8 @@ class Store:
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._sync_mode = "FULL"  # tx が切り替える（durable の説明）
         self._conn.executescript(SCHEMA)
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(items)")}
         if "conf_counts" not in cols:  # 古い版の DB に列を足す
@@ -324,6 +333,8 @@ class Store:
                 self._conn.execute(f"ALTER TABLE files ADD COLUMN {name} {decl}")
         self._fill_old_flags()
         self._conn.execute("CREATE INDEX IF NOT EXISTS files_reuse ON files(top_path, engine_sig, reusable)")
+        # 同じジョブの同じ中身（SHA-256）の検査済みファイルを引く（find_same_content）
+        self._conn.execute("CREATE INDEX IF NOT EXISTS files_content ON files(job_id, sha256)")
         jcols = {r[1] for r in self._conn.execute("PRAGMA table_info(jobs)")}
         for name, decl in (("owner_pid", "INTEGER"), ("heartbeat", "REAL")):
             if (
@@ -357,8 +368,22 @@ class Store:
         c.execute("UPDATE files SET flags='' WHERE state='done' AND flags IS NULL")
 
     @contextmanager
-    def tx(self):
+    def tx(self, durable: bool = True):
+        """1つのトランザクションで書く。
+
+        durable=False は検査の結果の保存だけに使う: 確定のたびにディスクへの同期を待たない（WAL の synchronous=NORMAL）。
+        電源断のときに最後の数件が巻き戻るだけで DB は壊れず、巻き戻ったファイルは未検査に戻って再開で読み直される。
+        同期を待つと1件ごとに約0.8ms掛かり、小さなファイルばかりの検査では配る側の時間の大半だった（実測）。
+        対処の記録など、取り返しのつかない操作と組になる書き込みは既定（FULL）のまま同期を待つ。FULL の確定は
+        それより前の WAL の書き込みもまとめてディスクへ送る。
+        """
         with self._lock:
+            mode = "FULL" if durable else "NORMAL"
+            if self._sync_mode != mode:
+                if self._conn.in_transaction:
+                    self._conn.rollback()  # 中断（KeyboardInterrupt 等）で開いたまま残った分。PRAGMA が断られないように
+                self._conn.execute(f"PRAGMA synchronous={mode}")  # トランザクションの外でしか効かない
+                self._sync_mode = mode
             try:
                 yield self._conn
                 self._conn.commit()
@@ -709,7 +734,7 @@ class Store:
                 return json.dumps(value if clean is None else _deep_clean(value, clean), ensure_ascii=False)
 
             marks["asked"] = time.perf_counter()
-            with self.tx() as c:
+            with self.tx(durable=False) as c:
                 marks["locked"] = time.perf_counter()
                 c.execute(
                     "DELETE FROM items WHERE job_id=? AND top_path=?",
@@ -767,7 +792,7 @@ class Store:
                 c.execute(
                     "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=?, n_findings=?,"
                     " mtime_ns=?, change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=NULL,"
-                    " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
+                    " reuse_kind=NULL, scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?,"
                     " access=NULL, access_who=NULL, access_owner=NULL, save_elapsed=?, wall_elapsed=?,"
                     " save_detail=NULL WHERE job_id=? AND top_path=?",
                     (
@@ -834,7 +859,7 @@ class Store:
     def copy_result(self, src: dict, job_id: str) -> None:
         """前回のジョブの結果（項目・検出）を、このジョブの結果として写す。元のジョブを消しても困らないよう行ごと写す。"""
         top = src["top_path"]
-        with self.tx() as c:
+        with self.tx(durable=False) as c:
             c.execute("DELETE FROM items WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
@@ -859,11 +884,12 @@ class Store:
                 " context, rule, method FROM findings WHERE job_id=? AND top_path=?",
                 (job_id, src["job_id"], top),
             )
-            origin = src.get("reused_from") or src["job_id"]
+            # 元の結果が同じジョブ内の写し（reuse_kind="same"）なら、その写し元のパスではなく、そのジョブを元として残す
+            origin = src["job_id"] if src.get("reuse_kind") == "same" else (src.get("reused_from") or src["job_id"])
             c.execute(
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
-                " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, scanned_at=?,"
-                " atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL, access_who=NULL,"
+                " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, reuse_kind=NULL,"
+                " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL, access_who=NULL,"
                 " access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL, save_detail=NULL"
                 " WHERE job_id=? AND top_path=?",
                 (
@@ -887,9 +913,175 @@ class Store:
                 ),
             )
 
+    # ------------------------------------------------------------ 同じジョブの中の、同じ中身の使い回し
+
+    def shared_sizes(self, job_id: str) -> set[int]:
+        """このジョブに、同じ大きさのファイルが2つ以上ある大きさ（0 は除く）。
+
+        大きさが他と被らないファイルは、同じ中身の別のファイルが無いので、中身を読んで調べない。
+        """
+        return {
+            r[0]
+            for r in self.query(
+                "SELECT size FROM files WHERE job_id=? AND size > 0 GROUP BY size HAVING COUNT(*) > 1", (job_id,)
+            )
+        }
+
+    def has_stream_items(self, job_id: str, top_path: str) -> bool:
+        """結果に、代替データストリーム（パス:ストリーム名）の項目があるか（ストリームはパスごとの持ち物）。"""
+        rows = self.query(
+            "SELECT 1 FROM items WHERE job_id=? AND top_path=? AND substr(path, 1, ?) = ? LIMIT 1",
+            (job_id, top_path, len(top_path) + 1, top_path + ":"),
+        )
+        return bool(rows)
+
+    def find_same_content(self, job_id: str, sha256: str, name: str, engine_sig: str, exclude: str = "") -> dict | None:
+        """同じジョブで検査済みの、中身（SHA-256）も名前も同じで、写してよい結果を返す。
+
+        名前（フォルダを除いたファイル名。大文字小文字も同じ）まで揃えるのは、結果が名前にも左右されるため
+        （ファイル名そのものも検査する・拡張子で形式の読み方が変わる・圧縮ファイルは名前から中身の名前を決める）。
+        代替データストリームの項目を持つ結果・隣のファイルに左右される結果は、そのパスだけの持ち物なので写さない。同じジョブで写した結果より、
+        実際に検査した結果を先に選ぶ。
+        """
+        rows = self.query(
+            "SELECT * FROM files WHERE job_id=? AND sha256=? AND engine_sig=? AND reusable=1 AND state='done'"
+            " AND top_path<>? ORDER BY (reuse_kind IS NULL) DESC, scanned_at DESC LIMIT 50",
+            (job_id, sha256, engine_sig, exclude),
+        )
+        for r in rows:
+            if leaf_name(r["top_path"]) == name and self._copyable_source(job_id, r["top_path"]):
+                return dict(r)
+        return None
+
+    def _copyable_source(self, job_id: str, top_path: str) -> bool:
+        """そのパスの結果を、別のパスへ写してよいか。ストリームの項目を持つもの・隣のファイルに左右されるもの
+        （分割アーカイブ・pg_dump のデータ）は、そのパスだけの結果なので写さない。"""
+        from .engine import depends_on_neighbors
+
+        return not self.has_stream_items(job_id, top_path) and not depends_on_neighbors(top_path)
+
+    def needs_password_source(self, job_id: str, top_path: str, sha256: str, engine_sig: str) -> dict | None:
+        """検査済みで「要パスワード」だった結果（reusable=0）の行を返す。写してよいかは呼び出し側が判断する。
+
+        同じパスワードの組で同じ中身を検査すれば同じ結果になるので、同じジョブの中でパスワードの版が同じ間だけ写せる。
+        """
+        rows = self.query(
+            "SELECT * FROM files WHERE job_id=? AND top_path=? AND state='done' AND worst_status=? AND sha256=?"
+            " AND engine_sig=?",
+            (job_id, top_path, Status.NEEDS_PASSWORD.value, sha256, engine_sig),
+        )
+        if rows and self._copyable_source(job_id, top_path):
+            return dict(rows[0])
+        return None
+
+    def copy_same_content(self, src: dict, job_id: str, dst_top: str, info, engine_sig: str) -> None:
+        """同じジョブの、中身が同じ別のパスの結果（項目・検出）を、dst_top の結果として写す。
+
+        パスを含む列は写す先のパスへ書き換える（項目のパスの先頭・理由・補足・検出の位置）。更新日時・変更日時・
+        ファイル ID・SHA-256・最終アクセス日時の補足は写す先のファイル自身の値（info。hash_file で読んだ値）にする。
+        アクセス権は書かない（呼び出し側が、写した後に読み直す）。1つのトランザクションなので、途中で止まっても
+        「検査済み」だけが残ることはない。
+        """
+        from .engine import ATIME_NOTES, atime_note
+
+        src_top = src["top_path"]
+        n = len(src_top)
+
+        def esc(text: str) -> str:
+            return json.dumps(text, ensure_ascii=False)[1:-1]
+
+        def replace_text(column: str, args: list, as_json: bool = False) -> str:
+            """SQL の列にパスの置き換えを重ねた式を返し、その引数を args へ足す。"""
+            expr = f"REPLACE({column}, ?, ?)"
+            args += [src_top, dst_top]
+            if as_json and esc(src_top) != src_top:  # JSON の中ではバックスラッシュが重ねて書かれている
+                expr = f"REPLACE({expr}, ?, ?)"
+                args += [esc(src_top), esc(dst_top)]
+            return expr
+
+        mtime = info.mtime_ns / 1e9 if info.mtime_ns else None
+        with self.tx(durable=False) as c:
+            c.execute("DELETE FROM items WHERE job_id=? AND top_path=?", (job_id, dst_top))
+            c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, dst_top))
+            # 引数は SQL に出てくる順（SELECT の列の順）に並べる
+            args: list = [job_id, dst_top, n, src_top, dst_top, n]
+            reason = replace_text("reason", args)
+            args.append(mtime)
+            notes = replace_text("notes", args, as_json=True)
+            args += [src["job_id"], src_top]
+            c.execute(
+                "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
+                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts) SELECT ?, ?, seq,"
+                " CASE WHEN substr(path, 1, ?) = ? THEN ? || substr(path, ? + 1) ELSE path END, kind, status,"
+                f" {reason}, method, size, CASE WHEN depth = 0 THEN ? ELSE mtime END, depth, password_kind, counts,"
+                f" {notes}, conf_counts, allowed, distinct_counts, rule_counts FROM items WHERE job_id=? AND top_path=?",
+                args,
+            )
+            # 実ファイル自身の項目の補足のうち、最終アクセス日時のものは写す先のファイルの事実に付け替える
+            for seq, text in c.execute(
+                "SELECT seq, notes FROM items WHERE job_id=? AND top_path=? AND depth=0", (job_id, dst_top)
+            ).fetchall():
+                try:
+                    notes_list = json.loads(text or "[]")
+                except ValueError:
+                    continue
+                fixed = [x for x in notes_list if x not in ATIME_NOTES]
+                note = atime_note(info)
+                if note:
+                    fixed.append(note)
+                if fixed != notes_list:
+                    c.execute(
+                        "UPDATE items SET notes=? WHERE job_id=? AND top_path=? AND seq=?",
+                        (json.dumps(fixed, ensure_ascii=False), job_id, dst_top, seq),
+                    )
+            c.execute(
+                "INSERT INTO findings SELECT ?, ?, item_seq, pii_type, confidence, masked_value,"
+                " REPLACE(location, ?, ?), context, rule, method FROM findings WHERE job_id=? AND top_path=?",
+                (job_id, dst_top, src_top, dst_top, src["job_id"], src_top),
+            )
+            # 印は写さずに決め直す（copy_result と同じ）
+            conf_total: dict[str, int] = {}
+            for (cc,) in c.execute(
+                "SELECT conf_counts FROM items WHERE job_id=? AND top_path=? AND conf_counts NOT IN ('{}', '')",
+                (job_id, dst_top),
+            ):
+                _add_counts(conf_total, cc)
+            distinct_text = src.get("distinct_counts")
+            distinct = json.loads(distinct_text) if distinct_text else None
+            mark = reportflags.compute(conf_total, distinct)
+            c.execute(
+                "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
+                " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=?, reuse_kind='same',"
+                " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL,"
+                " access_who=NULL, access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL, save_detail=NULL"
+                " WHERE job_id=? AND top_path=?",
+                (
+                    src["worst_status"],
+                    src["risk"],
+                    src["n_findings"],
+                    info.mtime_ns,
+                    info.change_ns,
+                    info.file_id,
+                    info.sha256,
+                    engine_sig,
+                    int(
+                        bool(src.get("reusable"))
+                    ),  # 要パスワードの結果を写したときは 0 のまま（次のジョブでは使い回さない）
+                    f"同じ中身: {src_top}",
+                    src["scanned_at"],
+                    int(bool(info.atime_kept)),
+                    distinct_text,
+                    reportflags.encode(mark["flags"]),
+                    mark["people_n"],
+                    mark["people_type"],
+                    job_id,
+                    dst_top,
+                ),
+            )
+
     def set_access(self, job_id: str, top_path: str, access: str, who: str = "", owner: str = "") -> None:
-        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する。"""
-        with self.tx() as c:
+        """ファイルの親フォルダのアクセス権（folderacl の結果）を記録する（検査の結果の一部なので同期を待たない）。"""
+        with self.tx(durable=False) as c:
             c.execute(
                 "UPDATE files SET access=?, access_who=?, access_owner=? WHERE job_id=? AND top_path=?",
                 (access, who, owner, job_id, top_path),
@@ -1072,11 +1264,13 @@ class Store:
         except (TypeError, ValueError):
             opts = {}
         reused = q(
-            "SELECT COUNT(*) FROM files WHERE job_id=? AND reused_from IS NOT NULL",
+            "SELECT COUNT(*) FROM files WHERE job_id=? AND reused_from IS NOT NULL AND reuse_kind IS NULL",
             (job_id,),
-        )[
-            0
-        ][0]
+        )[0][0]
+        # 前回ではなく、同じ検査の中で中身が同じだった別のパスの結果を写したファイル（同じ中身は2回検査しない）
+        # 写した後にパスワードの版が変わって pending へ戻したものは、検査し直すまで印が残るので数えない
+        same_sql = "SELECT COUNT(*) FROM files WHERE job_id=? AND reuse_kind='same' AND state='done'"
+        reused_same = q(same_sql, (job_id,))[0][0]
         # 報告の目安の印ごとのファイル数と、検出のあったファイルの親フォルダのアクセス権の内訳
         flag_counts = {f: 0 for f in reportflags.FLAG_ORDER}
         access_counts: dict[str, int] = {}
@@ -1113,6 +1307,7 @@ class Store:
             "links": links,
             "password_files": password_files,
             "reused": reused,
+            "reused_same": reused_same,
             # 許可リストで外した検出の件数と、許可リスト・利用者の規則の数（判定の文・レポートに出す）
             "allowed": allowed,
             "gps_photos": gps_photos,

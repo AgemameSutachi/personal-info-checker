@@ -39,6 +39,9 @@ IN_MEMORY_LIMIT = 64 * 1024 * 1024  # これより大きい内側ファイルは
 # これより大きいものはメモリへ丸ごと読まない（形式の読み方をあきらめ、文字として読める部分だけを少しずつ検査する）。
 # 1プロセスのメモリ上限（procguard、1.5〜4GB）の中で、読み直しや文字列化で数倍に膨らんでも収まる大きさ
 READ_ALL_LIMIT = 256 * 1024 * 1024
+# この大きさ以下の実ファイルは、一時フォルダへ写さずにメモリへ読んで検査する（safeio.read_small）。
+# 小さなファイルが何十万とあるドライブでは、写しの作成・開き直し・一時フォルダの片付けが検査の大半を占めていた
+DIRECT_READ_LIMIT = 4 * 1024 * 1024
 TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目印）
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
 # OCR を切って検査したときの次の手（画面の項目名と、コマンドの版の引数）
@@ -219,11 +222,12 @@ class Blob:
             return f.read(n)
 
     def read_all(self) -> bytes:
-        if self.data is not None:
-            return self.data
         size = self.size
         if size > READ_ALL_LIMIT:
+            # メモリ上の中身も実ファイルと同じ上限で断る（中身は上限より小さく持つので、ふだんは当たらない）
             raise TooLargeForMemory(size)
+        if self.data is not None:
+            return self.data
         with open(long_path(self.path), "rb") as f:
             return f.read()
 
@@ -1324,12 +1328,15 @@ class ScanContext:
         self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
         self._last_checkpoint = time.time()
         self._checkpoint_gap = 0.0  # 書き出しの重さから決めた間隔（CHECKPOINT_SECONDS より短くはしない）
+        # 途中経過を書き出そうとしたか（書いていなければ終わりの片付けで消しに行かない。無いファイルの削除でも
+        # 1回約0.2ms掛かり、小さなファイルでは1件の検査の約2割だった・実測）
+        self.checkpoint_written = False
         self.expanded_bytes = 0
         self.entries = 0
         self._tmp: str | None = None
         self.deadline: float | None = None
         self.pg_columns: dict[str, tuple[str, list[str]]] = {}  # pg_dump のデータファイル名 → (表, 列名)
-        # 元のファイルのフォルダ（検査するのは一時フォルダの写しなので、隣のファイルはここで引く）
+        # 元のファイルのフォルダ（検査するのは一時フォルダの写しかメモリの中身なので、隣のファイルはここで引く）
         self.source_dir: str | None = None
         self._owner = None  # 一時フォルダの持ち主の目印（開いている間は消せない）
         from .userrules import matcher_for
@@ -1418,6 +1425,7 @@ class ScanContext:
         import pickle
 
         tmp = self.checkpoint_file + ".tmp"
+        self.checkpoint_written = True  # 開く前に立てる（書きかけの .tmp が残っても終わりに消す）
         try:
             with open(tmp, "wb") as f:
                 pickle.dump(self.items, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1540,6 +1548,7 @@ class ScanContext:
         try:
             if blob.display == self.top_path and self.source_dir:
                 # 実ファイルは写しを検査しているので、隣の toc.dat は元のフォルダから共有を許して読む
+                # （隣に toc.dat があるデータファイルは depends_on_neighbors でメモリ読みから外し、写して読む）
                 from .safeio import read_head_shared
 
                 data = read_head_shared(os.path.join(self.source_dir, "toc.dat"), 64 * 1024 * 1024)
@@ -1587,6 +1596,13 @@ class ScanContext:
         if blob.path is not None:
             return long_path(blob.path) if len(blob.path) >= 240 else blob.path
         self.ensure_space(len(blob.data or b""))
+        if blob.display == self.top_path and blob.name_hint:
+            # メモリで読んだ元のファイル（scan_file）は、写して読んだときと同じく元の名前で書き出す。7-Zip は
+            # 書庫の名前から中身の名前を決める（rep.csv.Z の中身が rep.csv）ので、仮の名前にすると結果が変わる
+            path = os.path.join(self.new_tmp_subdir(), os.path.basename(blob.name_hint))
+            with open(long_path(path), "wb") as f:
+                f.write(blob.data or b"")
+            return long_path(path) if len(path) >= 240 else path
         fd, tmp = tempfile.mkstemp(dir=self.tmpdir, suffix=suffix or blob.ext)
         with os.fdopen(fd, "wb") as f:
             f.write(blob.data or b"")
@@ -1594,6 +1610,19 @@ class ScanContext:
 
 
 IGNORED_STREAMS = {"Zone.Identifier", "SmartScreen", "com.dropbox.attrs", "encryptable", "AFP_AfpInfo", "AFP_Resource"}
+
+
+# 最終アクセス日時を保てなかったときの補足（読んだファイルごとの事実なので、結果を写すときは写す先の分に付け替える）
+ATIME_NOTE_SERVER = "サーバーが最終アクセス日時を保つ指示に対応しておらず、読み取りで更新された（Samba 等）"
+ATIME_NOTE_NO_PERMISSION = "最終アクセス日時を保つ権限が無かった（読み取りで更新された可能性がある）"
+ATIME_NOTES = (ATIME_NOTE_SERVER, ATIME_NOTE_NO_PERMISSION)
+
+
+def atime_note(info) -> str:
+    """読んだ結果（SourceInfo）から、最終アクセス日時の補足の文を返す。保てていれば空。"""
+    if info.atime_kept:
+        return ""
+    return ATIME_NOTE_SERVER if info.atime_lost_reason == "server_updated" else ATIME_NOTE_NO_PERMISSION
 
 
 def alternate_streams(path: str) -> list[tuple[str, int]]:
@@ -1715,6 +1744,25 @@ def split_siblings(path: str) -> list[str]:
     return out
 
 
+RE_PG_DATA = re.compile(r"\d+\.dat(\.gz)?")
+RE_SPLIT_CONTINUATION = re.compile(r"\.(?!0*1$)\d{3}$|\.z\d{2}$|\.r\d{2}$|\.part(?!0*1\.rar$)\d+\.rar$")
+
+
+def depends_on_neighbors(path: str) -> bool:
+    """結果が隣のファイルにも左右される（そのファイルの識別情報だけでは使い回せない）か。
+
+    当てはまるものは、前回の結果を使い回さず（runner）、メモリで読まずに写しを隣に並べて読む（scan_file）。
+
+    分割アーカイブの1つ目（続きのファイルも読む）と、pg_dump の directory 形式のデータ（隣の toc.dat で列名を引く）。
+    """
+    if split_siblings(path):
+        return True
+    name = os.path.basename(path)
+    if RE_SPLIT_CONTINUATION.search(name.lower()):
+        return True  # 続き（.002・.z01・.part2.rar・.r00）: 1つ目の有無で「対象外」か「検査不能」かが変わる
+    return bool(RE_PG_DATA.fullmatch(name)) and os.path.exists(os.path.join(os.path.dirname(path), "toc.dat"))
+
+
 def error_detail(e: BaseException) -> str:
     """想定外の例外の詳細（型・文・起きた場所）を、理由の文の末尾に添える形にする。
 
@@ -1794,6 +1842,8 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
 
     元のファイルは safeio.snapshot で一時フォルダへ写してから検査する（他の人の保存を妨げない・
     最終アクセス日時を変えない・外部の道具が元のファイルを触らない）。写しの識別情報と SHA-256 を結果に付ける。
+    DIRECT_READ_LIMIT 以下のファイルは、同じ約束のまま写さずにメモリへ読む（safeio.read_small）。外部の道具に
+    渡す形式は、その時だけ一時フォルダへ書き出す（ScanContext.blob_as_path）。
     """
     from dataclasses import asdict
 
@@ -1813,23 +1863,37 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     source: dict | None = None
     network_lost = False
     try:
-        local_dir = ctx.new_tmp_subdir()
         from . import remote
 
         on_ftp = remote.is_ftp_path(path)
         name = (path.rsplit("/", 1)[-1] if on_ftp else os.path.basename(path)) or "file"
-        local = os.path.join(local_dir, name)
+        local_dir: str | None = None  # 写しの置き場（写すときに初めて作る）
+        data: bytes | None = None  # 小さなファイルはメモリへ読む（写しを作らない）
         try:
-            if on_ftp:
+            small = None
+            if not on_ftp and not depends_on_neighbors(path):
+                # 隣のファイルを一緒に読むもの（分割アーカイブ・pg_dump のデータ）は、写しの隣に並べるため写す
+                small = safeio.read_small(path, DIRECT_READ_LIMIT, allow_recall=options.allow_recall)
+            if small is not None:
+                info, data = small
+            elif on_ftp:
                 # FTP は1件ずつ手元へ写す（サーバーへは何も書かない）。分割アーカイブの続き・隠しストリーム・隣の toc.dat は
                 # 取りに行かない（README の限界）
                 if not options.connection:
                     raise safeio.SourceError("FTP の接続先の設定が無い（接続方式で始めたジョブから再開する）")
+                local_dir = ctx.new_tmp_subdir()
                 info = remote.ftp_snapshot(
-                    path, local, temp_root, remote.Connection.from_dict(options.connection), book.connection_password
+                    path,
+                    os.path.join(local_dir, name),
+                    temp_root,
+                    remote.Connection.from_dict(options.connection),
+                    book.connection_password,
                 )
             else:
-                info = safeio.snapshot(path, local, temp_root, allow_recall=options.allow_recall)
+                local_dir = ctx.new_tmp_subdir()
+                info = safeio.snapshot(
+                    path, os.path.join(local_dir, name), temp_root, allow_recall=options.allow_recall
+                )
                 # 分割アーカイブの1つ目は、7-Zip が続きを同じフォルダから読むので一緒に写す
                 for sib in split_siblings(path):
                     safeio.snapshot(
@@ -1846,15 +1910,14 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
         source = asdict(info)
         mtime = info.mtime_ns / 1e9 if info.mtime_ns else None
         ctx.source_dir = None if on_ftp else os.path.dirname(path)
-        top = ctx.scan_blob(Blob(display=path, path=local, mtime=mtime, name_hint=name), depth=0)
-        if not info.atime_kept and not on_ftp:
+        local = os.path.join(local_dir, name) if local_dir else None
+        top = ctx.scan_blob(Blob(display=path, path=local, data=data, mtime=mtime, name_hint=name), depth=0)
+        data = None  # 検査を終えた中身はすぐ手放す（隠しストリームの検査の間まで持たない）
+        if not on_ftp:
             # FTP はサーバー側の日時を保つ手段そのものが無い（画面・README で説明する。1件ずつの注記にはしない）
-            if info.atime_lost_reason == "server_updated":
-                top.notes.append(
-                    "サーバーが最終アクセス日時を保つ指示に対応しておらず、読み取りで更新された（Samba 等）"
-                )
-            else:
-                top.notes.append("最終アクセス日時を保つ権限が無かった（読み取りで更新された可能性がある）")
+            note = atime_note(info)
+            if note:
+                top.notes.append(note)
         try:
             streams = [] if on_ftp else alternate_streams(path)
         except OSError as e:
@@ -1869,8 +1932,11 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
         for i, (stream, size) in enumerate(streams):
             # 隠れた別ストリーム（file.txt:secret）にも中身を書けるので、別項目として検査する
             display = f"{path}:{stream}"
-            ads_local = os.path.join(local_dir, f"_stream{i}")
             try:
+                # 隠しストリームはまれなので今までどおり写す（写しの名前 _stream{i} が外部の道具に渡る名前になる）
+                if local_dir is None:
+                    local_dir = ctx.new_tmp_subdir()
+                ads_local = os.path.join(local_dir, f"_stream{i}")
                 safeio.snapshot(display, ads_local, temp_root, allow_recall=options.allow_recall)
             except (safeio.SourceError, OSError) as e:
                 failed = _source_failure(display, e)
@@ -1883,7 +1949,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
     finally:
         ctx.cleanup()
         # 最後まで（または例外で）終わったら途中経過は要らない。打ち切られたときだけ残り、実行器が読む
-        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp") if ctx.checkpoint_file else ():
+        for p in (ctx.checkpoint_file, ctx.checkpoint_file + ".tmp") if ctx.checkpoint_written else ():
             try:
                 os.remove(p)
             except OSError:

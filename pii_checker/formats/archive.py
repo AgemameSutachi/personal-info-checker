@@ -199,34 +199,53 @@ def handle_zip(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
             return handle_with_7z_exe(ctx, blob, item, col, depth, kind="zip")
         item.method = f"zip を展開（{len(infos)}件）"
         torch_dirs = _torch_dirs(z, infos)
-        for info in infos:
-            name = _fix_zip_name(info)
-            display = f"{blob.display}!{name}"
-            if torch_dirs and _is_torch_tensor(info, torch_dirs):
-                add_failed_item(
-                    ctx,
-                    display,
-                    Status.OUT_OF_SCOPE,
-                    "機械学習のモデル（PyTorch）の重み（数だけのデータ）で、文字を含まない",
-                    depth + 1,
-                    size=info.file_size,
-                )
-                continue
-            try:
-                data_or_path = _read_zip_member(ctx, z, info, None)
-            except Uncheckable:
-                raise
-            except Exception as e:
-                add_failed_item(
-                    ctx,
-                    display,
-                    Status.UNCHECKABLE,
-                    f"zip から取り出せなかった（壊れている可能性）。{ARCHIVE_BROKEN_HINT}（詳細: {type(e).__name__}: {e}）",
-                    depth + 1,
-                    size=info.file_size,
-                )
-                continue
-            _scan_extracted(ctx, display, data_or_path, depth + 1, name, info)
+        if ctx.split_policy is not None and depth == 0 and blob.display == ctx.top_path:
+            # 配る側が「大きな書庫は区切りに分けてよい」と指示したとき: 分けると決まれば、中身は検査せずに計画だけ残す
+            # （区切りは別の仕事として並べて検査する。分けないと決まれば、そのまま下で全部を検査する）
+            from ..splitscan import plan_zip_split
+
+            plan = plan_zip_split(ctx, infos, torch_dirs)
+            if plan is not None:
+                ctx.split_plan = plan
+                return
+        scan_zip_entries(ctx, blob.display, z, infos, torch_dirs, depth)
+
+
+def scan_zip_entries(
+    ctx: ScanContext, base_display: str, z: zipfile.ZipFile, infos, torch_dirs: set[str], depth: int
+) -> None:
+    """zip の項目（ディレクトリを除いた並びの一部でもよい）を1つずつ取り出して検査する。
+
+    handle_zip の本体。大きな書庫を区切りに分けて検査するとき（splitscan.scan_part）も、同じこの処理を区切りの範囲に回す。
+    """
+    for info in infos:
+        name = _fix_zip_name(info)
+        display = f"{base_display}!{name}"
+        if torch_dirs and _is_torch_tensor(info, torch_dirs):
+            add_failed_item(
+                ctx,
+                display,
+                Status.OUT_OF_SCOPE,
+                "機械学習のモデル（PyTorch）の重み（数だけのデータ）で、文字を含まない",
+                depth + 1,
+                size=info.file_size,
+            )
+            continue
+        try:
+            data_or_path = _read_zip_member(ctx, z, info, None)
+        except Uncheckable:
+            raise
+        except Exception as e:
+            add_failed_item(
+                ctx,
+                display,
+                Status.UNCHECKABLE,
+                f"zip から取り出せなかった（壊れている可能性）。{ARCHIVE_BROKEN_HINT}（詳細: {type(e).__name__}: {e}）",
+                depth + 1,
+                size=info.file_size,
+            )
+            continue
+        _scan_extracted(ctx, display, data_or_path, depth + 1, name, info)
 
 
 def _torch_dirs(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> set[str]:

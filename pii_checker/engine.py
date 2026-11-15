@@ -20,6 +20,7 @@ from array import array
 from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
+from hashlib import blake2b as _blake2b
 from pathlib import Path
 from typing import Callable
 
@@ -112,11 +113,15 @@ ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
 WEAK_HEADER_NOTE = "（左隣の「見出し語＋値」のセルを見出しにしたため 低）"
 
 
-def checkpoint_path(options: ScanOptions, top_path: str) -> str:
-    """1ファイルの途中経過を書き出す場所（ワーカーと実行器が同じ名前を求める）。"""
+def checkpoint_path(options: ScanOptions, top_path: str, part: int | None = None) -> str:
+    """1ファイルの途中経過を書き出す場所（ワーカーと実行器が同じ名前を求める）。
+
+    part は、大きな書庫を区切りに分けて検査するときの区切りの番号（区切りごとに別の場所へ書く）。
+    """
     import hashlib
 
-    digest = hashlib.sha1(top_path.encode("utf-8", "surrogatepass")).hexdigest()[:20]
+    key = top_path if part is None else f"{top_path}\0part{part}"
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:20]
     return os.path.join(options.temp_dir or tempfile.gettempdir(), f"{TEMP_PREFIX}ckpt_{digest}.pkl")
 
 
@@ -246,6 +251,17 @@ def distinct_key(pii_type: str, value: str) -> str:
     if pii_type == "name":
         key = _RE_HONORIFIC_TAIL.sub("", key) or key
     return key
+
+
+def stable_hash(text: str) -> int:
+    """プロセスをまたいで同じになる、文字列の 8 バイトの hash（符号付き整数）。
+
+    異なる値の数え方で使う。組み込みの hash() は文字列の種がプロセスごとに変わるので、大きな書庫を区切りに分けて
+    別々のワーカーで検査したとき、区切りをまたいだ同じ値を合わせられない。
+    """
+    return int.from_bytes(
+        _blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest(), "little", signed=True
+    )
 
 
 def _count_by_rank(best: dict[str, dict[int, int]]) -> dict[str, int]:
@@ -475,7 +491,12 @@ class Collector:
             self._count(hit.pii_type, confidence, hit)
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, hits)
             if len(self.seen) < SEEN_LIMIT:
-                self.seen[key] = (idx, confidence, _distinct_type(hit), hash(distinct_key(hit.pii_type, hit.value)))
+                self.seen[key] = (
+                    idx,
+                    confidence,
+                    _distinct_type(hit),
+                    stable_hash(distinct_key(hit.pii_type, hit.value)),
+                )
 
     def finish(self) -> None:
         """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
@@ -1289,14 +1310,38 @@ def _looks_numeric(v: str) -> bool:
     return v.replace(".", "", 1).replace("-", "", 1).isdigit()
 
 
+def expand_limit_reason(options: ScanOptions) -> str:
+    """展開の合計が上限を超えたときの理由の文（区切りに分けた検査の合計の判定でも同じ文を使う）。"""
+    return (
+        f"展開した合計が上限（{size_text(options.max_expand_bytes)}）を超えたため打ち切り"
+        "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
+    )
+
+
+def entries_limit_reason(options: ScanOptions) -> str:
+    """内側の項目数が上限を超えたときの理由の文。"""
+    return (
+        f"内側のファイル数が上限（{options.max_entries:,}件）を超えたため打ち切り"
+        "（本物の書庫なら、展開してからそのフォルダを検査してください）"
+    )
+
+
 class ScanContext:
     """1つの実ファイルの検査中の状態（展開量・項目数・一時フォルダ・パスワード）。"""
 
-    def __init__(self, top_path: str, options: ScanOptions, passwords: list[str]):
+    def __init__(self, top_path: str, options: ScanOptions, passwords: list[str], shared_tmp: str | None = None):
         self.top_path = top_path
         self.options = options
         self.passwords = passwords
         self.items: list[ItemResult] = []
+        # 大きな書庫を区切りに分けて検査するための持ち物（splitscan）。split_policy は分けてよいという指示（配る側が渡す）、
+        # split_plan は分けると決めた計画（handle_zip が入れ、scan_file が結果として返す）。
+        # shared_tmp は配る側が先に作った一時フォルダ（持ち主の目印は配る側が開いたまま持つ）。keep_tmp が True の間は消さない
+        # （計画を返す仕事は、区切りの仕事が使う写しを残す）。space_extra は同時に動く別の区切りが取り合う空きの見込み
+        self.split_policy = None
+        self.split_plan = None
+        self.keep_tmp = False
+        self.space_extra = 0
         self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
         self._last_checkpoint = time.time()
         self._checkpoint_gap = 0.0  # 書き出しの重さから決めた間隔（CHECKPOINT_SECONDS より短くはしない）
@@ -1311,6 +1356,8 @@ class ScanContext:
         # 元のファイルのフォルダ（検査するのは一時フォルダの写しかメモリの中身なので、隣のファイルはここで引く）
         self.source_dir: str | None = None
         self._owner = None  # 一時フォルダの持ち主の目印（開いている間は消せない）
+        if shared_tmp:
+            self._tmp = shared_tmp
         from .userrules import matcher_for
 
         self.matcher = matcher_for(options)  # 許可リストと利用者の規則（無ければ None）
@@ -1337,11 +1384,13 @@ class ScanContext:
         from . import safeio
 
         try:
-            safeio.ensure_free(self.tmpdir, nbytes)
+            safeio.ensure_free(self.tmpdir, nbytes + self.space_extra)
         except safeio.TempSpaceShort as e:
             raise Uncheckable(f"{what}{e}") from None
 
     def cleanup(self) -> None:
+        if self.keep_tmp:
+            return  # 区切りの仕事が使う写しを残す（配る側が最後の区切りが戻ったときに消す）
         if self._owner is not None:
             self._owner.close()
             self._owner = None
@@ -1354,15 +1403,9 @@ class ScanContext:
         self.expanded_bytes += max(0, nbytes)
         self.entries += 1
         if self.expanded_bytes > self.options.max_expand_bytes:
-            raise Uncheckable(
-                f"展開した合計が上限（{size_text(self.options.max_expand_bytes)}）を超えたため打ち切り"
-                "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
-            )
+            raise Uncheckable(expand_limit_reason(self.options))
         if self.entries > self.options.max_entries:
-            raise Uncheckable(
-                f"内側のファイル数が上限（{self.options.max_entries:,}件）を超えたため打ち切り"
-                "（本物の書庫なら、展開してからそのフォルダを検査してください）"
-            )
+            raise Uncheckable(entries_limit_reason(self.options))
 
     def password_candidates(self) -> list[str]:
         return list(self.passwords)
@@ -1809,8 +1852,18 @@ def _source_failure(path: str, e: BaseException) -> ItemResult:
     return item
 
 
-def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = None) -> FileResult:
+def scan_file(
+    path: str,
+    options: ScanOptions,
+    passwords: PasswordBook | None = None,
+    split=None,
+    shared_tmp: str | None = None,
+):
     """実ファイル1件を検査する（ワーカープロセスから呼ばれる入口）。
+
+    split（splitscan.SplitPolicy）と shared_tmp（配る側が作った一時フォルダ）が渡され、実ファイルが分けてよい大きな zip
+    なら、検査せずに分ける計画（splitscan.SplitPlan）を返すことがある（区切りは別の仕事として並べて検査する）。
+    それ以外は FileResult を返す。
 
     元のファイルは safeio.snapshot で一時フォルダへ写してから検査する（他の人の保存を妨げない・
     最終アクセス日時を変えない・外部の道具が元のファイルを触らない）。写しの識別情報と SHA-256 を結果に付ける。
@@ -1823,7 +1876,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
 
     started = time.time()
     book = passwords or PasswordBook()
-    ctx = ScanContext(path, options, book.candidates_for(path))
+    ctx = ScanContext(path, options, book.candidates_for(path), shared_tmp=shared_tmp)
     # 値を持つ読み直し（reveal）は途中経過を書かない・消さない（生の値を一時フォルダに出さない。検査の分を壊さない）
     ctx.checkpoint_file = None if options.reveal or options.collect_positions else checkpoint_path(options, path)
     if ctx.checkpoint_file:
@@ -1838,12 +1891,18 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
         from . import remote
 
         on_ftp = remote.is_ftp_path(path)
+        if split is not None and shared_tmp:
+            from . import splitscan
+
+            if splitscan.may_split(path, options):
+                ctx.split_policy = split
         name = (path.rsplit("/", 1)[-1] if on_ftp else os.path.basename(path)) or "file"
         local_dir: str | None = None  # 写しの置き場（写すときに初めて作る）
         data: bytes | None = None  # 小さなファイルはメモリへ読む（写しを作らない）
         try:
             small = None
-            if not on_ftp and not depends_on_neighbors(path):
+            if not on_ftp and ctx.split_policy is None and not depends_on_neighbors(path):
+                # 分けてよいと指示された大きな zip は、区切りの仕事が読めるよう必ず写しを作る（メモリへ読まない）
                 # 隣のファイルを一緒に読むもの（分割アーカイブ・pg_dump のデータ）は、写しの隣に並べるため写す
                 small = safeio.read_small(path, DIRECT_READ_LIMIT, allow_recall=options.allow_recall)
             if small is not None:
@@ -1890,6 +1949,13 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
             note = atime_note(info)
             if note:
                 top.notes.append(note)
+        if ctx.split_plan is not None:
+            # 区切りに分けて検査する。最上位の項目（ファイル名の検査・書庫の見出し）までを済ませて計画を返し、
+            # 写し（一時フォルダ）は区切りの仕事が使うので消さない
+            from . import splitscan
+
+            ctx.keep_tmp = True
+            return splitscan.finish_plan(ctx, top, source, local, time.time() - started)
         try:
             streams = [] if on_ftp else alternate_streams(path)
         except OSError as e:

@@ -383,7 +383,7 @@ def _read_access_helper32(
                     digits = digits_by_table[table] = _ColumnDigits()
                 orgs = orgs_by_table.get(table)
                 if orgs is None:
-                    orgs = orgs_by_table[table] = _ColumnOrgs()
+                    orgs = orgs_by_table[table] = _ColumnOrgs(cols)
                 for ci, v in enumerate(values):
                     if v in (None, ""):
                         continue

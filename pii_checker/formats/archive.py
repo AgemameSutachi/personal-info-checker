@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import bisect
 import bz2
 import copy
 import gzip
@@ -787,6 +788,134 @@ def handle_7z(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, de
     if find_7z(ctx.options.sevenzip):
         return handle_with_7z_exe(ctx, blob, item, col, depth, kind="7z")
     return _handle_7z_python(ctx, blob, item, col, depth)
+
+
+# ------------------------------------------------------------------ ar（リンク用のライブラリ .lib・.a）
+
+AR_MAGIC = b"!<arch>\n"
+AR_LIBRARY_KIND = "リンク用のライブラリ（.lib・.a）"
+# 項目の名前がこれなら目次（記号の表・長い名前の表）で、プログラムの部品そのものではない
+AR_INDEX_NAMES = {"/", "//", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64", "__.SYMDEF_64 SORTED"}
+# COFF のオブジェクトの頭の Machine（x86・x64・ARM64・ARM・ARM Thumb-2・ARM64EC・IA-64）
+COFF_MACHINES = {0x014C, 0x8664, 0xAA64, 0x01C0, 0x01C4, 0xA641, 0x0200}
+AR_MAX_MEMBERS = 1_000_000
+
+
+def _is_object(head: bytes) -> bool:
+    """項目の中身の頭が、プログラムの部品（オブジェクト）の形か。"""
+    if head[:4] in (b"\x00\x00\xff\xff", b"\x7fELF", b"BC\xc0\xde", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):
+        return True  # インポートの欠片・大きな COFF（00 00 FF FF）・ELF・LLVM の bitcode・Mach-O
+    return len(head) >= 20 and int.from_bytes(head[:2], "little") in COFF_MACHINES
+
+
+def ar_object_spans(f) -> tuple[list[tuple[int, int]], int] | None:
+    """ar の項目が全部プログラムの部品なら、読まない範囲の並びと、中身ごと読まない ELF の部品の数を返す。
+
+    読まないのは、先頭の印・項目の頭・BSD の名前と、ELF の部品の中身（実行ファイルと同じ形で、
+    単体のときも対象外として読まない）。部品でない項目（deb の tar 等）が1つでもあるとき・頭が壊れているとき・
+    部品が1つも無いときは None。
+    """
+    f.seek(0)
+    if f.read(8) != AR_MAGIC:
+        return None
+    pos = 8
+    spans: list[tuple[int, int]] = [(0, 8)]
+    objects = 0
+    elf = 0
+    while True:
+        f.seek(pos)
+        hdr = f.read(60)
+        if not hdr or hdr == b"\n":
+            break  # 終わり（最後の項目の詰め物）
+        if len(hdr) < 60 or hdr[58:60] != b"`\n":
+            return None
+        try:
+            size = int(hdr[48:58].decode("ascii").strip())
+        except ValueError:
+            return None
+        if size < 0:
+            return None  # 壊れた頭（負の大きさで前へ戻ると、同じ所を読み続ける）
+        name = hdr[:16].decode("ascii", "replace").rstrip()
+        body = pos + 60
+        if name.startswith("#1/"):  # BSD の長い名前は中身の頭にある
+            try:
+                nlen = int(name[3:])
+            except ValueError:
+                return None
+            if not 0 <= nlen <= size:
+                return None
+            name = f.read(nlen).rstrip(b"\x00").decode("ascii", "replace")
+            body += nlen
+        end = body
+        if name not in AR_INDEX_NAMES:
+            head = f.read(20)
+            if not _is_object(head):
+                return None
+            objects += 1
+            if objects > AR_MAX_MEMBERS:
+                return None
+            if head[:4] == b"\x7fELF":
+                end = pos + 60 + size
+                elf += 1
+        spans.append((pos, end))
+        pos = pos + 60 + size + (size % 2)
+    return (spans, elf) if objects else None
+
+
+class MaskedReader:
+    """ファイルを読みながら、指定の範囲（ar の項目の頭）を NUL に置き換えて返す。"""
+
+    def __init__(self, f, spans: list[tuple[int, int]]):
+        self.f = f
+        self.spans = spans
+        self.starts = [s for s, _ in spans]
+        self.pos = 0
+        f.seek(0)
+
+    def read(self, n: int) -> bytes:
+        data = bytearray(self.f.read(n))
+        if not data:
+            return b""
+        begin, end = self.pos, self.pos + len(data)
+        i = max(0, bisect.bisect_right(self.starts, begin) - 1)
+        while i < len(self.spans) and self.spans[i][0] < end:
+            s, e = self.spans[i]
+            lo, hi = max(s, begin), min(e, end)
+            if lo < hi:
+                data[lo - begin : hi - begin] = bytes(hi - lo)
+            i += 1
+        self.pos = end
+        return bytes(data)
+
+
+def handle_ar(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
+    """ar 形式。中身が全部プログラムの部品（.lib・.a）なら、7-Zip で項目ごとに書き出さず全体を1回だけ読む。
+
+    Windows のインポートライブラリは関数ごとに同じ名前の項目を持ち、7-Zip で開くと「1.jvm.dll」〜の欠片を
+    何千個も書き出して1件ずつ検査していた。項目の頭は今までどおり読まない（名前・日時の欄の数字を拾わない）。
+    ELF の部品は、単体のとき実行ファイルとして対象外なので、中身も読まない。
+    deb など部品でない項目を持つものは、今までどおり 7-Zip で中を開く。
+    """
+    from ..engine import PartialScan
+    from ..textdecode import iter_strings_chunked
+
+    with blob.open() as f:
+        layout = ar_object_spans(f)
+        if layout is not None:
+            spans, elf = layout
+            item.kind = AR_LIBRARY_KIND
+            reader = MaskedReader(f, spans)
+            for s in iter_strings_chunked(reader.read):
+                col.add_text(s, "生データ", method="生データ走査")
+    if layout is None:
+        return handle_with_7z_exe(ctx, blob, item, col, depth)
+    item.method = "生データ走査（ライブラリ全体を1件として読む）"
+    if elf:
+        item.notes.append(f"ELF の部品 {elf:,} 個は、実行ファイルと同じく対象外として中身を読んでいない")
+    raise PartialScan(
+        "リンク用のライブラリ（プログラムの部品の集まり）のため、文字として読める部分だけを検査した"
+        "（見つかった場所は、中のどの部品かまでは示さない）"
+    )
 
 
 # ------------------------------------------------------------------ tar / 単体圧縮

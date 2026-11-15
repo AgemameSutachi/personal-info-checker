@@ -597,7 +597,7 @@ def handler_for(kind: str):
         "compress_z": archive.handle_with_7z_exe,
         "cpio": archive.handle_with_7z_exe,
         "rpm": archive.handle_with_7z_exe,
-        "ar": archive.handle_with_7z_exe,
+        "ar": archive.handle_ar,
         "gzip": archive.handle_single_compressed,
         "bzip2": archive.handle_single_compressed,
         "xz": archive.handle_single_compressed,

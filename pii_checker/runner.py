@@ -1074,9 +1074,9 @@ def cleanup_stale_temp(extra_dirs: list[str | None] | tuple = (), no_mark_grace:
     もういないので、年齢に関係なく消す（動いている他のジョブの一時フォルダは目印を消せないので残る）。
     目印の無いフォルダは、作られた直後（目印を置く前）でなければ持ち主はいないとみなす。設定した一時フォルダも見る。
     """
-    import shutil
     import tempfile
 
+    from . import safeio
     from .engine import OWNER_MARK, TEMP_PREFIX
 
     bases = []
@@ -1109,25 +1109,10 @@ def cleanup_stale_temp(extra_dirs: list[str | None] | tuple = (), no_mark_grace:
                     continue
             except OSError:
                 continue
-            shutil.rmtree(p, onerror=_retry_writable)
+            safeio.remove_tree(p)
             if not os.path.exists(p):
                 removed += 1  # 消せたものだけ数える（消せなかったものは次の機会にまた試す）
     return removed
-
-
-def _retry_writable(func, path, _exc) -> None:
-    """rmtree が消せなかったものの読み取り専用を外して、もう一度だけ消す。
-
-    展開した zip などの中身には読み取り専用のファイルがあり、Windows ではそのままでは消せず、一時フォルダが残っていた
-    （2026-10-21 の検査の展開の残りが 98 個残っていた）。それでも消せなければ諦める（次の片付けでまた試す）。
-    """
-    import stat
-
-    try:
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-    except OSError:
-        pass
 
 
 class RunnerRegistry:

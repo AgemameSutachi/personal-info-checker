@@ -138,6 +138,32 @@ def _fmt(n: int) -> str:
     return f"{n}B"
 
 
+def remove_tree(path: str) -> None:
+    """一時フォルダを消す。読み取り専用のファイルは属性を外して消し直し、それでも消せないものは諦める。
+
+    展開した zip・7-Zip で開いた DLL の欠片などには読み取り専用のファイルがあり、Windows では
+    shutil.rmtree(ignore_errors=True) が黙って残していた（F ドライブの通しの後、一時フォルダの写しが
+    169 フォルダ・47 万ファイル残っていた）。残ったものは次のジョブの始まりの片付けでまた試す。
+    """
+    shutil.rmtree(path, onerror=_retry_writable)
+
+
+def _retry_writable(func, path, _exc) -> None:
+    """rmtree が消せなかったものの読み取り専用を外して、もう一度だけ消す。
+
+    展開した zip などの中身には読み取り専用のファイルがあり、Windows ではそのままでは消せず、一時フォルダが残っていた
+    （2026-10-21 の検査の展開の残りが 98 個残っていた）。それでも消せなければ諦める（次の片付けでまた試す）。
+    無いもの（すでに消えたフォルダ）も黙って諦める。
+    """
+    import stat
+
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
 def inside_any(path: str, roots: list[str]) -> str | None:
     """path が roots のどれかの中（同じ場所を含む）なら、その root を返す。"""
     p = os.path.normcase(os.path.abspath(path)).rstrip("\\/")

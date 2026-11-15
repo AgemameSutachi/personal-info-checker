@@ -593,7 +593,7 @@ def handle_with_7z_exe(
                     size=size,
                 )
         for d in dirs:
-            shutil.rmtree(d, ignore_errors=True)
+            safeio.remove_tree(d)
     if broken_listing:
         from ..engine import PartialScan
 
@@ -630,7 +630,7 @@ def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) 
     for f in sorted(files):
         rel = os.path.relpath(f, outdir).replace(os.sep, "/")
         ctx.scan_nested(f"{blob.display}!{rel}", path=f, depth=depth + 1, name_hint=rel)
-    shutil.rmtree(outdir, ignore_errors=True)
+    safeio.remove_tree(outdir)
     if r.returncode != 0:
         from ..engine import PartialScan
 

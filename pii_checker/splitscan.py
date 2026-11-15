@@ -353,14 +353,12 @@ class SharedTemp:
         self._owner = open(os.path.join(self.path, engine.OWNER_MARK), "wb")
 
     def release(self) -> None:
-        import shutil
-
-        from .runner import _retry_writable
+        from . import safeio
 
         if self._owner is not None:
             self._owner.close()
             self._owner = None
-        shutil.rmtree(self.path, onerror=_retry_writable)
+        safeio.remove_tree(self.path)
 
 
 class SplitRun:

@@ -12,7 +12,6 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
-import shutil
 import tempfile
 import time
 import traceback
@@ -1439,7 +1438,9 @@ class ScanContext:
             self._owner.close()
             self._owner = None
         if self._tmp:
-            shutil.rmtree(self._tmp, ignore_errors=True)
+            from . import safeio
+
+            safeio.remove_tree(self._tmp)
             self._tmp = None
 
     def account(self, nbytes: int) -> None:

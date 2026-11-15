@@ -34,6 +34,7 @@ from .remote import close_pool as close_ftp_pool
 from .safeio import NETWORK_LOST_MSG, HashStopped, NetworkLost, SourceInfo, free_bytes, hash_file, is_disk_full
 from .safeio import stat_identity
 from .signature import engine_signature
+from .splitscan import PartResult, PartSpec, SharedTemp, SplitPlan, SplitPolicy, SplitRun, assemble, failed_part
 from .store import Store, leaf_name
 from .walker import walk
 
@@ -72,6 +73,17 @@ BIG_FILE_BYTES = 1024**3
 # 大きなファイルを同時に配る本数の上限（一時領域・メモリを大きなファイルばかりで食わないように）。
 # 実物の検査時間での模擬では、上限2で全部を大きい順にしたときとほぼ同じ速さ（ワーカー6本で 18,821→15,071 秒）
 BIG_FILE_CONCURRENCY = 2
+# 大きな zip（BIG_FILE_BYTES 以上・Python の zipfile で読める暗号化なしのもの）の中を、区切りに分けて別々のワーカーへ並べて
+# 検査する（S4・splitscan）。ドライブ全体の検査（ワーカー4本・5時間）の最後の約1時間は、7.8GB の zip 1件だけが1本で動いていた。
+# 分けるのは、項目数が ARCHIVE_SPLIT_MIN_ENTRIES 以上・区切りが2つ以上・ワーカーが ARCHIVE_SPLIT_MIN_WORKERS 本以上のとき。
+# 区切りは展開後の大きさ ARCHIVE_SPLIT_PART_BYTES か項目数 ARCHIVE_SPLIT_PART_ENTRIES のどちらか先に届いた所で切る。
+# 1ファイルあたり同時に動かす区切りの本数は ARCHIVE_SPLIT_PARALLEL（0 ならワーカー数の半分・少なくとも2）。
+# 区切りは BIG_FILE_CONCURRENCY の枠の外（枠に数えると全体で2本しか動かず、分ける意味が無い）。親の枠は最後の区切りが戻るまで持つ
+ARCHIVE_SPLIT_MIN_ENTRIES = 2000
+ARCHIVE_SPLIT_MIN_WORKERS = 4
+ARCHIVE_SPLIT_PART_BYTES = 512 * 1024**2
+ARCHIVE_SPLIT_PART_ENTRIES = 10_000
+ARCHIVE_SPLIT_PARALLEL = 0
 # ワーカーを作り直すまでの件数（形式ごとの読み込みが溜め込むメモリを手放すため）。作り直すたびにプロセスの起動と
 # 1件目の準備（正規表現・形式の読み込み）で1〜2秒かかり、50件ごとでは小さなファイルばかりのフォルダで検査の
 # 半分近くがこれに消えていた（ドライブ全体の検査で実測・2026-11-06）。溜まるメモリは、形式を混ぜた実物 476 件を
@@ -130,9 +142,25 @@ def options_from_dict(d: dict) -> ScanOptions:
     return ScanOptions(**{k: v for k, v in d.items() if k in names})
 
 
-def _scan_task(path: str, options: ScanOptions, book: PasswordBook):
-    """ワーカープロセスで動く。"""
-    return scan_file(path, options, book)
+def _scan_task(path: str, options: ScanOptions, book: PasswordBook, split=None, shared_tmp: str | None = None):
+    """ワーカープロセスで動く。大きな zip は、分けると決めたときだけ検査せずに計画（SplitPlan）を返す。"""
+    return scan_file(path, options, book, split, shared_tmp)
+
+
+def _scan_part_task(spec: PartSpec, options: ScanOptions, book: PasswordBook):
+    """ワーカープロセスで動く。大きな zip の区切り1つを、親の写しから検査する。"""
+    from .splitscan import scan_part
+
+    return scan_part(spec, options, book)
+
+
+def _plan_of(future) -> SplitPlan | None:
+    """検査の仕事が「分ける計画」を返したらそれを、そうでなければ（結果・失敗）None を返す。"""
+    try:
+        result = future.result()
+    except Exception:  # noqa: BLE001  時間切れ・異常終了などは、ふつうの失敗として扱う
+        return None
+    return result if isinstance(result, SplitPlan) else None
 
 
 class SameContentReuse:
@@ -336,6 +364,10 @@ class JobRunner:
         self.same_content: SameContentReuse | None = None  # 同じ中身の使い回し（検査の周ごとに作る。試験・調べ用）
         self._acl = AccessCache()  # 検出のあったファイルの親フォルダのアクセス権（同じフォルダは1回だけ読む）
         self._cleanup = BackgroundCleanup()  # 持ち主のいない一時フォルダの片付け（配る側を止めないよう裏で）
+        self.split_runs: dict[str, SplitRun] = (
+            {}
+        )  # 区切りに分けて検査している最中の親（検査の周ごとに作る。試験・調べ用）
+        self.splits_done: list[tuple[str, int]] = []  # 区切りに分けて検査し終えた親と区切りの数（試験・調べ用）
 
     # ------------------------------------------------------------ 前回の結果の使い回し
 
@@ -529,16 +561,17 @@ class JobRunner:
         except Exception:  # noqa: BLE001  後始末の失敗でジョブの状態を変えない
             pass
 
-    def _timeout_for(self, path: str) -> int:
+    def _timeout_for(self, path: str, expanded: int | None = None) -> int:
         """1ファイルの時間制限。git の pack は全部の版を検査するので長くする（中身は読まずにパスだけで決める）。
 
         巨大なファイルは、大きさを遅めの読み取り速度で割った時間を下回らないようにする（設定の時間制限は最低限の値）。
+        expanded は、大きな書庫の区切り1つの展開後の大きさ（区切りの時間制限は、ファイル全体でなくこの大きさから決める）。
         """
         p = path.replace("\\", "/").lower()
         limit = (
             self.timeout * GIT_PACK_TIMEOUT_FACTOR if "/objects/pack/" in p and p.endswith(".pack") else self.timeout
         )
-        size = self._sizes.get(path)
+        size = expanded if expanded is not None else self._sizes.get(path)
         if size is None:
             try:
                 size = self.store.file_size(self.job_id, path) or 0
@@ -585,95 +618,287 @@ class JobRunner:
 
         self.phase = "パスワードで再検査" if self.rechecking else "検査"
         ctx = multiprocessing.get_context("spawn")
-        with ProcessPool(
-            max_workers=self.workers,
-            max_tasks=WORKER_MAX_TASKS,
-            context=ctx,
-            initializer=worker_init,
-            initargs=(self.memory_limit,),
-        ) as pool:
-            while not self._stop.is_set():
-                pending = self.store.pending_files_sized(self.job_id)
-                with self._lock:
-                    self._requeue.clear()
-                if not pending:
-                    break
-                # 時間制限を決める大きさは、未検査の一覧で受け取った値を使う（1件ごとに DB へ聞くと、小さなファイルばかりの
-                # 検査で配る側の時間の1割を超えた・実測）
-                self._sizes = dict(pending)
-                futures = {}
-                queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
-                exhausted = False
-                # 同じ中身のファイルの使い回し（再検査・設定で切ったときは使わない）
-                same = None
-                if self.options.reuse and not self.rechecking:
-                    shared = self.store.shared_sizes(self.job_id)
-                    if any(sz >= SAME_CONTENT_MIN_BYTES for sz in shared):
-                        same = SameContentReuse(self, shared)
-                self.same_content = same
-
-                def schedule(path: str) -> None:
-                    with self._lock:
-                        book = PasswordBook(
-                            common=list(self.passwords.common),
-                            per_file={k: list(v) for k, v in self.passwords.per_file.items()},
-                            connection_password=self.passwords.connection_password,
-                        )
-                    f = pool.schedule(_scan_task, args=(path, self.options, book), timeout=self._timeout_for(path))
-                    futures[f] = (path, time.time(), self.password_version)
-                    self.current.add(path)
-
-                def apply(results: list[tuple[str, str]]) -> None:
-                    """SameContentReuse が決めた扱いを実行する（写した・ふつうに検査する・先頭を待つ）。"""
-                    for p, action in results:
-                        if action == "scan":
-                            queue.hold(p, self._sizes.get(p) or 0)
-                            schedule(p)
-                        else:  # copied / wait: ワーカーを使わないので、大きなファイルの枠を手放す
-                            queue.done(p)
-
+        # 区切りに分けた親の一時フォルダ（写し）のうち、停止などで途中のまま残ったもの。ワーカーが全部終わってから消す
+        # （動いているワーカーが開いている写しは、Windows では消せない）
+        leftovers: list[SharedTemp] = []
+        try:
+            with ProcessPool(
+                max_workers=self.workers,
+                max_tasks=WORKER_MAX_TASKS,
+                context=ctx,
+                initializer=worker_init,
+                initargs=(self.memory_limit,),
+            ) as pool:
+                self._scan_loop(pool, ProcessExpired, leftovers)
+        finally:
+            for tmp in leftovers:
                 try:
-                    while (futures or not exhausted or (same and same.busy)) and not self._stop.is_set():
-                        # 同時に投げる数を絞る（大量のファイルでもメモリを食わない）
-                        while (
-                            not exhausted
-                            and len(futures) + (same.hashing if same else 0) < self.workers * 4
-                            and self._db_space_ok()
-                        ):
-                            path = queue.next()
-                            if path is None:
-                                exhausted = True
-                                break
-                            if not self.rechecking and self._try_reuse(path):
-                                queue.done(path)
-                                continue  # 前回から変わっていない（前回の結果を写した）
-                            if same and same.offer(path):
-                                continue  # 中身を読んで、同じ中身の検査済みのファイルがあるか調べる
-                            schedule(path)
-                        if same:
-                            apply(same.poll())
-                        if not futures:
-                            if same and same.busy:
-                                apply(same.poll(DONE_WAIT_SECONDS))  # 中身を読み終えるのを待つ
-                            continue  # 全部を使い回した・空きの確かめで止めた（次の周で終わる）
-                        # 決まった時間だけ眠ると、短い仕事ばかりのときにワーカーが空いたまま待たされる（同時に32件・
-                        # 0.2 秒ごとでは毎秒約160件が上限だった・実測）。どれか1件が終わったらすぐ起きる
-                        done, _ = wait_futures(futures, timeout=DONE_WAIT_SECONDS, return_when=FIRST_COMPLETED)
-                        if not done:
-                            continue
-                        for f in done:
-                            path, started, version = futures.pop(f)
-                            self.current.discard(path)
-                            queue.done(path)
-                            self._save(f, path, started, ProcessExpired, version)
-                            if same:
-                                apply(same.finished(path, version))  # この結果を待っていた同じ中身のファイルへ写す
+                    tmp.release()
+                except Exception:  # noqa: BLE001  消せなかった分は次の後始末の掃除が消す（持ち主の目印は閉じてある）
+                    pass
+
+    def _password_book(self) -> PasswordBook:
+        """いまのパスワード帳の写し（検査スレッドが書き換えを受けている最中に読まないよう鍵を持つ）。"""
+        with self._lock:
+            return PasswordBook(
+                common=list(self.passwords.common),
+                per_file={k: list(v) for k, v in self.passwords.per_file.items()},
+                connection_password=self.passwords.connection_password,
+            )
+
+    def _split_candidate(self, path: str) -> bool:
+        """大きな zip の中を区切りに分けて並べてよい候補か（ワーカーが目次を読んで、実際に分けるかを決める）。"""
+        if self.workers < ARCHIVE_SPLIT_MIN_WORKERS or (self._sizes.get(path) or 0) < BIG_FILE_BYTES:
+            return False
+        if self.options.reveal or self.options.collect_positions:
+            return False
+        return path.lower().endswith(".zip") and not is_ftp_path(path) and not path.startswith(("\\\\", "//"))
+
+    def _scan_loop(self, pool, process_expired, leftovers: list[SharedTemp]) -> None:
+        while not self._stop.is_set():
+            pending = self.store.pending_files_sized(self.job_id)
+            with self._lock:
+                self._requeue.clear()
+            if not pending:
+                break
+            # 時間制限を決める大きさは、未検査の一覧で受け取った値を使う（1件ごとに DB へ聞くと、小さなファイルばかりの
+            # 検査で配る側の時間の1割を超えた・実測）
+            self._sizes = dict(pending)
+            futures = {}
+            # 区切りに分けて検査している親（パス → SplitRun）と、区切りの仕事（future → (親, 区切りの番号, 配った時刻)）。
+            # shared_tmps は、計画が戻るのを待っている親の一時フォルダ
+            splits = self.split_runs = {}
+            part_futures: dict = {}
+            shared_tmps: dict[str, SharedTemp] = {}
+            parallel = ARCHIVE_SPLIT_PARALLEL or max(2, self.workers // 2)
+            queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
+            exhausted = False
+            # 同じ中身のファイルの使い回し（再検査・設定で切ったときは使わない）
+            same = None
+            if self.options.reuse and not self.rechecking:
+                shared = self.store.shared_sizes(self.job_id)
+                if any(sz >= SAME_CONTENT_MIN_BYTES for sz in shared):
+                    same = SameContentReuse(self, shared)
+            self.same_content = same
+
+            def schedule(path: str) -> None:
+                book = self._password_book()
+                tmp = None
+                policy = None
+                if self._split_candidate(path):
+                    # 大きな zip: 写しの一時フォルダ（持ち主の目印つき）を配る側が先に作って渡す。分けると決まれば
+                    # 最後の区切りが戻るまで配る側が持ち、分けないと決まれば、その仕事が終わった後で消す
+                    try:
+                        tmp = SharedTemp(self.options.temp_dir)
+                    except OSError:
+                        tmp = None  # 作れなければ分けない（今と同じ経路で、ワーカーが自分で作る）
+                    if tmp is not None:
+                        policy = SplitPolicy(
+                            min_entries=ARCHIVE_SPLIT_MIN_ENTRIES,
+                            part_bytes=ARCHIVE_SPLIT_PART_BYTES,
+                            part_entries=ARCHIVE_SPLIT_PART_ENTRIES,
+                            parallel=parallel,
+                        )
+                try:
+                    f = pool.schedule(
+                        _scan_task,
+                        args=(path, self.options, book, policy, tmp.path if tmp else None),
+                        timeout=self._timeout_for(path),
+                    )
+                except BaseException:
+                    if tmp is not None:
+                        tmp.release()
+                    raise
+                if tmp is not None:
+                    shared_tmps[path] = tmp
+                futures[f] = (path, time.time(), self.password_version)
+                self.current.add(path)
+
+            def apply(results: list[tuple[str, str]]) -> None:
+                """SameContentReuse が決めた扱いを実行する（写した・ふつうに検査する・先頭を待つ）。"""
+                for p, action in results:
+                    if action == "scan":
+                        queue.hold(p, self._sizes.get(p) or 0)
+                        schedule(p)
+                    else:  # copied / wait: ワーカーを使わないので、大きなファイルの枠を手放す
+                        queue.done(p)
+
+            def feed(run: SplitRun) -> None:
+                """親の区切りを、同時の本数の上限まで配る。"""
+                plan = run.plan
+                while not self._stop.is_set():
+                    idx = run.take()
+                    if idx is None:
+                        break
+                    start, end, nbytes = plan.parts[idx]
+                    try:
+                        os.remove(checkpoint_path(self.options, run.path, part=idx))  # 前の検査が残した途中経過
+                    except OSError:
+                        pass
+                    spec = PartSpec(
+                        index=idx,
+                        top_path=run.path,
+                        local_zip=plan.local_zip,
+                        start=start,
+                        end=end,
+                        n_entries=len(plan.entries),
+                        torch_dirs=plan.torch_dirs,
+                        space_extra=plan.space_extra,
+                    )
+                    pf = pool.schedule(
+                        _scan_part_task,
+                        args=(spec, self.options, self._password_book()),
+                        timeout=self._timeout_for(run.path, expanded=nbytes),
+                    )
+                    part_futures[pf] = (run, idx, time.time())
+
+            def finish_split(run: SplitRun) -> None:
+                """全部の区切りが戻った（取りやめを含む）。親1件にまとめて保存し、写しを消す。"""
+                splits.pop(run.path, None)
+                self.current.discard(run.path)
+                queue.done(run.path)
+                try:
+                    if not run.aborted:
+                        self._save_split(run)
+                        self.splits_done.append((run.path, len(run.plan.parts)))
                 finally:
+                    run.release()
+                if same:
+                    apply(same.finished(run.path, run.version))  # この結果を待っていた同じ中身のファイルへ写す
+
+            try:
+                while (futures or part_futures or not exhausted or (same and same.busy)) and not self._stop.is_set():
+                    # 同時に投げる数を絞る（大量のファイルでもメモリを食わない）
+                    while (
+                        not exhausted
+                        and len(futures) + (same.hashing if same else 0) < self.workers * 4
+                        and self._db_space_ok()
+                    ):
+                        path = queue.next()
+                        if path is None:
+                            exhausted = True
+                            break
+                        if not self.rechecking and self._try_reuse(path):
+                            queue.done(path)
+                            continue  # 前回から変わっていない（前回の結果を写した）
+                        if same and same.offer(path):
+                            continue  # 中身を読んで、同じ中身の検査済みのファイルがあるか調べる
+                        schedule(path)
                     if same:
-                        same.close()
-                if self._stop.is_set():
-                    pool.stop()
-                    break
+                        apply(same.poll())
+                    if not futures and not part_futures:
+                        if same and same.busy:
+                            apply(same.poll(DONE_WAIT_SECONDS))  # 中身を読み終えるのを待つ
+                        continue  # 全部を使い回した・空きの確かめで止めた（次の周で終わる）
+                    # 決まった時間だけ眠ると、短い仕事ばかりのときにワーカーが空いたまま待たされる（同時に32件・
+                    # 0.2 秒ごとでは毎秒約160件が上限だった・実測）。どれか1件が終わったらすぐ起きる
+                    done, _ = wait_futures(
+                        [*futures, *part_futures], timeout=DONE_WAIT_SECONDS, return_when=FIRST_COMPLETED
+                    )
+                    if not done:
+                        continue
+                    for f in done:
+                        if f in part_futures:
+                            run, idx, started = part_futures.pop(f)
+                            outcome = self._part_outcome(f, run, idx, started, process_expired)
+                            run.record(idx, outcome, self.options)
+                            if run.finished:
+                                finish_split(run)
+                            else:
+                                feed(run)
+                            continue
+                        path, started, version = futures.pop(f)
+                        tmp = shared_tmps.pop(path, None)
+                        plan = _plan_of(f) if tmp is not None else None
+                        if plan is not None:
+                            # 分ける計画が戻った: 親はまだ済んでいない（現在の検査・大きなファイルの枠・同じ中身の待ちは
+                            # そのまま）。区切りを配り始める。写しは最後の区切りが戻るまで配る側が持つ
+                            run = splits[path] = SplitRun(plan, path, version, started, tmp, parallel)
+                            feed(run)
+                            continue
+                        self.current.discard(path)
+                        queue.done(path)
+                        try:
+                            self._save(f, path, started, process_expired, version)
+                        finally:
+                            if tmp is not None:
+                                tmp.release()  # 分けないと決まった（または失敗した）: 先に作った一時フォルダを消す
+                        if same:
+                            apply(same.finished(path, version))  # この結果を待っていた同じ中身のファイルへ写す
+            finally:
+                if same:
+                    same.close()
+                # 止めたとき・想定外の例外のときに残った写し。動いているワーカーが開いているので、ここでは消さずに
+                # ワーカーが全部終わった後で消す（_scan_pending）
+                leftovers.extend(r.tmp for r in splits.values() if r.tmp is not None)
+                leftovers.extend(shared_tmps.values())
+                for r in splits.values():
+                    r.tmp = None
+                splits.clear()
+                shared_tmps.clear()
+            if self._stop.is_set():
+                pool.stop()
+                break
+
+    def _part_outcome(self, future, run: SplitRun, idx: int, started: float, process_expired) -> PartResult:
+        """区切りの仕事の結果。落ちた（時間切れ・異常終了・想定外のエラー）区切りは、その区切りの項目だけを検査不能にする。"""
+        elapsed = time.time() - started
+        path = run.path
+        try:
+            return future.result()
+        except FutureTimeout:
+            partial = read_checkpoint(checkpoint_path(self.options, path, part=idx))
+            self._cleanup.request([self.options.temp_dir])  # 打ち切ったワーカーの一時フォルダを（裏で）片付ける
+            limit = self._timeout_for(path, expanded=run.plan.parts[idx][2])
+            minutes = f"{limit // 60}分" if limit >= 60 else f"{limit}秒"
+            kept = (
+                "途中までに見つけた分は記録した（残りは未検査）。"
+                if partial and any(i.finding_counts for i in partial)
+                else ""
+            )
+            reason = f"時間切れ（{minutes}）で打ち切った。{kept}{TIMEOUT_HINT}"
+        except process_expired as e:
+            partial = read_checkpoint(checkpoint_path(self.options, path, part=idx))
+            self._cleanup.request([self.options.temp_dir])
+            kept = (
+                "途中までに見つけた分は記録した（残りは未検査）。"
+                if partial and any(i.finding_counts for i in partial)
+                else ""
+            )
+            reason = (
+                f"読み取り中に検査プロセスが異常終了した（1プロセスのメモリ上限 {self.memory_limit / 1024**3:.1f}GB を"
+                f"超えた・壊れたファイルの可能性）。{kept}{CRASH_HINT}（詳細: {e}）"
+            )
+        except Exception as e:  # noqa: BLE001
+            if is_disk_full(e):
+                self._halt(DISK_FULL_MESSAGE)  # 続けても無駄なので止める。親は保存せず、再開でやり直す
+                run.aborted = True
+            partial = None
+            reason = (
+                f"読み取りの途中で想定外のエラーになり、検査できなかった（要目視）。{UNEXPECTED_HINT}{error_detail(e)}"
+            )
+        return failed_part(run.plan, idx, reason, partial, elapsed)
+
+    def _save_split(self, run: SplitRun) -> None:
+        """区切りの結果を親1件にまとめて保存する（区切りごとには保存しない。中断・再開は親ごとにやり直す）。"""
+        path = run.path
+        try:
+            result = assemble(run.plan, run.outcomes, self.options)
+            result.top_path = path  # 列挙したときの表記のまま保存する（列挙の結果と突き合わせるため）
+            result.items[0].path = path
+            self.store.save_result(self.job_id, result, self.engine_sig, wall_elapsed=time.time() - run.started)
+            if any(i.finding_counts for i in result.items):
+                self._record_access(path)
+            if run.version != self.password_version and any(i.status == Status.NEEDS_PASSWORD for i in result.items):
+                # 検査中にパスワードを受け取っていたら、新しいパスワードでもう一度試す
+                self.store.mark_pending(self.job_id, [path])
+        except Exception as e:  # 結果そのものを保存できない（ドライブの満杯・DB の故障）→ 続けても無駄なので止める
+            if is_disk_full(e):
+                self._halt(DISK_FULL_MESSAGE)
+            else:
+                self._halt(
+                    f"結果を保存できなかった（{type(e).__name__}: {e}）。原因を除いてから再開すると続きから検査する"
+                )
 
     def _halt(self, reason: str) -> None:
         """検査を安全に止める（結果を保存できない等）。未検査のファイルは残るので、原因を除けば再開できる。"""

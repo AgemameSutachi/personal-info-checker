@@ -20,6 +20,7 @@ from array import array
 from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
+from hashlib import blake2b as _blake2b
 from pathlib import Path
 from typing import Callable
 
@@ -97,6 +98,49 @@ RE_TWELVE_DIGITS = re.compile(r"\d{12}")
 # 松井の分売 6%・優待 9%・JPX の銘柄 10% があるので 10% にはしない）
 COLUMN_ORG_MIN_DISTINCT = 50
 COLUMN_ORG_MIN_RATIO = 0.05
+# 会社の印がほとんど無い銘柄の一覧（IPO の当選確率の表「name,listing_date,offer_price,…」・分売の表「code4,name,…」）は
+# 割合では見分けられない（2026-11-08・株のデータ）。氏名の列の見出しが英語の「name」だけ（「氏名」「customer_name」のように
+# 人を指す見出しでない）で、同じ見出しの行に証券の項目の見出しがあれば、その列を最初から会社名の列にする。
+# 「コード」「code」だけの見出しは社員の番号にもあるので入れない
+COLUMN_ORG_BARE_NAME_HEADERS = frozenset({"name"})
+RE_SECURITIES_HEADER = re.compile(
+    r"(?:code4|ticker|tickersymbol|stockcode|securitiescode|securitycode|listingdate|offerprice|firstopen|ipoprice"
+    r"|銘柄コード|証券コード|上場日|公募価格|売出価格|初値|上場市場)",
+)
+# 見出しで会社名の列と決めた列でも、値が人の名前の形（よくある姓＋漢字の名1〜3字）なら下げない
+# （「name,ticker,qty」のような顧客の取引の記録・大株主の一覧。2026-11-15 の評価で見つかった穴）。
+# 末尾が人の名にまず来ない字（業・社・所…）のものは社名として下げる（「小松製作所」「山田工業」）。
+# 名の末尾にも来る字（行・学・信・道など）は入れない（迷うものは 中 のまま＝見落とさない側）
+# 名は漢字1〜3字か仮名2〜4字（「佐藤ハナ」「鈴木ひろし」）。姓だけの値（「山田」）も人とみなして下げない。
+# よくある姓の一覧に無い姓（「齋藤」）・ローマ字の名前は見分けられず、この列では 低 になる（割り切り・CHANGELOG に記載）
+RE_PERSON_LIKE_VALUE = re.compile(
+    rf"(?:{detectors.SURNAMES})(?:[ 　]?(?:[一-龥々]{{1,3}}|[ぁ-ん]{{2,4}}|[ァ-ヶー]{{2,4}}))?"
+)
+RE_ORG_TAIL = re.compile(
+    r"(?:業|社|所|店|部|課|局|院|校|場|組|薬|品|設|産|事|輸|械|鋼|料|器|販|製|庫|険|託|券|銀行|電機|電気|化学)$"
+)
+
+
+def _person_like_value(v: str) -> bool:
+    """値が人の名前の形（よくある姓＋名）で、社名の末尾の字で終わらないか。"""
+    s = v.strip()
+    return bool(RE_PERSON_LIKE_VALUE.fullmatch(s)) and not RE_ORG_TAIL.search(s)
+
+
+def _header_key(header: str | None) -> str:
+    """見出しを比べやすい形（空白・「_」・「-」を除いて小文字）にする。"""
+    return re.sub(r"[\s_\-]", "", str(header or "")).lower()
+
+
+def _securities_name_columns(headers) -> set[int]:
+    """見出しの並びから、銘柄の一覧の銘柄名とみなす氏名の列（列の番号）を返す。当たらなければ空。"""
+    keys = [_header_key(h) for h in headers]
+    bare = {i for i, k in enumerate(keys) if k in COLUMN_ORG_BARE_NAME_HEADERS}
+    if not bare or not any(RE_SECURITIES_HEADER.fullmatch(k) for k in keys):
+        return set()
+    return bare
+
+
 # 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
 # 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
 # 流しながら読む表（add_table・CSV と xlsx）も、見出しを決めた直後と空行の直後に、次の空行か見出し語のある行まで先読みする。
@@ -112,11 +156,15 @@ ORG_COLUMN_NOTE = "（会社名の列とみなしたため 低）"
 WEAK_HEADER_NOTE = "（左隣の「見出し語＋値」のセルを見出しにしたため 低）"
 
 
-def checkpoint_path(options: ScanOptions, top_path: str) -> str:
-    """1ファイルの途中経過を書き出す場所（ワーカーと実行器が同じ名前を求める）。"""
+def checkpoint_path(options: ScanOptions, top_path: str, part: int | None = None) -> str:
+    """1ファイルの途中経過を書き出す場所（ワーカーと実行器が同じ名前を求める）。
+
+    part は、大きな書庫を区切りに分けて検査するときの区切りの番号（区切りごとに別の場所へ書く）。
+    """
     import hashlib
 
-    digest = hashlib.sha1(top_path.encode("utf-8", "surrogatepass")).hexdigest()[:20]
+    key = top_path if part is None else f"{top_path}\0part{part}"
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:20]
     return os.path.join(options.temp_dir or tempfile.gettempdir(), f"{TEMP_PREFIX}ckpt_{digest}.pkl")
 
 
@@ -246,6 +294,17 @@ def distinct_key(pii_type: str, value: str) -> str:
     if pii_type == "name":
         key = _RE_HONORIFIC_TAIL.sub("", key) or key
     return key
+
+
+def stable_hash(text: str) -> int:
+    """プロセスをまたいで同じになる、文字列の 8 バイトの hash（符号付き整数）。
+
+    異なる値の数え方で使う。組み込みの hash() は文字列の種がプロセスごとに変わるので、大きな書庫を区切りに分けて
+    別々のワーカーで検査したとき、区切りをまたいだ同じ値を合わせられない。
+    """
+    return int.from_bytes(
+        _blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest(), "little", signed=True
+    )
 
 
 def _count_by_rank(best: dict[str, dict[int, int]]) -> dict[str, int]:
@@ -475,7 +534,12 @@ class Collector:
             self._count(hit.pii_type, confidence, hit)
             idx = self._add_sample(hit, confidence, norm, location, location_fn, method, raw, hits)
             if len(self.seen) < SEEN_LIMIT:
-                self.seen[key] = (idx, confidence, _distinct_type(hit), hash(distinct_key(hit.pii_type, hit.value)))
+                self.seen[key] = (
+                    idx,
+                    confidence,
+                    _distinct_type(hit),
+                    stable_hash(distinct_key(hit.pii_type, hit.value)),
+                )
 
     def finish(self) -> None:
         """項目を読み終えたときに呼ぶ。人の手がかりがあれば、待たせていた住所を確度 中に引き上げる。
@@ -870,7 +934,7 @@ class Collector:
             if switch:
                 headers = [v or None for v in values]
                 self._col_digits = _ColumnDigits()  # 見出しが変われば列の中身も変わる
-                self._col_orgs = _ColumnOrgs()
+                self._col_orgs = _ColumnOrgs(headers)
                 cur_score = score
                 cur_cells = cells
                 # 見出し行自体も検査（見出しなしで）
@@ -921,8 +985,8 @@ class Collector:
         """列名が分かっている表（データベース）を検査する。戻り値は行数。"""
         self._skip_seen = False
         self._col_digits = _ColumnDigits()
-        self._col_orgs = _ColumnOrgs()
         headers = list(columns)
+        self._col_orgs = _ColumnOrgs(headers)
         # 列名は表の中で変わらないので、見出しとして使えるかは表ごとに1回だけ決める
         sure = [bool(h and detectors.header_category(h)) for h in headers]
         head, keys, error, rest = self._prefetch_org_columns(headers, rows)
@@ -1050,19 +1114,24 @@ class _ColumnOrgs:
 
     _ColumnDigits と同じく表ごとに作り直す。1列で数えるのは異なる値 COLUMN_ID_TRACK 個まで（そこで判定を固める）。
     判定が付く前（異なる値が COLUMN_ORG_MIN_DISTINCT 個未満）に読んだ値は今までどおり（中）。小さな表は判定しない。
+    headers（表の見出しの並び）を渡すと、銘柄の一覧の見出しの組み合わせ（_securities_name_columns）の列は、値を数えずに
+    最初から会社名の列にする。
     """
 
-    __slots__ = ("_values", "_orgs", "_decided", "_is_name", "verdict")
+    __slots__ = ("_values", "_orgs", "_decided", "_is_name", "_forced", "verdict")
 
-    def __init__(self) -> None:
+    def __init__(self, headers=None) -> None:
         self._values: dict[int, set[str]] = {}
         self._orgs: dict[int, int] = {}
         self._decided: set[int] = set()  # 判定を固めた列（異なる値が上限に届いた）
         self._is_name: dict[int, bool] = {}  # 列の見出しが氏名か（見出しは表の中で変わらないので1回だけ調べる）
         self.verdict: dict[int, bool] = {}  # 列ごとの今の判定（会社名の列なら True）
+        self._forced: set[int] = _securities_name_columns(headers) if headers else set()  # 見出しで決めた列
 
     def cell(self, c_idx: int, header: str | None, v: str) -> bool:
         """表のセルを1つ見て、この列が今のところ会社名の列か（org_column に渡す値）を返す。header は列の見出し。"""
+        if c_idx in self._forced:
+            return not _person_like_value(v)
         is_name = self._is_name.get(c_idx)
         if is_name is None:
             is_name = self._is_name[c_idx] = bool(header) and detectors.header_category(header) == "name"
@@ -1086,9 +1155,9 @@ class _ColumnOrgs:
     def decided(self, c_idx: int) -> bool:
         """この列の判定が固まったか（異なる値が COLUMN_ID_TRACK 個に届いたか・氏名の列でなければ常に固まっている）。
 
-        まだ値を1つも見ていない列は固まっていない（見出しが氏名かを調べる前なので）。
+        まだ値を1つも見ていない列は固まっていない（見出しが氏名かを調べる前なので）。見出しで決めた列は固まっている。
         """
-        return self._is_name.get(c_idx) is False or c_idx in self._decided
+        return self._is_name.get(c_idx) is False or c_idx in self._decided or c_idx in self._forced
 
 
 class _ColumnDigits:
@@ -1289,14 +1358,38 @@ def _looks_numeric(v: str) -> bool:
     return v.replace(".", "", 1).replace("-", "", 1).isdigit()
 
 
+def expand_limit_reason(options: ScanOptions) -> str:
+    """展開の合計が上限を超えたときの理由の文（区切りに分けた検査の合計の判定でも同じ文を使う）。"""
+    return (
+        f"展開した合計が上限（{size_text(options.max_expand_bytes)}）を超えたため打ち切り"
+        "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
+    )
+
+
+def entries_limit_reason(options: ScanOptions) -> str:
+    """内側の項目数が上限を超えたときの理由の文。"""
+    return (
+        f"内側のファイル数が上限（{options.max_entries:,}件）を超えたため打ち切り"
+        "（本物の書庫なら、展開してからそのフォルダを検査してください）"
+    )
+
+
 class ScanContext:
     """1つの実ファイルの検査中の状態（展開量・項目数・一時フォルダ・パスワード）。"""
 
-    def __init__(self, top_path: str, options: ScanOptions, passwords: list[str]):
+    def __init__(self, top_path: str, options: ScanOptions, passwords: list[str], shared_tmp: str | None = None):
         self.top_path = top_path
         self.options = options
         self.passwords = passwords
         self.items: list[ItemResult] = []
+        # 大きな書庫を区切りに分けて検査するための持ち物（splitscan）。split_policy は分けてよいという指示（配る側が渡す）、
+        # split_plan は分けると決めた計画（handle_zip が入れ、scan_file が結果として返す）。
+        # shared_tmp は配る側が先に作った一時フォルダ（持ち主の目印は配る側が開いたまま持つ）。keep_tmp が True の間は消さない
+        # （計画を返す仕事は、区切りの仕事が使う写しを残す）。space_extra は同時に動く別の区切りが取り合う空きの見込み
+        self.split_policy = None
+        self.split_plan = None
+        self.keep_tmp = False
+        self.space_extra = 0
         self.checkpoint_file: str | None = None  # 途中経過の書き出し先（scan_file が決める）
         self._last_checkpoint = time.time()
         self._checkpoint_gap = 0.0  # 書き出しの重さから決めた間隔（CHECKPOINT_SECONDS より短くはしない）
@@ -1311,6 +1404,8 @@ class ScanContext:
         # 元のファイルのフォルダ（検査するのは一時フォルダの写しかメモリの中身なので、隣のファイルはここで引く）
         self.source_dir: str | None = None
         self._owner = None  # 一時フォルダの持ち主の目印（開いている間は消せない）
+        if shared_tmp:
+            self._tmp = shared_tmp
         from .userrules import matcher_for
 
         self.matcher = matcher_for(options)  # 許可リストと利用者の規則（無ければ None）
@@ -1337,11 +1432,13 @@ class ScanContext:
         from . import safeio
 
         try:
-            safeio.ensure_free(self.tmpdir, nbytes)
+            safeio.ensure_free(self.tmpdir, nbytes + self.space_extra)
         except safeio.TempSpaceShort as e:
             raise Uncheckable(f"{what}{e}") from None
 
     def cleanup(self) -> None:
+        if self.keep_tmp:
+            return  # 区切りの仕事が使う写しを残す（配る側が最後の区切りが戻ったときに消す）
         if self._owner is not None:
             self._owner.close()
             self._owner = None
@@ -1354,15 +1451,9 @@ class ScanContext:
         self.expanded_bytes += max(0, nbytes)
         self.entries += 1
         if self.expanded_bytes > self.options.max_expand_bytes:
-            raise Uncheckable(
-                f"展開した合計が上限（{size_text(self.options.max_expand_bytes)}）を超えたため打ち切り"
-                "（zip 爆弾の疑い。本物の書庫なら、展開してからそのフォルダを検査してください）"
-            )
+            raise Uncheckable(expand_limit_reason(self.options))
         if self.entries > self.options.max_entries:
-            raise Uncheckable(
-                f"内側のファイル数が上限（{self.options.max_entries:,}件）を超えたため打ち切り"
-                "（本物の書庫なら、展開してからそのフォルダを検査してください）"
-            )
+            raise Uncheckable(entries_limit_reason(self.options))
 
     def password_candidates(self) -> list[str]:
         return list(self.passwords)
@@ -1809,8 +1900,18 @@ def _source_failure(path: str, e: BaseException) -> ItemResult:
     return item
 
 
-def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = None) -> FileResult:
+def scan_file(
+    path: str,
+    options: ScanOptions,
+    passwords: PasswordBook | None = None,
+    split=None,
+    shared_tmp: str | None = None,
+):
     """実ファイル1件を検査する（ワーカープロセスから呼ばれる入口）。
+
+    split（splitscan.SplitPolicy）と shared_tmp（配る側が作った一時フォルダ）が渡され、実ファイルが分けてよい大きな zip
+    なら、検査せずに分ける計画（splitscan.SplitPlan）を返すことがある（区切りは別の仕事として並べて検査する）。
+    それ以外は FileResult を返す。
 
     元のファイルは safeio.snapshot で一時フォルダへ写してから検査する（他の人の保存を妨げない・
     最終アクセス日時を変えない・外部の道具が元のファイルを触らない）。写しの識別情報と SHA-256 を結果に付ける。
@@ -1823,7 +1924,7 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
 
     started = time.time()
     book = passwords or PasswordBook()
-    ctx = ScanContext(path, options, book.candidates_for(path))
+    ctx = ScanContext(path, options, book.candidates_for(path), shared_tmp=shared_tmp)
     # 値を持つ読み直し（reveal）は途中経過を書かない・消さない（生の値を一時フォルダに出さない。検査の分を壊さない）
     ctx.checkpoint_file = None if options.reveal or options.collect_positions else checkpoint_path(options, path)
     if ctx.checkpoint_file:
@@ -1838,12 +1939,18 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
         from . import remote
 
         on_ftp = remote.is_ftp_path(path)
+        if split is not None and shared_tmp:
+            from . import splitscan
+
+            if splitscan.may_split(path, options):
+                ctx.split_policy = split
         name = (path.rsplit("/", 1)[-1] if on_ftp else os.path.basename(path)) or "file"
         local_dir: str | None = None  # 写しの置き場（写すときに初めて作る）
         data: bytes | None = None  # 小さなファイルはメモリへ読む（写しを作らない）
         try:
             small = None
-            if not on_ftp and not depends_on_neighbors(path):
+            if not on_ftp and ctx.split_policy is None and not depends_on_neighbors(path):
+                # 分けてよいと指示された大きな zip は、区切りの仕事が読めるよう必ず写しを作る（メモリへ読まない）
                 # 隣のファイルを一緒に読むもの（分割アーカイブ・pg_dump のデータ）は、写しの隣に並べるため写す
                 small = safeio.read_small(path, DIRECT_READ_LIMIT, allow_recall=options.allow_recall)
             if small is not None:
@@ -1890,6 +1997,13 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
             note = atime_note(info)
             if note:
                 top.notes.append(note)
+        if ctx.split_plan is not None:
+            # 区切りに分けて検査する。最上位の項目（ファイル名の検査・書庫の見出し）までを済ませて計画を返し、
+            # 写し（一時フォルダ）は区切りの仕事が使うので消さない
+            from . import splitscan
+
+            ctx.keep_tmp = True
+            return splitscan.finish_plan(ctx, top, source, local, time.time() - started)
         try:
             streams = [] if on_ftp else alternate_streams(path)
         except OSError as e:

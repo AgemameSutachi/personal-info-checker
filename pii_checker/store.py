@@ -1268,7 +1268,9 @@ class Store:
             (job_id,),
         )[0][0]
         # 前回ではなく、同じ検査の中で中身が同じだった別のパスの結果を写したファイル（同じ中身は2回検査しない）
-        reused_same = q("SELECT COUNT(*) FROM files WHERE job_id=? AND reuse_kind='same'", (job_id,))[0][0]
+        # 写した後にパスワードの版が変わって pending へ戻したものは、検査し直すまで印が残るので数えない
+        same_sql = "SELECT COUNT(*) FROM files WHERE job_id=? AND reuse_kind='same' AND state='done'"
+        reused_same = q(same_sql, (job_id,))[0][0]
         # 報告の目安の印ごとのファイル数と、検出のあったファイルの親フォルダのアクセス権の内訳
         flag_counts = {f: 0 for f in reportflags.FLAG_ORDER}
         access_counts: dict[str, int] = {}

@@ -229,7 +229,12 @@ def test_crashed_part_makes_only_its_entries_uncheckable(tmp_path, store, small_
     assert r.splits_done == [(str(z), 4)]
     rows = store.query("SELECT seq, path, status, reason FROM items WHERE job_id=? ORDER BY seq", (job,))
     assert len(rows) == N_ENTRIES + 1
-    assert rows[0]["status"] == Status.SCANNED.value  # 最上位の項目は検査できている
+    # 最上位も検査不能（分けない経路の save_failure と同じ考え方）で、落ちた区切りが理由に出る
+    assert rows[0]["status"] == Status.UNCHECKABLE.value
+    assert (
+        "全 40 項目のうち 10 項目（1 区切り）" in rows[0]["reason"] and "区切り 2/4（11〜20件目）" in rows[0]["reason"]
+    )
+    assert "異常終了" in rows[0]["reason"]
     for k, row in enumerate(rows[1:]):
         if 10 <= k < 20:
             assert row["status"] == Status.UNCHECKABLE.value, row["path"]
@@ -465,4 +470,177 @@ def test_same_content_copy_of_split_parent(tmp_path, store, small_split, monkeyp
     strip = lambda d, top: [(x[0],) + (x[1].replace(top, "<TOP>"),) + x[2:] for x in d["items"]]  # noqa: E731
     assert strip(da, str(a)) == strip(db, str(b))
     assert da["findings"] == db["findings"] and da["file"][2] == db["file"][2] > 0
+    assert clean_temp(tmp_path) == []
+
+
+# ------------------------------------------------------------------ 区切りの時間切れ・パスワード・停止と再開
+
+PASSWORD = "secret-pw-1"
+
+
+def zipcrypto_zip(name: str, data: bytes, password: str) -> bytes:
+    """中身1件を ZipCrypto（従来の PKWARE 暗号）・無圧縮で格納した zip（標準の zipfile は暗号化して書けないので手で組む）。"""
+    import struct
+    import zlib
+
+    table = []
+    for i in range(256):
+        v = i
+        for _ in range(8):
+            v = (v >> 1) ^ 0xEDB88320 if v & 1 else v >> 1
+        table.append(v)
+    keys = [0x12345678, 0x23456789, 0x34567890]
+
+    def crc_byte(crc, b):
+        return (crc >> 8) ^ table[(crc ^ b) & 0xFF]
+
+    def update(b):
+        keys[0] = crc_byte(keys[0], b)
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        keys[2] = crc_byte(keys[2], (keys[1] >> 24) & 0xFF)
+
+    for b in password.encode():
+        update(b)
+    crc = zlib.crc32(data)
+    plain = bytes(range(11)) + bytes([crc >> 24]) + data
+    out = bytearray()
+    for b in plain:
+        t = (keys[2] | 2) & 0xFFFF
+        out.append(b ^ (((t * (t ^ 1)) >> 8) & 0xFF))
+        update(b)
+    fname = name.encode()
+    fixed = struct.pack("<HHHHHIII", 20, 1, 0, 0, 0x21, crc, len(out), len(data))
+    local = b"PK\x03\x04" + fixed + struct.pack("<HH", len(fname), 0) + fname + bytes(out)
+    central = (
+        b"PK\x01\x02" + struct.pack("<H", 20) + fixed + struct.pack("<HHHHHII", len(fname), 0, 0, 0, 0, 0, 0) + fname
+    )
+    end = b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, len(central), len(local), 0)
+    return local + central + end
+
+
+def make_zip_with_locked(path: Path) -> Path:
+    """make_zip に、パスワード付きの入れ子の zip（区切り1に入る）を足した zip。"""
+    make_zip(path, nested=False)
+    src = zipfile.ZipFile(path).namelist()
+    locked = zipcrypto_zip("secret.txt", "携帯 090-5555-6666\n".encode(), PASSWORD)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, n in enumerate(src):
+            z.writestr(n, f"顧客 携帯 090-1234-{i % 9:04d}\n")
+            if i == 12:
+                z.writestr("d1/locked.zip", locked)
+    return path
+
+
+def sleepy_part_task(spec, options, book):
+    """区切り1番だけ終わらない（区切りの時間切れの試験用）。"""
+    if spec.index == 1:
+        time.sleep(120)
+    return splitscan.scan_part(spec, options, book)
+
+
+def test_part_timeout_makes_only_its_entries_uncheckable(tmp_path, store, small_split, monkeypatch):
+    """区切りの時間制限（試験では2秒）を超えた区切りは、その区切りの項目と最上位だけが検査不能になる。"""
+    folder = tmp_path / "data"
+    z = make_zip(folder / "big.zip", nested=False)
+    real = runner.JobRunner._timeout_for
+
+    def short_for_parts(self, path, expanded=None):
+        return 2 if expanded is not None else real(self, path)
+
+    monkeypatch.setattr(runner.JobRunner, "_timeout_for", short_for_parts)
+    monkeypatch.setattr(runner, "_scan_part_task", sleepy_part_task)
+    job, r = run(store, folder, tmp_path)
+    assert store.job(job)["state"] == "done", store.job(job)
+    rows = store.query("SELECT status, reason FROM items WHERE job_id=? ORDER BY seq", (job,))
+    assert rows[0]["status"] == Status.UNCHECKABLE.value
+    assert "時間切れ（2秒）" in rows[0]["reason"] and "区切り 2/4（11〜20件目）" in rows[0]["reason"]
+    assert [x["status"] for x in rows[11:21]] == [Status.UNCHECKABLE.value] * 10
+    assert all(x["status"] == Status.SCANNED.value for x in rows[1:11] + rows[21:])
+    assert clean_temp(tmp_path) == []
+
+
+def test_locked_nested_zip_matches_unsplit(tmp_path, store, small_split, monkeypatch):
+    """区切りの中の入れ子の zip が要パスワードになる場合も、分けたときと分けないときで状態・明細が一致する。"""
+    folder = tmp_path / "data"
+    z = make_zip_with_locked(folder / "big.zip")
+    (js, rs), (jp, rp) = scan_both(store, folder, tmp_path, monkeypatch, z)
+    assert rs.splits_done and not rp.splits_done
+    a, b = dump(store, js, str(z)), dump(store, jp, str(z))
+    assert a["file"][1] == b["file"][1] == Status.NEEDS_PASSWORD.value  # worst_status
+    assert a == b
+
+
+def test_password_after_split_scan_rechecks(tmp_path, store, small_split, monkeypatch):
+    """要パスワードで終わった後にパスワードを足すと、分けた親も再検査され、分けない場合と同じ結果になる。"""
+    folder = tmp_path / "data"
+    z = make_zip_with_locked(folder / "big.zip")
+    job, r = run(store, folder, tmp_path)
+    assert store.job(job)["state"] == "done" and r.splits_done
+    assert dump(store, job, str(z))["file"][1] == Status.NEEDS_PASSWORD.value
+    r.add_password(PASSWORD)
+    r.wait(300)
+    assert store.job(job)["state"] == "done", store.job(job)
+    after = dump(store, job, str(z))
+    monkeypatch.setattr(runner, "ARCHIVE_SPLIT_MIN_WORKERS", 99)
+    job2, r2 = run(store, folder, tmp_path)
+    r2.add_password(PASSWORD)
+    r2.wait(300)
+    plain = dump(store, job2, str(z))
+    assert after["file"][1] != Status.NEEDS_PASSWORD.value
+    assert after == plain
+
+
+def test_save_split_marks_pending_when_password_arrived_during_scan(tmp_path, store):
+    """区切りを検査している間にパスワードを受け取ったら、要パスワードのまま済みにせず、検査し直しに回す。"""
+    z = make_zip_with_locked(tmp_path / "big.zip")
+    opts = ScanOptions(temp_dir=temp_dir(tmp_path), reuse=False)
+    job = store.create_job([str(tmp_path)], opts)
+    store.add_files(job, [(str(z), z.stat().st_size, None)])
+    policy = splitscan.SplitPolicy(min_entries=10, part_bytes=10**12, part_entries=10, parallel=2)
+    tmp = splitscan.SharedTemp(opts.temp_dir)
+    r = runner.JobRunner(store, job, workers=1)
+    try:
+        plan = engine.scan_file(str(z), opts, None, policy, tmp.path)
+        run_ = splitscan.SplitRun(plan, str(z), 0, time.time(), None, 2)
+        for idx, (start, end, _) in enumerate(plan.parts):
+            spec = splitscan.PartSpec(idx, plan.top_path, plan.local_zip, start, end, len(plan.entries), [], 0)
+            run_.outcomes[idx] = splitscan.scan_part(spec, opts)
+        r.password_version = 1  # 配った後でパスワードを受け取った
+        r._save_split(run_)
+    finally:
+        tmp.release()
+    state = store.query("SELECT state FROM files WHERE job_id=?", (job,))[0][0]
+    assert state == "pending"  # 保存した後で、あらためて検査に回した
+    assert store.job(job)["state"] != "error"
+
+
+def test_stop_then_resume_redoes_parent_and_matches(tmp_path, store, small_split, monkeypatch):
+    """停止した検査を再開すると、親ごとやり直して終わり、分けない検査と一致する（親は停止の間は done にならない）。"""
+    folder = tmp_path / "data"
+    z = make_zip(folder / "big.zip")
+    real_part = runner._scan_part_task
+    monkeypatch.setattr(runner, "_scan_part_task", slow_part_task)
+    job = store.create_job([str(folder)], ScanOptions(temp_dir=temp_dir(tmp_path), reuse=False))
+    r = runner.JobRunner(store, job, workers=3)
+    r.workers = 3
+    r.start()
+    for _ in range(600):
+        if r.split_runs:
+            break
+        time.sleep(0.1)
+    assert r.split_runs
+    r.cancel()
+    r.wait(120)
+    assert store.query("SELECT state FROM files WHERE job_id=?", (job,))[0][0] != "done"
+    assert store.query("SELECT COUNT(*) FROM items WHERE job_id=?", (job,))[0][0] == 0  # 区切りごとには保存しない
+    monkeypatch.setattr(runner, "_scan_part_task", real_part)
+    r2 = runner.JobRunner(store, job, workers=3)
+    r2.workers = 3
+    r2.start()
+    r2.wait(300)
+    assert store.job(job)["state"] == "done", store.job(job)
+    assert r2.splits_done == [(str(z), 4)]
+    monkeypatch.setattr(runner, "ARCHIVE_SPLIT_MIN_WORKERS", 99)
+    job_p, _ = run(store, folder, tmp_path)
+    assert dump(store, job, str(z)) == dump(store, job_p, str(z))
     assert clean_temp(tmp_path) == []

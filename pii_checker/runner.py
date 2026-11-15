@@ -731,6 +731,10 @@ class JobRunner:
                     if idx is None:
                         break
                     start, end, nbytes = plan.parts[idx]
+                    try:
+                        os.remove(checkpoint_path(self.options, run.path, part=idx))  # 前の検査が残した途中経過
+                    except OSError:
+                        pass
                     spec = PartSpec(
                         index=idx,
                         top_path=run.path,

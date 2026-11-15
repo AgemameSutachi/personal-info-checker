@@ -88,6 +88,8 @@ class PartResult:
     abort: str = ""  # 展開の上限などで区切りの途中から打ち切った理由（親を検査不能にする）
     elapsed: float = 0.0
     failed: bool = False
+    reason: str = ""  # 落ちた区切り（failed）の理由（時間切れ・メモリ・異常終了など）
+    where: str = ""  # 落ちた区切りの場所（「区切り 2/4（11〜20件目）」）
 
 
 # ------------------------------------------------------------------ 分けるかの判断（ワーカー側）
@@ -281,7 +283,7 @@ def failed_part(plan: SplitPlan, idx: int, reason: str, partial: list | None, el
                 size=size,
             )
         )
-    return PartResult(index=idx, items=items, packed={}, elapsed=elapsed, failed=True)
+    return PartResult(index=idx, items=items, packed={}, elapsed=elapsed, failed=True, reason=reason, where=where)
 
 
 def assemble(plan: SplitPlan, outcomes: dict[int, PartResult], options: ScanOptions) -> FileResult:
@@ -296,6 +298,7 @@ def assemble(plan: SplitPlan, outcomes: dict[int, PartResult], options: ScanOpti
     sink: dict[str, dict[int, int]] = {}
     expanded = entries = 0
     abort = ""
+    failed: list[PartResult] = []
     elapsed = plan.elapsed
     for idx in sorted(outcomes):
         oc = outcomes[idx]
@@ -305,11 +308,24 @@ def assemble(plan: SplitPlan, outcomes: dict[int, PartResult], options: ScanOpti
         entries += oc.entries
         elapsed += oc.elapsed
         abort = abort or oc.abort
+        if oc.failed:
+            failed.append(oc)
     merge_distinct(sink, plan.top_distinct)
     if not abort and expanded > options.max_expand_bytes:
         abort = engine.expand_limit_reason(options)
     if not abort and entries > options.max_entries:
         abort = engine.entries_limit_reason(options)
+    if failed:
+        # 分けない経路の save_failure と同じく、最上位も検査不能にして理由を残す（落ちた区切りの項目は検査不能、
+        # それ以外の区切りの結果は残っている）。どの区切りが落ちたかが分かる文にする
+        n_lost = sum(plan.parts[oc.index][1] - plan.parts[oc.index][0] for oc in failed)
+        shown = "、".join(f"{oc.where}: {oc.reason}" for oc in failed[:3])
+        more = f"（ほか {len(failed) - 3} 区切り）" if len(failed) > 3 else ""
+        text = (
+            f"全 {len(plan.entries):,} 項目のうち {n_lost:,} 項目（{len(failed)} 区切り）を検査できなかった。{shown}{more}。"
+            "ほかの区切りは検査できていて、その結果は残してある"
+        )
+        abort = f"{abort} {text}" if abort else text
     if abort:
         top.status = Status.UNCHECKABLE
         top.reason = abort

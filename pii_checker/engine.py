@@ -1354,10 +1354,6 @@ def _cell_to_str(v) -> str:
     return str(v)
 
 
-def _looks_numeric(v: str) -> bool:
-    return v.replace(".", "", 1).replace("-", "", 1).isdigit()
-
-
 def expand_limit_reason(options: ScanOptions) -> str:
     """展開の合計が上限を超えたときの理由の文（区切りに分けた検査の合計の判定でも同じ文を使う）。"""
     return (

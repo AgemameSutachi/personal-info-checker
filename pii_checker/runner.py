@@ -12,20 +12,29 @@ import multiprocessing
 import os
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from concurrent.futures import wait as wait_futures
 from dataclasses import fields
 
-from .engine import UNEXPECTED_HINT, checkpoint_path, depends_on_neighbors, error_detail, read_checkpoint, scan_file
+from .engine import (
+    UNEXPECTED_HINT,
+    alternate_streams,
+    checkpoint_path,
+    depends_on_neighbors,
+    error_detail,
+    read_checkpoint,
+    scan_file,
+)
 from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
 from .procguard import plan_workers, worker_init
 from .remote import LOGIN_LOST_MARK, Connection, LoginLost, ftp_stat, is_ftp_path, reset_login_failures
 from .remote import close_pool as close_ftp_pool
-from .safeio import NETWORK_LOST_MSG, NetworkLost, SourceInfo, free_bytes, is_disk_full, stat_identity
+from .safeio import NETWORK_LOST_MSG, HashStopped, NetworkLost, SourceInfo, free_bytes, hash_file, is_disk_full
+from .safeio import stat_identity
 from .signature import engine_signature
-from .store import Store
+from .store import Store, leaf_name
 from .walker import walk
 
 DEFAULT_TIMEOUT = 30 * 60  # 1ファイルあたりの時間制限（秒）。巨大な DB・イメージは設定で延ばす
@@ -71,6 +80,16 @@ BIG_FILE_CONCURRENCY = 2
 WORKER_MAX_TASKS = 500
 # 配った仕事が終わるのを待つ最長の時間（どれか1件が終われば、すぐ起きて次を配る）
 DONE_WAIT_SECONDS = 0.5
+# 同じ検査の中の、同じ中身のファイルの使い回し（SameContentReuse）で、中身を読んで調べる最小の大きさ。
+# 中身を読んで SHA-256 を取る手間（キャッシュに乗った状態で 4KB 0.2ms・64KB 0.3ms・1MB 1.2ms・4MB 3.1ms）と、
+# 配る側が決めて結果を写す手間（約 0.3ms）は大きさにほぼ依存せず、検査そのものは大きさと形式で大きく変わる
+# （CSV 4KB 3.8ms・64KB 21ms・256KB 105ms・1MB 344ms、xlsx 6KB 10ms・61KB 220ms・266KB 1.15 秒・1MB 5.6 秒。実測 2026-11-15）。
+# 小さなファイルは同じ大きさの別のファイルが偶然たくさんあって、ほぼ全部を読むことになる一方で、検査も数ミリ秒で、
+# 配る側が詰まる小さなファイルばかりの検査では写しても速くならない。64KB 以上なら、検査が 20ms 以上掛かり、
+# 同じ中身が3%以上あれば元が取れる（ドライブ全体の検査の実績で、64KB 以上の約 6% が同じ中身の別のパスだった）
+SAME_CONTENT_MIN_BYTES = 64 * 1024
+# 同じ中身かを調べるために中身を読む（SHA-256 を取る）スレッドの数。読み取りが主なので、検査のワーカー数とは別に持つ
+HASH_THREADS = 3
 
 
 class PendingQueue:
@@ -100,6 +119,11 @@ class PendingQueue:
         """配ったファイルが終わった（検査した・使い回した・失敗した）。"""
         self._big_out.discard(path)
 
+    def hold(self, path: str, size: int) -> None:
+        """done で手放したファイルを、あらためて検査に回す（大きなファイルの同時の数に数え直す）。"""
+        if size >= BIG_FILE_BYTES:
+            self._big_out.add(path)
+
 
 def options_from_dict(d: dict) -> ScanOptions:
     names = {f.name for f in fields(ScanOptions)}
@@ -109,6 +133,164 @@ def options_from_dict(d: dict) -> ScanOptions:
 def _scan_task(path: str, options: ScanOptions, book: PasswordBook):
     """ワーカープロセスで動く。"""
     return scan_file(path, options, book)
+
+
+class SameContentReuse:
+    """同じ検査の中で、中身が同じファイルの結果を写す（同じ中身を何度も検査しない）。
+
+    ドライブ全体の検査で、検査時間の半分以上が「中身が同じ別のパスのファイル」だった（同じ 7.8GB の zip の写し5個を
+    5本のワーカーが同時に2時間ずつ検査していた）。前回のジョブの使い回し（JobRunner._try_reuse）は同じパスだけなので、
+    同じジョブの中の別のパスは使い回せない。
+
+    見落としを出さないための決まり（どれかが欠けたら写さずにふつうに検査する）:
+    - 同じ中身の判定は、中身を最後まで読んだ SHA-256（safeio.hash_file）。大きさが他と被らないファイルと、
+      SAME_CONTENT_MIN_BYTES より小さいファイルは調べない。
+    - 結果が名前にも左右されるので、ファイル名（フォルダを除く。拡張子を含む）も同じものだけを写す
+      （ファイル名そのものも検査する・拡張子で読み方が変わる・圧縮ファイルは名前から中身の名前を決める）。
+    - 結果が隣のファイルに左右されるもの（engine.depends_on_neighbors）・パスごとのパスワードを持つファイル・
+      代替データストリームを持つファイル（ストリームはパスごとの持ち物）は対象外。FTP も対象外。
+    - 写す元は、検査が済んで言い切りを妨げない状態（store.REUSABLE_STATUSES）の結果だけ。失敗・時間切れ・要パスワード等で
+      終わったときは写さず、待っていたファイルはそれぞれふつうに検査する。
+    - 同時に同じ中身が配られたときは、最初の1つ（先頭）の検査が済むまで残りを待たせてから写す。
+
+    検査スレッド（配る側）だけが使う。中身を読むのは別のスレッド（HASH_THREADS 本）で、配る側を止めない。
+    """
+
+    def __init__(self, runner: "JobRunner", shared_sizes: set[int]):
+        self._runner = runner
+        self._store = runner.store
+        self._job_id = runner.job_id
+        self._sig = runner.engine_sig
+        self._shared = shared_sizes
+        self._pool = ThreadPoolExecutor(max_workers=HASH_THREADS, thread_name_prefix="pii-hash")
+        self._hashing: dict = {}  # 中身を読んでいる最中（future → パス）
+        self._leaders: dict[tuple[str, str], str] = {}  # (SHA-256, 名前) → 検査に回した先頭のパス
+        self._leader_key: dict[str, tuple[str, str]] = {}
+        self._waiters: dict[tuple[str, str], list[tuple[str, SourceInfo]]] = {}  # 先頭の検査を待つパスと読んだ結果
+        # 要パスワードで終わった先頭の結果（鍵 → (行, パスワードの版)）。同じ版の間だけ、同じ中身へ写す
+        self._needs_password: dict[tuple[str, str], tuple[dict, int]] = {}
+        self.copied = 0  # 写した件数（試験・調べ用）
+        self.waited = 0  # 先頭の検査を待たせた件数（試験・調べ用）
+
+    @property
+    def hashing(self) -> int:
+        return len(self._hashing)
+
+    @property
+    def busy(self) -> bool:
+        """読んでいる最中・先頭の検査を待っているファイルがあるか（あれば、配る側はまだ終われない）。"""
+        return bool(self._hashing or self._waiters)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def eligible(self, path: str) -> bool:
+        """このパスは、同じ中身かを調べる対象か（中身は読まない）。"""
+        r = self._runner
+        size = r._sizes.get(path) or 0
+        if size < SAME_CONTENT_MIN_BYTES or size not in self._shared:
+            return False
+        if is_ftp_path(path) or depends_on_neighbors(path):
+            return False
+        return not r.passwords.per_file.get(path)  # パスごとのパスワードで結果が変わりうる
+
+    def offer(self, path: str) -> bool:
+        """対象なら中身を読む仕事に回して True（結果は poll で受け取る）。対象外なら False（ふつうに検査する）。"""
+        if not self.eligible(path):
+            return False
+        r = self._runner
+        fut = self._pool.submit(hash_file, path, r.options.allow_recall, 2, r._stop.is_set)
+        self._hashing[fut] = path
+        return True
+
+    def poll(self, timeout: float = 0.0) -> list[tuple[str, str]]:
+        """中身を読み終えたファイルの扱いを返す。[(パス, "copied" | "scan" | "wait")]。
+
+        copied=先頭の結果を写した（済み）/ scan=ふつうに検査する / wait=先頭の検査が済むまで待つ（検査の枠は手放す）。
+        """
+        if not self._hashing:
+            if timeout:
+                self._runner._stop.wait(timeout)
+            return []
+        done, _ = wait_futures(list(self._hashing), timeout=timeout, return_when=FIRST_COMPLETED)
+        out: list[tuple[str, str]] = []
+        for f in done:
+            path = self._hashing.pop(f)
+            try:
+                info = f.result()
+            except HashStopped:
+                continue  # 止める指示。未検査のまま残る
+            except (
+                Exception
+            ):  # noqa: BLE001  読めない・書き換え続き等: 同じ中身かを確かめられないので、ふつうに検査する
+                info = None
+            if info is None or not info.sha256:
+                out.append((path, "scan"))
+            else:
+                out.append((path, self._decide(path, info)))
+        return out
+
+    def finished(self, path: str, version: int = 0) -> list[tuple[str, str]]:
+        """配ったファイルの検査と保存が済んだ。それを待っていたファイルの扱いを返す（poll と同じ形・wait は返さない）。
+
+        version は、そのファイルを配ったときのパスワードの版。
+        """
+        key = self._leader_key.pop(path, None)
+        if key is None:
+            return []
+        self._leaders.pop(key, None)
+        waiting = self._waiters.pop(key, [])
+        src = self._store.find_same_content(self._job_id, key[0], key[1], self._sig)
+        if src is None and version == self._runner.password_version:
+            # 要パスワードで終わった。同じパスワードの組で読んだ結果なので、同じ版の間は同じ中身にも同じ結果になる
+            np_src = self._store.needs_password_source(self._job_id, path, key[0], self._sig)
+            if np_src is not None:
+                self._needs_password[key] = (np_src, version)
+                src = np_src
+        if not waiting:
+            return []
+        return [(w, self._copy(src, w, info, version) if src else "scan") for w, info in waiting]
+
+    # ------------------------------------------------------------ 内部
+
+    def _decide(self, path: str, info: SourceInfo) -> str:
+        try:
+            if alternate_streams(path):
+                return "scan"  # ストリームはパスごとの持ち物。写した結果には含まれないので、ふつうに検査する
+        except OSError:
+            return "scan"  # 一覧を取れなかった: ストリームを調べていないので言い切れない
+        name = leaf_name(path)
+        key = (info.sha256, name)
+        src = self._store.find_same_content(self._job_id, info.sha256, name, self._sig, exclude=path)
+        if src is not None:
+            return self._copy(src, path, info)
+        np = self._needs_password.get(key)
+        if np is not None and np[1] == self._runner.password_version and np[0]["top_path"] != path:
+            return self._copy(np[0], path, info, np[1])
+        if key in self._leaders:
+            self._waiters.setdefault(key, []).append((path, info))
+            self.waited += 1
+            return "wait"
+        self._leaders[key] = path
+        self._leader_key[path] = key
+        return "scan"
+
+    def _copy(self, src: dict, path: str, info: SourceInfo, version: int | None = None) -> str:
+        """src の結果を path へ写す。version は要パスワードの結果を写すときの、判断したパスワードの版。"""
+        try:
+            self._store.copy_same_content(src, self._job_id, path, info, self._sig)
+        except Exception as e:  # noqa: BLE001
+            if is_disk_full(e):
+                raise
+            return "scan"  # 書き込みを巻き戻した上で、ふつうに検査する
+        if src.get("n_findings"):
+            self._runner._record_access(path)  # アクセス権は変わりうるので、写したファイルでも読み直す
+        self.copied += 1
+        if not src.get("reusable") and version is not None and version != self._runner.password_version:
+            # 写している間にパスワードを受け取った: 要パスワードのまま「済み」にせず、新しいパスワードで検査し直す
+            # （JobRunner._save_result と同じ扱い）
+            self._store.mark_pending(self._job_id, [path])
+        return "copied"
 
 
 class JobRunner:
@@ -151,6 +333,7 @@ class JobRunner:
         self._net_streak_paths: set[str] = set()  # 続けて「接続が切れた」になった（別々の）ファイル
         self._net_retries: dict[str, int] = {}  # ファイルごとの「接続が切れた」の回数
         self._ftp_stat_off = False  # FTP の使い回しの問い合わせに失敗したら、その回はもう問い合わせない
+        self.same_content: SameContentReuse | None = None  # 同じ中身の使い回し（検査の周ごとに作る。試験・調べ用）
         self._acl = AccessCache()  # 検出のあったファイルの親フォルダのアクセス権（同じフォルダは1回だけ読む）
         self._cleanup = BackgroundCleanup()  # 持ち主のいない一時フォルダの片付け（配る側を止めないよう裏で）
 
@@ -421,37 +604,73 @@ class JobRunner:
                 futures = {}
                 queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
                 exhausted = False
-                while (futures or not exhausted) and not self._stop.is_set():
-                    # 同時に投げる数を絞る（大量のファイルでもメモリを食わない）
-                    while not exhausted and len(futures) < self.workers * 4 and self._db_space_ok():
-                        path = queue.next()
-                        if path is None:
-                            exhausted = True
-                            break
-                        if not self.rechecking and self._try_reuse(path):
+                # 同じ中身のファイルの使い回し（再検査・設定で切ったときは使わない）
+                same = None
+                if self.options.reuse and not self.rechecking:
+                    shared = self.store.shared_sizes(self.job_id)
+                    if any(sz >= SAME_CONTENT_MIN_BYTES for sz in shared):
+                        same = SameContentReuse(self, shared)
+                self.same_content = same
+
+                def schedule(path: str) -> None:
+                    with self._lock:
+                        book = PasswordBook(
+                            common=list(self.passwords.common),
+                            per_file={k: list(v) for k, v in self.passwords.per_file.items()},
+                            connection_password=self.passwords.connection_password,
+                        )
+                    f = pool.schedule(_scan_task, args=(path, self.options, book), timeout=self._timeout_for(path))
+                    futures[f] = (path, time.time(), self.password_version)
+                    self.current.add(path)
+
+                def apply(results: list[tuple[str, str]]) -> None:
+                    """SameContentReuse が決めた扱いを実行する（写した・ふつうに検査する・先頭を待つ）。"""
+                    for p, action in results:
+                        if action == "scan":
+                            queue.hold(p, self._sizes.get(p) or 0)
+                            schedule(p)
+                        else:  # copied / wait: ワーカーを使わないので、大きなファイルの枠を手放す
+                            queue.done(p)
+
+                try:
+                    while (futures or not exhausted or (same and same.busy)) and not self._stop.is_set():
+                        # 同時に投げる数を絞る（大量のファイルでもメモリを食わない）
+                        while (
+                            not exhausted
+                            and len(futures) + (same.hashing if same else 0) < self.workers * 4
+                            and self._db_space_ok()
+                        ):
+                            path = queue.next()
+                            if path is None:
+                                exhausted = True
+                                break
+                            if not self.rechecking and self._try_reuse(path):
+                                queue.done(path)
+                                continue  # 前回から変わっていない（前回の結果を写した）
+                            if same and same.offer(path):
+                                continue  # 中身を読んで、同じ中身の検査済みのファイルがあるか調べる
+                            schedule(path)
+                        if same:
+                            apply(same.poll())
+                        if not futures:
+                            if same and same.busy:
+                                apply(same.poll(DONE_WAIT_SECONDS))  # 中身を読み終えるのを待つ
+                            continue  # 全部を使い回した・空きの確かめで止めた（次の周で終わる）
+                        # 決まった時間だけ眠ると、短い仕事ばかりのときにワーカーが空いたまま待たされる（同時に32件・
+                        # 0.2 秒ごとでは毎秒約160件が上限だった・実測）。どれか1件が終わったらすぐ起きる
+                        done, _ = wait_futures(futures, timeout=DONE_WAIT_SECONDS, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for f in done:
+                            path, started, version = futures.pop(f)
+                            self.current.discard(path)
                             queue.done(path)
-                            continue  # 前回から変わっていない（前回の結果を写した）
-                        with self._lock:
-                            book = PasswordBook(
-                                common=list(self.passwords.common),
-                                per_file={k: list(v) for k, v in self.passwords.per_file.items()},
-                                connection_password=self.passwords.connection_password,
-                            )
-                        f = pool.schedule(_scan_task, args=(path, self.options, book), timeout=self._timeout_for(path))
-                        futures[f] = (path, time.time(), self.password_version)
-                        self.current.add(path)
-                    if not futures:
-                        continue  # 全部を使い回した・空きの確かめで止めた（次の周で終わる）
-                    # 決まった時間だけ眠ると、短い仕事ばかりのときにワーカーが空いたまま待たされる（同時に32件・
-                    # 0.2 秒ごとでは毎秒約160件が上限だった・実測）。どれか1件が終わったらすぐ起きる
-                    done, _ = wait_futures(futures, timeout=DONE_WAIT_SECONDS, return_when=FIRST_COMPLETED)
-                    if not done:
-                        continue
-                    for f in done:
-                        path, started, version = futures.pop(f)
-                        self.current.discard(path)
-                        queue.done(path)
-                        self._save(f, path, started, ProcessExpired, version)
+                            self._save(f, path, started, ProcessExpired, version)
+                            if same:
+                                apply(same.finished(path, version))  # この結果を待っていた同じ中身のファイルへ写す
+                finally:
+                    if same:
+                        same.close()
                 if self._stop.is_set():
                     pool.stop()
                     break

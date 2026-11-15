@@ -1527,8 +1527,8 @@ const REPORT_SECTIONS = [
   },
   {
     id: "files", title: "ファイル別", url: "files",
-    head: ["パス", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "人数の目安", "異なる値（確度 中以上）", "誰が読めるか", "大きさ", "更新日時", "検査時間", "前回の結果"],
-    row: (x) => [`<td class="path">${esc(x.top_path)}</td>`, `<td class="nowrap">${pill(x.worst_status || "pending", x.status_label)}</td>`, x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, esc(typesText(x.types)), esc((x.flag_labels || []).join("・")), esc(x.people_text || ""), x.n_findings ? esc(distinctText(x.distinct)) : "", x.access ? `${esc(x.access_label)}${x.access_who ? `<div class="small muted">${esc(x.access_who)}</div>` : ""}` : "", `<td class="nowrap">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`, `<td class="num">${x.elapsed != null ? esc(x.elapsed.toFixed(2)) + " 秒" : ""}</td>`, x.reused_from ? `使い回し（${esc(x.reused_from)}）` : ""],
+    head: ["パス", "状態", "危険度", "検出件数", "検出の内訳", "報告の目安", "人数の目安", "異なる値（確度 中以上）", "誰が読めるか", "大きさ", "更新日時", "検査時間", "使い回し"],
+    row: (x) => [`<td class="path">${esc(x.top_path)}</td>`, `<td class="nowrap">${pill(x.worst_status || "pending", x.status_label)}</td>`, x.risk && x.risk !== "なし" ? pill("r-" + x.risk, x.risk) : "", `<td class="num">${fmtNum(x.n_findings)}</td>`, esc(typesText(x.types)), esc((x.flag_labels || []).join("・")), esc(x.people_text || ""), x.n_findings ? esc(distinctText(x.distinct)) : "", x.access ? `${esc(x.access_label)}${x.access_who ? `<div class="small muted">${esc(x.access_who)}</div>` : ""}` : "", `<td class="nowrap">${esc(fmtSize(x.size))}</td>`, `<td class="nowrap">${esc(fmtTime(x.mtime))}</td>`, `<td class="num">${x.elapsed != null ? esc(x.elapsed.toFixed(2)) + " 秒" : ""}</td>`, x.reused_from ? (x.reuse_kind === "same" ? `同じ検査の中の、同じ中身のファイルの結果（元: ${esc(x.reused_from.replace(/^同じ中身: /, ""))}）` : `前回の検査の結果（${esc(x.reused_from)}）`) : ""],
     empty: "ファイルがありません。",
   },
   {

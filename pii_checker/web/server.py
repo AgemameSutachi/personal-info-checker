@@ -921,8 +921,8 @@ def create_app(
 
 
 FILE_COLUMNS = (
-    "top_path, state, worst_status, risk, n_findings, size, mtime, elapsed, reused_from, flags, people_n, people_type,"
-    " distinct_counts, access, access_who, access_owner"
+    "top_path, state, worst_status, risk, n_findings, size, mtime, elapsed, reused_from, reuse_kind, flags, people_n,"
+    " people_type, distinct_counts, access, access_who, access_owner"
 )
 
 

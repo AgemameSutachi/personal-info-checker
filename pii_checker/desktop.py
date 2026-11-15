@@ -80,8 +80,10 @@ class DesktopApi:
             p1, _ = write_csv(store, job_id, tmp)
             import shutil
 
+            from . import safeio
+
             shutil.move(p1, path)
-            shutil.rmtree(tmp, ignore_errors=True)
+            safeio.remove_tree(tmp)
             return {"path": path}
         name = f"個人情報チェッカー_{job_id}.xlsx"
         target = self._window.create_file_dialog(

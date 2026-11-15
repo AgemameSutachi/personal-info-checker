@@ -58,7 +58,7 @@ def test_quoted_sensitive_labels(text, want):
 @pytest.mark.parametrize(
     "text",
     [
-        'name = "山田太郎"',  # 見出し語は日本語だけ（英語の name は表の列見出しでだけ読む）
+        'name = "Taro Yamada"',  # 英語の見出し語のローマ字の名前は本文では読まない（日本語の名前は tests/test_english_name_label.py）
         '宛先="https://example.com"',  # 値が名前の字でない
         '{"名前": "戦略の名前"}',  # 見出し語の後の説明の文（今までどおり落とす）
         "病名 不明",  # 要配慮は空白の区切りを今までどおり読まない

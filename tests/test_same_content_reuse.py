@@ -411,3 +411,63 @@ def test_atime_is_kept_when_hashing(tmp_path):
     info = safeio.hash_file(str(p))
     if info.atime_kept:
         assert abs(p.stat().st_atime - before) < 2
+
+
+# ---------------------------------------------------------------- 要パスワードの結果の写し
+
+
+def make_encrypted_7z(path, password="pw123"):
+    import py7zr
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with py7zr.SevenZipFile(str(path), "w", password=password) as z:
+        z.writestr(PII, "inner.txt")
+    return path
+
+
+def test_needs_password_result_is_copied_and_rechecked_after_password(tmp_path, store):
+    """要パスワードの結果も、同じパスワードの版の間は写す。写した側の reusable は 0 のまま、
+    パスワードを足すと写した側も各自で検査し直される。"""
+    folder = tmp_path / "data"
+    a = make_encrypted_7z(folder / "a" / "秘密.7z")
+    b = make_encrypted_7z(folder / "b" / "秘密.7z")
+    b.write_bytes(a.read_bytes())  # 同じ中身にそろえる
+    job, r = run(store, folder, tmp_path)
+    assert n_same(store, job) == 1
+    for row in store.query("SELECT worst_status, reusable, state FROM files WHERE job_id=?", (job,)):
+        assert row["worst_status"] == "needs_password" and row["reusable"] == 0 and row["state"] == "done"
+    assert store.summary(job)["item_status"].get("needs_password") == 2  # 写した側も数える
+    assert len(store.files_with_status(job, ["needs_password"])) == 2
+
+    # パスワードを足すと、写した側も含めて検査し直される（写しのまま残らない）
+    assert r.add_password("pw123") == 2
+    r.wait(240)
+    assert store.job(job)["state"] == "done"
+    for row in store.query("SELECT worst_status, reuse_kind, state FROM files WHERE job_id=?", (job,)):
+        assert row["state"] == "done" and row["worst_status"] != "needs_password" and row["reuse_kind"] is None
+    assert store.files_with_status(job, ["needs_password"]) == []
+
+
+def test_needs_password_not_copied_after_version_change(tmp_path, store):
+    """パスワードの版が変わった後は、要パスワードの結果を写さない（新しいパスワードで検査すべきなので）。"""
+    folder = tmp_path / "data"
+    a = make_encrypted_7z(folder / "a" / "秘密.7z")
+    b = folder / "b" / "秘密.7z"
+    b.parent.mkdir(parents=True)
+    b.write_bytes(a.read_bytes())
+    job = store.create_job([str(folder)], ScanOptions(temp_dir=str(tmp_path)))
+    r = runner.JobRunner(store, job, workers=1)
+    r._enumerate()
+    from pii_checker.engine import scan_file
+
+    res = scan_file(str(a), ScanOptions(temp_dir=str(tmp_path)))
+    store.save_result(job, res, r.engine_sig)
+    r._sizes = {str(b): b.stat().st_size}
+    same = runner.SameContentReuse(r, set())
+    key = (res.source["sha256"], "秘密.7z")
+    same._leader_key[str(a)] = key
+    same._leaders[key] = str(a)
+    same._waiters[key] = [(str(b), SourceInfo(size=1, mtime_ns=1, change_ns=1, file_id="x", sha256=key[0]))]
+    r.password_version += 1  # 配った後にパスワードを受け取った
+    assert same.finished(str(a), 0) == [(str(b), "scan")]
+    same.close()

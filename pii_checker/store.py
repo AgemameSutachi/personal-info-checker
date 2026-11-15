@@ -953,6 +953,20 @@ class Store:
                 return dict(r)
         return None
 
+    def needs_password_source(self, job_id: str, top_path: str, sha256: str, engine_sig: str) -> dict | None:
+        """検査済みで「要パスワード」だった結果（reusable=0）の行を返す。写してよいかは呼び出し側が判断する。
+
+        同じパスワードの組で同じ中身を検査すれば同じ結果になるので、同じジョブの中でパスワードの版が同じ間だけ写せる。
+        """
+        rows = self.query(
+            "SELECT * FROM files WHERE job_id=? AND top_path=? AND state='done' AND worst_status=? AND sha256=?"
+            " AND engine_sig=?",
+            (job_id, top_path, Status.NEEDS_PASSWORD.value, sha256, engine_sig),
+        )
+        if rows and not self.has_stream_items(job_id, top_path):
+            return dict(rows[0])
+        return None
+
     def copy_same_content(self, src: dict, job_id: str, dst_top: str, info, engine_sig: str) -> None:
         """同じジョブの、中身が同じ別のパスの結果（項目・検出）を、dst_top の結果として写す。
 
@@ -1030,7 +1044,7 @@ class Store:
             mark = reportflags.compute(conf_total, distinct)
             c.execute(
                 "UPDATE files SET state='done', worst_status=?, risk=?, elapsed=0, n_findings=?, mtime_ns=?,"
-                " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=1, reused_from=?, reuse_kind='same',"
+                " change_ns=?, file_id=?, sha256=?, engine_sig=?, reusable=?, reused_from=?, reuse_kind='same',"
                 " scanned_at=?, atime_kept=?, distinct_counts=?, flags=?, people_n=?, people_type=?, access=NULL,"
                 " access_who=NULL, access_owner=NULL, save_elapsed=NULL, wall_elapsed=NULL, save_detail=NULL"
                 " WHERE job_id=? AND top_path=?",
@@ -1043,6 +1057,9 @@ class Store:
                     info.file_id,
                     info.sha256,
                     engine_sig,
+                    int(
+                        bool(src.get("reusable"))
+                    ),  # 要パスワードの結果を写したときは 0 のまま（次のジョブでは使い回さない）
                     f"同じ中身: {src_top}",
                     src["scanned_at"],
                     int(bool(info.atime_kept)),

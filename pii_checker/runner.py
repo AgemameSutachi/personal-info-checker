@@ -167,6 +167,8 @@ class SameContentReuse:
         self._leaders: dict[tuple[str, str], str] = {}  # (SHA-256, 名前) → 検査に回した先頭のパス
         self._leader_key: dict[str, tuple[str, str]] = {}
         self._waiters: dict[tuple[str, str], list[tuple[str, SourceInfo]]] = {}  # 先頭の検査を待つパスと読んだ結果
+        # 要パスワードで終わった先頭の結果（鍵 → (行, パスワードの版)）。同じ版の間だけ、同じ中身へ写す
+        self._needs_password: dict[tuple[str, str], tuple[dict, int]] = {}
         self.copied = 0  # 写した件数（試験・調べ用）
         self.waited = 0  # 先頭の検査を待たせた件数（試験・調べ用）
 
@@ -228,16 +230,25 @@ class SameContentReuse:
                 out.append((path, self._decide(path, info)))
         return out
 
-    def finished(self, path: str) -> list[tuple[str, str]]:
-        """配ったファイルの検査と保存が済んだ。それを待っていたファイルの扱いを返す（poll と同じ形・wait は返さない）。"""
+    def finished(self, path: str, version: int = 0) -> list[tuple[str, str]]:
+        """配ったファイルの検査と保存が済んだ。それを待っていたファイルの扱いを返す（poll と同じ形・wait は返さない）。
+
+        version は、そのファイルを配ったときのパスワードの版。
+        """
         key = self._leader_key.pop(path, None)
         if key is None:
             return []
         self._leaders.pop(key, None)
         waiting = self._waiters.pop(key, [])
+        src = self._store.find_same_content(self._job_id, key[0], key[1], self._sig)
+        if src is None and version == self._runner.password_version:
+            # 要パスワードで終わった。同じパスワードの組で読んだ結果なので、同じ版の間は同じ中身にも同じ結果になる
+            np_src = self._store.needs_password_source(self._job_id, path, key[0], self._sig)
+            if np_src is not None:
+                self._needs_password[key] = (np_src, version)
+                src = np_src
         if not waiting:
             return []
-        src = self._store.find_same_content(self._job_id, key[0], key[1], self._sig)
         return [(w, self._copy(src, w, info) if src else "scan") for w, info in waiting]
 
     # ------------------------------------------------------------ 内部
@@ -253,6 +264,9 @@ class SameContentReuse:
         src = self._store.find_same_content(self._job_id, info.sha256, name, self._sig, exclude=path)
         if src is not None:
             return self._copy(src, path, info)
+        np = self._needs_password.get(key)
+        if np is not None and np[1] == self._runner.password_version and np[0]["top_path"] != path:
+            return self._copy(np[0], path, info)
         if key in self._leaders:
             self._waiters.setdefault(key, []).append((path, info))
             self.waited += 1
@@ -648,7 +662,7 @@ class JobRunner:
                             queue.done(path)
                             self._save(f, path, started, ProcessExpired, version)
                             if same:
-                                apply(same.finished(path))  # この結果を待っていた同じ中身のファイルへ写す
+                                apply(same.finished(path, version))  # この結果を待っていた同じ中身のファイルへ写す
                 finally:
                     if same:
                         same.close()

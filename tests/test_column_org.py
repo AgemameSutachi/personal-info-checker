@@ -380,12 +380,25 @@ def test_securities_table_name_column_is_org(headers, name_col, records):
         (["name", "age", "address"], 0),  # 証券の項目の見出しが無い
         (["name", "code", "部署"], 0),  # 「code」だけは社員の番号にもあるので証券の見出しにしない
         (["name", "コード"], 0),
+        # 見出しは英語の name だけで証券の見出しも並ぶが、値が人の名前の形（顧客の取引の記録・大株主の一覧）
+        (["name", "ticker", "qty"], 0),
+        (["Name", "銘柄コード", "数量"], 0),
     ],
 )
 def test_person_tables_beside_securities_words_stay_medium(headers, name_col, records):
     """陽性対照: 人の名簿・取引の記録の顧客名は、証券の語が並んでいても 中 のまま。"""
     got = _data_names(_sec_rows(headers, name_col, PERSONS[:20]), records=records)
     assert got == {"name:medium": 20}, got
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+def test_securities_table_surname_companies(records):
+    """銘柄の一覧の、よくある姓で始まる社名は、末尾が社名の字（製作所・工業・電機など）なら 低。
+    人の名前の形のもの（姓＋漢字の名）は 中 のまま（見落とさない側）。"""
+    lows = ["小松製作所", "山田工業", "千葉電機", "石川製薬", "高木産業"]
+    mediums = ["山田太郎", "野村誠"]
+    got = _data_names(_sec_rows(["code4", "name"], 1, lows + mediums), records=records)
+    assert got == {"name:low": 5, "name:medium": 2}, got
 
 
 def test_securities_header_found_in_later_header_row():

@@ -106,6 +106,20 @@ RE_SECURITIES_HEADER = re.compile(
     r"(?:code4|ticker|tickersymbol|stockcode|securitiescode|securitycode|listingdate|offerprice|firstopen|ipoprice"
     r"|銘柄コード|証券コード|上場日|公募価格|売出価格|初値|上場市場)",
 )
+# 見出しで会社名の列と決めた列でも、値が人の名前の形（よくある姓＋漢字の名1〜3字）なら下げない
+# （「name,ticker,qty」のような顧客の取引の記録・大株主の一覧。2026-11-15 の評価で見つかった穴）。
+# 末尾が人の名にまず来ない字（業・社・所…）のものは社名として下げる（「小松製作所」「山田工業」）。
+# 名の末尾にも来る字（行・学・信・道など）は入れない（迷うものは 中 のまま＝見落とさない側）
+RE_PERSON_LIKE_VALUE = re.compile(rf"(?:{detectors.SURNAMES})[ 　]?[一-龥々]{{1,3}}")
+RE_ORG_TAIL = re.compile(
+    r"(?:業|社|所|店|部|課|局|院|校|場|組|薬|品|設|産|事|輸|械|鋼|料|器|販|製|庫|険|託|券|銀行|電機|電気|化学)$"
+)
+
+
+def _person_like_value(v: str) -> bool:
+    """値が人の名前の形（よくある姓＋名）で、社名の末尾の字で終わらないか。"""
+    s = v.strip()
+    return bool(RE_PERSON_LIKE_VALUE.fullmatch(s)) and not RE_ORG_TAIL.search(s)
 
 
 def _header_key(header: str | None) -> str:
@@ -1092,7 +1106,7 @@ class _ColumnOrgs:
     def cell(self, c_idx: int, header: str | None, v: str) -> bool:
         """表のセルを1つ見て、この列が今のところ会社名の列か（org_column に渡す値）を返す。header は列の見出し。"""
         if c_idx in self._forced:
-            return True
+            return not _person_like_value(v)
         is_name = self._is_name.get(c_idx)
         if is_name is None:
             is_name = self._is_name[c_idx] = bool(header) and detectors.header_category(header) == "name"

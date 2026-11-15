@@ -55,7 +55,11 @@ SEVENZIP_HINT = (
 
 
 def find_7z(configured: str | None) -> str | None:
-    """7z.exe を探す（設定 → 実行ファイルの隣 → Program Files → PATH）。"""
+    """7z.exe を探す（設定 → 実行ファイルの隣 → Program Files → PATH）。
+
+    PATH は前の候補がどれも無いときだけ探す。shutil.which は PATH の全フォルダを拡張子ごとに確かめるため
+    1回 約 0.1 秒かかり、実行ファイル（.dll 等）1件ごとに呼ばれて書庫の検査の約 4 分の 1 を占めていた。
+    """
     candidates = []
     if configured:
         candidates.append(configured)
@@ -67,12 +71,12 @@ def find_7z(configured: str | None) -> str | None:
     for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
         if os.environ.get(env):
             candidates.append(os.path.join(os.environ[env], "7-Zip", "7z.exe"))
-    w = shutil.which("7z")
-    if w:
-        candidates.append(w)
     for c in candidates:
         if c and os.path.isfile(c):
             return c
+    w = shutil.which("7z")
+    if w and os.path.isfile(w):
+        return w
     return None
 
 

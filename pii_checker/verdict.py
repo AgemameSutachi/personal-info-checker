@@ -69,6 +69,11 @@ def _decide(summary: dict, job_state: str) -> Verdict:
             f"うち {summary['reused']:,} 件は前回から変わっていない（大きさ・更新日時・変更日時・ファイル ID が一致）ため、"
             "前回の検査結果を使った"
         )
+    if summary.get("reused_same"):
+        detail.append(
+            f"うち {summary['reused_same']:,} 件は、この検査の中で中身が同じ（SHA-256 と名前が一致）ファイルを検査済みだったため、"
+            "その検査結果を使った（同じ中身を何度も検査しない）"
+        )
     if out_of_scope:
         detail.append(f"対象外 {out_of_scope:,} 件（動画・音声・実行ファイル・フォントなど、文字の情報を持たない形式）")
     allowed = summary.get("allowed", 0)

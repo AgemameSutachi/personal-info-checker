@@ -1584,6 +1584,19 @@ class ScanContext:
 IGNORED_STREAMS = {"Zone.Identifier", "SmartScreen", "com.dropbox.attrs", "encryptable", "AFP_AfpInfo", "AFP_Resource"}
 
 
+# 最終アクセス日時を保てなかったときの補足（読んだファイルごとの事実なので、結果を写すときは写す先の分に付け替える）
+ATIME_NOTE_SERVER = "サーバーが最終アクセス日時を保つ指示に対応しておらず、読み取りで更新された（Samba 等）"
+ATIME_NOTE_NO_PERMISSION = "最終アクセス日時を保つ権限が無かった（読み取りで更新された可能性がある）"
+ATIME_NOTES = (ATIME_NOTE_SERVER, ATIME_NOTE_NO_PERMISSION)
+
+
+def atime_note(info) -> str:
+    """読んだ結果（SourceInfo）から、最終アクセス日時の補足の文を返す。保てていれば空。"""
+    if info.atime_kept:
+        return ""
+    return ATIME_NOTE_SERVER if info.atime_lost_reason == "server_updated" else ATIME_NOTE_NO_PERMISSION
+
+
 def alternate_streams(path: str) -> list[tuple[str, int]]:
     """NTFS の代替データストリーム（主ストリーム以外）の名前と大きさ。Windows 以外・未対応なら空。"""
     if os.name != "nt":
@@ -1872,14 +1885,11 @@ def scan_file(path: str, options: ScanOptions, passwords: PasswordBook | None = 
         local = os.path.join(local_dir, name) if local_dir else None
         top = ctx.scan_blob(Blob(display=path, path=local, data=data, mtime=mtime, name_hint=name), depth=0)
         data = None  # 検査を終えた中身はすぐ手放す（隠しストリームの検査の間まで持たない）
-        if not info.atime_kept and not on_ftp:
+        if not on_ftp:
             # FTP はサーバー側の日時を保つ手段そのものが無い（画面・README で説明する。1件ずつの注記にはしない）
-            if info.atime_lost_reason == "server_updated":
-                top.notes.append(
-                    "サーバーが最終アクセス日時を保つ指示に対応しておらず、読み取りで更新された（Samba 等）"
-                )
-            else:
-                top.notes.append("最終アクセス日時を保つ権限が無かった（読み取りで更新された可能性がある）")
+            note = atime_note(info)
+            if note:
+                top.notes.append(note)
         try:
             streams = [] if on_ftp else alternate_streams(path)
         except OSError as e:

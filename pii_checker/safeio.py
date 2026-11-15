@@ -549,3 +549,67 @@ def read_small(path: str, limit: int, allow_recall: bool = False, retries: int =
         if attempt == retries:
             break
     raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+
+
+class HashStopped(Exception):
+    """hash_file の途中で、止める指示（should_stop）が出た。"""
+
+
+def hash_file(path: str, allow_recall: bool = False, retries: int = 2, should_stop=None) -> SourceInfo | None:
+    """元のファイルの中身を読んで SHA-256 と識別情報を返す（写しは作らない）。同じ中身のファイルを見つけるのに使う。
+
+    約束は snapshot と同じ: 共有をすべて許す・最終アクセス日時を保つ・読む間の書き換えを検知する。
+    クラウドの代替ファイル（中身が手元に無い）は読まずに None を返す。should_stop が True を返したら HashStopped。
+    読む間に書き換えられ続けたら ChangedWhileReading、開けない・読めないときは OSError / SourceError を投げる
+    （呼び出し側は「同じ中身かを確かめられなかった」として、ふつうに検査する）。
+    """
+    from .engine import long_path
+
+    def stopped() -> bool:
+        return bool(should_stop and should_stop())
+
+    if os.name != "nt":
+        before = stat_identity(path)
+        h = hashlib.sha256()
+        copied = 0
+        with open(path, "rb") as src:
+            for chunk in iter(lambda: src.read(CHUNK), b""):
+                if stopped():
+                    raise HashStopped()
+                h.update(chunk)
+                copied += len(chunk)
+        after = stat_identity(path)
+        if not (before.same_as(after) and copied == after.size):
+            raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+        after.sha256 = h.hexdigest()
+        after.atime_kept = False
+        return after
+
+    lp = long_path(path)
+    for attempt in range(retries + 1):
+        handle, atime_kept = _open_shared(lp)
+        try:
+            before = _handle_info(handle)
+            if before.attributes & RECALL_ATTRS and not allow_recall:
+                return None
+            digest = hashlib.sha256()
+            copied = 0
+            # 小さなファイルに 1MB の領域を毎回取らない（read_small と同じ）
+            buf = ctypes.create_string_buffer(min(CHUNK, max(64 * 1024, before.size + 1)))
+            view = memoryview(buf).cast("B")
+            while True:
+                if stopped():
+                    raise HashStopped()
+                n = _read_chunk(handle, buf)
+                if not n:
+                    break
+                digest.update(view[:n])
+                copied += n
+            after = _handle_info(handle)
+        finally:
+            _k32.CloseHandle(handle)
+        if _settle(before, after, copied, digest, atime_kept):
+            return after
+        if attempt == retries:
+            break
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)

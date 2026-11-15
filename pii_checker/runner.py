@@ -249,7 +249,7 @@ class SameContentReuse:
                 src = np_src
         if not waiting:
             return []
-        return [(w, self._copy(src, w, info) if src else "scan") for w, info in waiting]
+        return [(w, self._copy(src, w, info, version) if src else "scan") for w, info in waiting]
 
     # ------------------------------------------------------------ 内部
 
@@ -266,7 +266,7 @@ class SameContentReuse:
             return self._copy(src, path, info)
         np = self._needs_password.get(key)
         if np is not None and np[1] == self._runner.password_version and np[0]["top_path"] != path:
-            return self._copy(np[0], path, info)
+            return self._copy(np[0], path, info, np[1])
         if key in self._leaders:
             self._waiters.setdefault(key, []).append((path, info))
             self.waited += 1
@@ -275,7 +275,8 @@ class SameContentReuse:
         self._leader_key[path] = key
         return "scan"
 
-    def _copy(self, src: dict, path: str, info: SourceInfo) -> str:
+    def _copy(self, src: dict, path: str, info: SourceInfo, version: int | None = None) -> str:
+        """src の結果を path へ写す。version は要パスワードの結果を写すときの、判断したパスワードの版。"""
         try:
             self._store.copy_same_content(src, self._job_id, path, info, self._sig)
         except Exception as e:  # noqa: BLE001
@@ -285,6 +286,10 @@ class SameContentReuse:
         if src.get("n_findings"):
             self._runner._record_access(path)  # アクセス権は変わりうるので、写したファイルでも読み直す
         self.copied += 1
+        if not src.get("reusable") and version is not None and version != self._runner.password_version:
+            # 写している間にパスワードを受け取った: 要パスワードのまま「済み」にせず、新しいパスワードで検査し直す
+            # （JobRunner._save_result と同じ扱い）
+            self._store.mark_pending(self._job_id, [path])
         return "copied"
 
 

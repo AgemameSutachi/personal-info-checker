@@ -71,7 +71,7 @@ def _decide(summary: dict, job_state: str) -> Verdict:
         )
     if summary.get("reused_same"):
         detail.append(
-            f"うち {summary['reused_same']:,} 件は、この検査の中で中身が同じ（SHA-256 と名前が一致）ファイルを検査済みだったため、"
+            f"うち {summary['reused_same']:,} 件は、この検査の中で中身が同じ（中身とファイル名がまったく同じ）ファイルを検査済みだったため、"
             "その検査結果を使った（同じ中身を何度も検査しない）"
         )
     if out_of_scope:

@@ -471,3 +471,65 @@ def test_needs_password_not_copied_after_version_change(tmp_path, store):
     r.password_version += 1  # 配った後にパスワードを受け取った
     assert same.finished(str(a), 0) == [(str(b), "scan")]
     same.close()
+
+
+# ---------------------------------------------------------------- 評価の指摘の修正
+
+
+def test_neighbor_dependent_source_is_not_chosen(tmp_path, store):
+    """写し元が隣のファイルに左右される結果（分割アーカイブ・toc.dat つきの pg のデータ）なら、写し元に選ばない。"""
+    job = store.create_job([str(tmp_path)], ScanOptions())
+    split = tmp_path / "a" / "data.002"  # 分割の続き（名前だけで隣に左右されると分かる）
+    pg_dir = tmp_path / "p"
+    pg_dir.mkdir(parents=True)
+    (pg_dir / "toc.dat").write_bytes(b"PGDMP")
+    pg = pg_dir / "1234.dat"
+    pg.write_bytes(b"x")
+    for top in (str(split), str(pg)):
+        store.add_files(job, [(top, 10, 1.0)])
+        store.save_result(job, _result(top), "SIG")
+        assert store.find_same_content(job, "ab" * 32, os.path.basename(top), "SIG") is None
+    # 陽性対照: 隣に左右されない同名の結果は選ばれる
+    plain = str(tmp_path / "q" / "1234.dat")
+    store.add_files(job, [(plain, 10, 1.0)])
+    store.save_result(job, _result(plain), "SIG")
+    assert store.find_same_content(job, "ab" * 32, "1234.dat", "SIG")["top_path"] == plain
+
+
+def test_needs_password_copy_is_requeued_when_version_changed(tmp_path, store):
+    """要パスワードの結果を写した直後にパスワードが足されていたら、写したファイルは未検査へ戻る。"""
+    folder = tmp_path / "data"
+    a = make_encrypted_7z(folder / "a" / "秘密.7z")
+    b = folder / "b" / "秘密.7z"
+    b.parent.mkdir(parents=True)
+    b.write_bytes(a.read_bytes())
+    job = store.create_job([str(folder)], ScanOptions(temp_dir=str(tmp_path)))
+    r = runner.JobRunner(store, job, workers=1)
+    r._enumerate()
+    from pii_checker.engine import scan_file
+
+    res = scan_file(str(a), ScanOptions(temp_dir=str(tmp_path)))
+    store.save_result(job, res, r.engine_sig)
+    src = store.needs_password_source(job, str(a), res.source["sha256"], r.engine_sig)
+    assert src is not None and not src["reusable"]
+    same = runner.SameContentReuse(r, set())
+    info = safeio_hash(b)
+    r.password_version = 1  # 判断（版 0）の後にパスワードを受け取った
+    assert same._copy(src, str(b), info, 0) == "copied"
+    row = store.query("SELECT state FROM files WHERE job_id=? AND top_path=?", (job, str(b)))[0]
+    assert row["state"] == "pending"
+    same.close()
+
+
+def safeio_hash(path):
+    from pii_checker import safeio
+
+    return safeio.hash_file(str(path))
+
+
+def test_files_api_has_reuse_kind(tmp_path, store):
+    """画面の「ファイル別」が使い回しの種類を書き分けられるよう、files の行に reuse_kind が付く。"""
+    from pii_checker.web.server import FILE_COLUMNS
+
+    assert "reuse_kind" in FILE_COLUMNS
+    assert store.query(f"SELECT {FILE_COLUMNS} FROM files LIMIT 1") == []

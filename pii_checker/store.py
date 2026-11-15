@@ -940,7 +940,7 @@ class Store:
 
         名前（フォルダを除いたファイル名。大文字小文字も同じ）まで揃えるのは、結果が名前にも左右されるため
         （ファイル名そのものも検査する・拡張子で形式の読み方が変わる・圧縮ファイルは名前から中身の名前を決める）。
-        代替データストリームの項目を持つ結果は、そのパスだけの持ち物なので写さない。同じジョブで写した結果より、
+        代替データストリームの項目を持つ結果・隣のファイルに左右される結果は、そのパスだけの持ち物なので写さない。同じジョブで写した結果より、
         実際に検査した結果を先に選ぶ。
         """
         rows = self.query(
@@ -949,9 +949,16 @@ class Store:
             (job_id, sha256, engine_sig, exclude),
         )
         for r in rows:
-            if leaf_name(r["top_path"]) == name and not self.has_stream_items(job_id, r["top_path"]):
+            if leaf_name(r["top_path"]) == name and self._copyable_source(job_id, r["top_path"]):
                 return dict(r)
         return None
+
+    def _copyable_source(self, job_id: str, top_path: str) -> bool:
+        """そのパスの結果を、別のパスへ写してよいか。ストリームの項目を持つもの・隣のファイルに左右されるもの
+        （分割アーカイブ・pg_dump のデータ）は、そのパスだけの結果なので写さない。"""
+        from .engine import depends_on_neighbors
+
+        return not self.has_stream_items(job_id, top_path) and not depends_on_neighbors(top_path)
 
     def needs_password_source(self, job_id: str, top_path: str, sha256: str, engine_sig: str) -> dict | None:
         """検査済みで「要パスワード」だった結果（reusable=0）の行を返す。写してよいかは呼び出し側が判断する。
@@ -963,7 +970,7 @@ class Store:
             " AND engine_sig=?",
             (job_id, top_path, Status.NEEDS_PASSWORD.value, sha256, engine_sig),
         )
-        if rows and not self.has_stream_items(job_id, top_path):
+        if rows and self._copyable_source(job_id, top_path):
             return dict(rows[0])
         return None
 

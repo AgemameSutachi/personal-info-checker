@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pii_checker import engine  # noqa: E402
@@ -318,3 +320,99 @@ def test_table_without_name_column_is_not_prefetched():
     src = iter([["1", "東京都"]])
     assert col._prefetch_table_orgs(["code", "住所"], src, pending) is None
     assert not pending and list(src) == [["1", "東京都"]]
+
+
+def _data_names(rows, records: bool = False) -> dict[str, int]:
+    """_names と同じだが、見出しの行（R1）の検出は数えない。
+
+    表の形（add_table）では、見出しの行の「name」の右のセル（「listing_date」など）も、左隣を見出しにした値として
+    今までどおり 中 で拾う（直す前から同じ）。ここで見たいのはデータの行の名前の列なので、その1件は除く。
+    列名の分かっている表（add_records）は見出しの行を値として読まないので、除くものは無い。
+    """
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+    if records:
+        col.add_records(rows[0], rows[1:], lambda r, c: f"D{r}C{c + 1}")
+    else:
+        col.add_table(rows, lambda r, c: f"R{r}C{c + 1}")
+    got: dict[str, int] = {}
+    for f in item.findings:
+        if f.pii_type == "name" and not f.location.startswith("R1C"):
+            key = f"name:{f.confidence.value}"
+            got[key] = got.get(key, 0) + 1
+    return got
+
+
+def _sec_rows(headers: list[str], name_col: int, values: list[str]) -> list[list[str]]:
+    """見出し headers の表で、name_col 列に values を入れ、ほかの列は番号・日付で埋めた行を作る。"""
+    rows = [headers]
+    for i, v in enumerate(values):
+        row = [f"{1300 + i}" if "code" in h.lower() or "コード" in h else "2024/01/01" for h in headers]
+        row[name_col] = v
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+@pytest.mark.parametrize(
+    "headers, name_col",
+    [
+        (["name", "listing_date", "offer_price", "first_open", "odds"], 0),  # IPO の当選確率の表
+        (["blog", "bunbai_date", "code4", "name", "result"], 3),  # 分売の抽選の表
+        (["銘柄コード", "Name", "上場日"], 1),
+        (["Ticker", "NAME"], 1),
+    ],
+)
+def test_securities_table_name_column_is_org(headers, name_col, records):
+    """会社の印の無い銘柄の一覧でも、見出しが英語の「name」だけで証券の項目の見出しが並んでいれば、最初の行から 低。
+    異なる値が 50 個に満たない小さな表でも同じ。"""
+    got = _data_names(_sec_rows(headers, name_col, PLAIN_COMPANIES[:20]), records=records)
+    assert got == {"name:low": 20}, got
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+@pytest.mark.parametrize(
+    "headers, name_col",
+    [
+        (["氏名", "銘柄コード", "数量"], 0),  # 人を指す見出し（取引の記録の顧客）
+        (["customer_name", "ticker", "qty"], 0),
+        (["顧客名", "code4"], 0),
+        (["name", "age", "address"], 0),  # 証券の項目の見出しが無い
+        (["name", "code", "部署"], 0),  # 「code」だけは社員の番号にもあるので証券の見出しにしない
+        (["name", "コード"], 0),
+        # 見出しは英語の name だけで証券の見出しも並ぶが、値が人の名前の形（顧客の取引の記録・大株主の一覧）
+        (["name", "ticker", "qty"], 0),
+        (["Name", "銘柄コード", "数量"], 0),
+    ],
+)
+def test_person_tables_beside_securities_words_stay_medium(headers, name_col, records):
+    """陽性対照: 人の名簿・取引の記録の顧客名は、証券の語が並んでいても 中 のまま。"""
+    got = _data_names(_sec_rows(headers, name_col, PERSONS[:20]), records=records)
+    assert got == {"name:medium": 20}, got
+
+
+@pytest.mark.parametrize("records", [False, True], ids=["table", "records"])
+def test_securities_table_surname_companies(records):
+    """銘柄の一覧の、よくある姓で始まる社名は、末尾が社名の字（製作所・工業・電機など）なら 低。
+    人の名前の形のもの（姓＋漢字の名）は 中 のまま（見落とさない側）。"""
+    lows = ["小松製作所", "山田工業", "千葉電機", "石川製薬", "高木産業"]
+    mediums = ["山田太郎", "野村誠", "佐藤ハナ", "鈴木 ひろし", "高橋　健"]
+    got = _data_names(_sec_rows(["code4", "name"], 1, lows + mediums), records=records)
+    assert got == {"name:low": 5, "name:medium": 5}, got
+
+
+def test_person_like_value_shapes():
+    """人の名前の形の判定: 姓だけ・名が仮名・空白（半角・全角）を通し、社名の末尾の字のものは通さない。"""
+    for v in ("山田", "佐藤ハナ", "鈴木ひろし", "山田 太郎", "山田　太郎", "松本 孝行"):
+        assert engine._person_like_value(v), v
+    for v in ("小松製作所", "山田工業", "高木産業", "あおば電機", "Taro Yamada"):
+        assert not engine._person_like_value(v), v
+
+
+def test_securities_header_found_in_later_header_row():
+    """空行の後の別の表の見出しで銘柄の一覧になったときも、その表の名前の列は 低（見出しを決めるたびに作り直す）。"""
+    # 見出しを切り替えるのは、見出しの語の数が今の見出し以上の行だけなので、2つ目の表にも語を2つ並べる
+    rows = [["氏名", "電話"]] + [[p, "03-1234-5678"] for p in PERSONS[:3]] + [[]]
+    rows += [["code4", "name", "電話"]] + [[f"{1300 + i}", c, ""] for i, c in enumerate(PLAIN_COMPANIES[:5])]
+    got = _names(rows)
+    assert got == {"name:medium": 3, "name:low": 5}, got

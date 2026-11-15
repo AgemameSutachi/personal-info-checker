@@ -322,6 +322,27 @@ def test_table_without_name_column_is_not_prefetched():
     assert not pending and list(src) == [["1", "東京都"]]
 
 
+def _data_names(rows, records: bool = False) -> dict[str, int]:
+    """_names と同じだが、見出しの行（R1）の検出は数えない。
+
+    表の形（add_table）では、見出しの行の「name」の右のセル（「listing_date」など）も、左隣を見出しにした値として
+    今までどおり 中 で拾う（直す前から同じ）。ここで見たいのはデータの行の名前の列なので、その1件は除く。
+    列名の分かっている表（add_records）は見出しの行を値として読まないので、除くものは無い。
+    """
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 100)
+    if records:
+        col.add_records(rows[0], rows[1:], lambda r, c: f"D{r}C{c + 1}")
+    else:
+        col.add_table(rows, lambda r, c: f"R{r}C{c + 1}")
+    got: dict[str, int] = {}
+    for f in item.findings:
+        if f.pii_type == "name" and not f.location.startswith("R1C"):
+            key = f"name:{f.confidence.value}"
+            got[key] = got.get(key, 0) + 1
+    return got
+
+
 def _sec_rows(headers: list[str], name_col: int, values: list[str]) -> list[list[str]]:
     """見出し headers の表で、name_col 列に values を入れ、ほかの列は番号・日付で埋めた行を作る。"""
     rows = [headers]
@@ -345,7 +366,7 @@ def _sec_rows(headers: list[str], name_col: int, values: list[str]) -> list[list
 def test_securities_table_name_column_is_org(headers, name_col, records):
     """会社の印の無い銘柄の一覧でも、見出しが英語の「name」だけで証券の項目の見出しが並んでいれば、最初の行から 低。
     異なる値が 50 個に満たない小さな表でも同じ。"""
-    got = _names(_sec_rows(headers, name_col, PLAIN_COMPANIES[:20]), records=records)
+    got = _data_names(_sec_rows(headers, name_col, PLAIN_COMPANIES[:20]), records=records)
     assert got == {"name:low": 20}, got
 
 
@@ -363,13 +384,14 @@ def test_securities_table_name_column_is_org(headers, name_col, records):
 )
 def test_person_tables_beside_securities_words_stay_medium(headers, name_col, records):
     """陽性対照: 人の名簿・取引の記録の顧客名は、証券の語が並んでいても 中 のまま。"""
-    got = _names(_sec_rows(headers, name_col, PERSONS[:20]), records=records)
+    got = _data_names(_sec_rows(headers, name_col, PERSONS[:20]), records=records)
     assert got == {"name:medium": 20}, got
 
 
 def test_securities_header_found_in_later_header_row():
     """空行の後の別の表の見出しで銘柄の一覧になったときも、その表の名前の列は 低（見出しを決めるたびに作り直す）。"""
+    # 見出しを切り替えるのは、見出しの語の数が今の見出し以上の行だけなので、2つ目の表にも語を2つ並べる
     rows = [["氏名", "電話"]] + [[p, "03-1234-5678"] for p in PERSONS[:3]] + [[]]
-    rows += [["code4", "name"]] + [[f"{1300 + i}", c] for i, c in enumerate(PLAIN_COMPANIES[:5])]
+    rows += [["code4", "name", "電話"]] + [[f"{1300 + i}", c, ""] for i, c in enumerate(PLAIN_COMPANIES[:5])]
     got = _names(rows)
     assert got == {"name:medium": 3, "name:low": 5}, got

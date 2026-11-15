@@ -120,6 +120,8 @@ def _securities_name_columns(headers) -> set[int]:
     if not bare or not any(RE_SECURITIES_HEADER.fullmatch(k) for k in keys):
         return set()
     return bare
+
+
 # 列名の分かっている表（add_records）では、判定が付く前の行の社名も 中 で拾わないよう、検査の前に先頭の行を先読みして
 # 判定を付ける（株の parquet の列「name」で、判定の前の 49 行ずつの社名が 中 に残っていた・2026-11-07）。
 # 流しながら読む表（add_table・CSV と xlsx）も、見出しを決めた直後と空行の直後に、次の空行か見出し語のある行まで先読みする。

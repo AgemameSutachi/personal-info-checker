@@ -552,7 +552,12 @@ def _looks_like_text(head: bytes) -> bool:
     if len(sample) > 16 and sample[0::2].count(0) > len(sample) * 0.15 and sample[1::2].count(0) < len(sample) * 0.02:
         return _utf16_readable(sample, "utf-16-be")  # UTF-16BE（BOM なし）
     controls = sum(1 for b in sample if b < 0x09 or (0x0E <= b < 0x20 and b != 0x1B))
-    return controls / len(sample) < 0.01
+    if controls / len(sample) < 0.01:
+        return True
+    # 日本語だけの文・罫線の多い表の、BOM も 0x00 の偏りも無い UTF-16（文字コードを決める decode_text と同じ見分け）
+    from .textdecode import utf16_without_bom
+
+    return utf16_without_bom(sample) is not None
 
 
 def handler_for(kind: str):

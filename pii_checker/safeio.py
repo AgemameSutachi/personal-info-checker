@@ -468,19 +468,148 @@ def snapshot(path: str, dest: str, temp_folder: str, allow_recall: bool = False,
         finally:
             if handle is not None:
                 _k32.CloseHandle(handle)
-        if before.same_as(after) and copied == after.size:
-            after.sha256 = digest.hexdigest()
-            after.atime_kept = atime_kept
-            if not atime_kept:
-                after.atime_lost_reason = "no_permission"
-            elif before.atime_ns and after.atime_ns != before.atime_ns:
-                # 保つ指示（SetFileTime -1）は受け付けたが、サーバーが読み取りで日時を更新した（Samba は守らない・
-                # VM の Samba で実測 2026-10-18）。「保てた」と記録すると事実と違うので、保てなかったと記録する
-                after.atime_kept = False
-                after.atime_lost_reason = "server_updated"
+        if _settle(before, after, copied, digest, atime_kept):
             return after
         if attempt == retries:
             break
-    raise ChangedWhileReading(
-        "読んでいる間に元のファイルが書き換えられた（何度読み直しても変わり続けた）。使われていない時間に再検査する"
-    )
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+
+
+CHANGED_WHILE_READING_MSG = (
+    "読んでいる間に元のファイルが書き換えられた（何度読み直しても変わり続けた）。使われていない時間に再検査する"
+)
+
+
+def _settle(before: SourceInfo, after: SourceInfo, copied: int, digest, atime_kept: bool) -> bool:
+    """読む前後の識別情報が同じで読み切れていれば、after に SHA-256 と最終アクセス日時の扱いを書いて True。"""
+    if not (before.same_as(after) and copied == after.size):
+        return False
+    after.sha256 = digest.hexdigest()
+    after.atime_kept = atime_kept
+    if not atime_kept:
+        after.atime_lost_reason = "no_permission"
+    elif before.atime_ns and after.atime_ns != before.atime_ns:
+        # 保つ指示（SetFileTime -1）は受け付けたが、サーバーが読み取りで日時を更新した（Samba は守らない・
+        # VM の Samba で実測 2026-10-18）。「保てた」と記録すると事実と違うので、保てなかったと記録する
+        after.atime_kept = False
+        after.atime_lost_reason = "server_updated"
+    return True
+
+
+def read_small(path: str, limit: int, allow_recall: bool = False, retries: int = 2) -> tuple[SourceInfo, bytes] | None:
+    """元のファイルが limit バイト以下なら、一時フォルダへ写さずにメモリへ読む（約束は snapshot と同じ）。
+
+    共有をすべて許す・最終アクセス日時を保つ・読む間の書き換えを検知する・SHA-256 を取る。次のときは None を
+    返す（呼び出し側は snapshot で写し、断る理由もそちらで出す）: limit を超えている（何も読まない）・クラウドの
+    代替ファイル（中身を読まない）・読む間に limit を超えて大きくなった。小さなファイルは写しの作成と開き直し（新しいファイルを
+    ウイルス対策が調べる）に検査の大半の時間を取られていた（数 KB の文で 1件 約 13ms のうち約 9ms・実測 2026-11-15）。
+    """
+    from .engine import long_path
+
+    if os.name != "nt":
+        info = stat_identity(path)
+        if info.size > limit:
+            return None
+        with open(path, "rb") as src:
+            data = src.read(limit + 1)
+        if len(data) > limit:
+            return None  # 読む間に大きくなった: 写すほうで扱う
+        info.sha256 = hashlib.sha256(data).hexdigest()
+        info.atime_kept = False
+        return info, data
+
+    lp = long_path(path)
+    for attempt in range(retries + 1):
+        handle, atime_kept = _open_shared(lp)
+        try:
+            before = _handle_info(handle)
+            if before.attributes & RECALL_ATTRS and not allow_recall:
+                return None  # 代替ファイルの断りの理由は snapshot が出す（中身は読まない）
+            if before.size > limit:
+                return None
+            # 小さなファイルに 1MB の領域を毎回取ると、それだけで 1件 約 0.3ms かかる。読む間に大きくなっても
+            # 細切れの読みにならないよう、最低 64KB にする
+            buf = ctypes.create_string_buffer(min(CHUNK, max(64 * 1024, before.size + 1)))
+            parts: list[bytes] = []
+            copied = 0
+            while copied <= limit:
+                n = _read_chunk(handle, buf)
+                if not n:
+                    break
+                parts.append(buf.raw[:n])
+                copied += n
+            after = _handle_info(handle)
+        finally:
+            _k32.CloseHandle(handle)
+        if copied > limit:
+            return None  # 読む間に大きくなった: 写すほうで扱う（書き換えの検知もそちらで）
+        data = b"".join(parts)
+        if _settle(before, after, copied, hashlib.sha256(data), atime_kept):
+            return after, data
+        if attempt == retries:
+            break
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+
+
+class HashStopped(Exception):
+    """hash_file の途中で、止める指示（should_stop）が出た。"""
+
+
+def hash_file(path: str, allow_recall: bool = False, retries: int = 2, should_stop=None) -> SourceInfo | None:
+    """元のファイルの中身を読んで SHA-256 と識別情報を返す（写しは作らない）。同じ中身のファイルを見つけるのに使う。
+
+    約束は snapshot と同じ: 共有をすべて許す・最終アクセス日時を保つ・読む間の書き換えを検知する。
+    クラウドの代替ファイル（中身が手元に無い）は読まずに None を返す。should_stop が True を返したら HashStopped。
+    読む間に書き換えられ続けたら ChangedWhileReading、開けない・読めないときは OSError / SourceError を投げる
+    （呼び出し側は「同じ中身かを確かめられなかった」として、ふつうに検査する）。
+    """
+    from .engine import long_path
+
+    def stopped() -> bool:
+        return bool(should_stop and should_stop())
+
+    if os.name != "nt":
+        before = stat_identity(path)
+        h = hashlib.sha256()
+        copied = 0
+        with open(path, "rb") as src:
+            for chunk in iter(lambda: src.read(CHUNK), b""):
+                if stopped():
+                    raise HashStopped()
+                h.update(chunk)
+                copied += len(chunk)
+        after = stat_identity(path)
+        if not (before.same_as(after) and copied == after.size):
+            raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)
+        after.sha256 = h.hexdigest()
+        after.atime_kept = False
+        return after
+
+    lp = long_path(path)
+    for attempt in range(retries + 1):
+        handle, atime_kept = _open_shared(lp)
+        try:
+            before = _handle_info(handle)
+            if before.attributes & RECALL_ATTRS and not allow_recall:
+                return None
+            digest = hashlib.sha256()
+            copied = 0
+            # 小さなファイルに 1MB の領域を毎回取らない（read_small と同じ）
+            buf = ctypes.create_string_buffer(min(CHUNK, max(64 * 1024, before.size + 1)))
+            view = memoryview(buf).cast("B")
+            while True:
+                if stopped():
+                    raise HashStopped()
+                n = _read_chunk(handle, buf)
+                if not n:
+                    break
+                digest.update(view[:n])
+                copied += n
+            after = _handle_info(handle)
+        finally:
+            _k32.CloseHandle(handle)
+        if _settle(before, after, copied, digest, atime_kept):
+            return after
+        if attempt == retries:
+            break
+    raise ChangedWhileReading(CHANGED_WHILE_READING_MSG)

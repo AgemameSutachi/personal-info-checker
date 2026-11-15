@@ -104,9 +104,9 @@ def test_save_result_writes_given_wall_and_rewrites_slow_saves(tmp_path, monkeyp
     calls = []
     real_tx = store.tx
 
-    def counting_tx():
+    def counting_tx(**kwargs):
         calls.append(1)
-        return real_tx()
+        return real_tx(**kwargs)
 
     monkeypatch.setattr(store, "tx", counting_tx)
     result = FileResult(

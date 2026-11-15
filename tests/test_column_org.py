@@ -396,9 +396,17 @@ def test_securities_table_surname_companies(records):
     """銘柄の一覧の、よくある姓で始まる社名は、末尾が社名の字（製作所・工業・電機など）なら 低。
     人の名前の形のもの（姓＋漢字の名）は 中 のまま（見落とさない側）。"""
     lows = ["小松製作所", "山田工業", "千葉電機", "石川製薬", "高木産業"]
-    mediums = ["山田太郎", "野村誠"]
+    mediums = ["山田太郎", "野村誠", "佐藤ハナ", "鈴木 ひろし", "高橋　健"]
     got = _data_names(_sec_rows(["code4", "name"], 1, lows + mediums), records=records)
-    assert got == {"name:low": 5, "name:medium": 2}, got
+    assert got == {"name:low": 5, "name:medium": 5}, got
+
+
+def test_person_like_value_shapes():
+    """人の名前の形の判定: 姓だけ・名が仮名・空白（半角・全角）を通し、社名の末尾の字のものは通さない。"""
+    for v in ("山田", "佐藤ハナ", "鈴木ひろし", "山田 太郎", "山田　太郎", "松本 孝行"):
+        assert engine._person_like_value(v), v
+    for v in ("小松製作所", "山田工業", "高木産業", "あおば電機", "Taro Yamada"):
+        assert not engine._person_like_value(v), v
 
 
 def test_securities_header_found_in_later_header_row():

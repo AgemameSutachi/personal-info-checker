@@ -78,6 +78,86 @@ def test_context_marks_and_cleans(tmp_path):
     assert not os.path.exists(d)
 
 
+def _put_read_only(folder):
+    """読み取り専用のファイルを段を変えて置く（7-Zip が展開した DLL の欠片などと同じ形）。"""
+    import stat
+
+    os.makedirs(os.path.join(folder, "tmpabc", "deep"))
+    paths = [os.path.join(folder, "a.dll"), os.path.join(folder, "tmpabc", "1.jvm.dll")]
+    paths.append(os.path.join(folder, "tmpabc", "deep", "2.jvm.dll"))
+    for p in paths:
+        with open(p, "wb") as f:
+            f.write(b"x")
+        os.chmod(p, stat.S_IREAD)
+    return paths
+
+
+def test_context_cleanup_removes_read_only_members(tmp_path):
+    """ジョブの終わりの片付けが、読み取り専用のファイルを黙って残さない（F の通しの後に 47 万ファイル残っていた）。"""
+    ctx = ScanContext("x", ScanOptions(temp_dir=str(tmp_path)), [])
+    d = ctx.tmpdir
+    _put_read_only(ctx.new_tmp_subdir())
+    ctx.cleanup()
+    assert not os.path.exists(d)
+    assert [n for n in os.listdir(tmp_path) if n.startswith(TEMP_PREFIX)] == []
+
+
+def test_remove_tree_removes_read_only_and_tolerates_missing(tmp_path):
+    d = tmp_path / "work"
+    d.mkdir()
+    _put_read_only(str(d))
+    safeio.remove_tree(str(d))
+    assert not d.exists()
+    safeio.remove_tree(str(d))  # 無いフォルダでも例外にしない
+
+
+def test_remove_tree_gives_up_on_locked_file_silently(tmp_path):
+    """使用中で消せないものは諦めて残す（例外で検査を止めない）。残りは次のジョブの始まりの片付けが消す。"""
+    d = tmp_path / "work"
+    d.mkdir()
+    locked = d / "held.bin"
+    with open(locked, "wb") as f:
+        f.write(b"x")
+        safeio.remove_tree(str(d))
+        if os.name == "nt":
+            assert locked.exists()
+    safeio.remove_tree(str(d))
+    assert not d.exists()
+
+
+def test_scan_of_7z_with_read_only_member_leaves_no_temp(tmp_path):
+    """7-Zip は読み取り専用の属性を保って展開する。検査の後に一時フォルダの写しが残らない（直す前は中身ごと残った）。"""
+    import stat
+    import subprocess
+
+    from pii_checker.formats.archive import find_7z
+
+    exe = find_7z(None)
+    if exe is None:
+        pytest.skip("7-Zip（7z.exe）が見つからない")
+    inner = tmp_path / "mat" / "inner"
+    inner.mkdir(parents=True)
+    memo = inner / "memo.txt"
+    memo.write_text("山田太郎 090-1234-5678", encoding="utf-8")
+    os.chmod(memo, stat.S_IREAD)
+    arc = tmp_path / "t.7z"
+    subprocess.run([exe, "a", str(arc), str(inner)], check=True, capture_output=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    res = engine.scan_file(str(arc), ScanOptions(temp_dir=str(work), reuse=False))
+    assert res.items  # 中身まで読んだ（展開の経路を通った）
+    assert os.listdir(work) == []
+
+
+def test_rewrite_workdir_removes_read_only_members(tmp_path):
+    from pii_checker import archive_write
+
+    path, owner = archive_write.make_workdir(str(tmp_path))
+    _put_read_only(path)
+    archive_write.remove_workdir(path, owner)
+    assert not os.path.exists(path)
+
+
 def test_nested_without_space_is_uncheckable(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "IN_MEMORY_LIMIT", 10)
     monkeypatch.setattr(safeio, "free_bytes", lambda folder: 1)

@@ -104,7 +104,9 @@ def remove_workdir(path: str, owner) -> None:
         owner.close()
     except Exception:  # noqa: BLE001
         pass
-    shutil.rmtree(path, ignore_errors=True)
+    from . import safeio
+
+    safeio.remove_tree(path)
 
 
 @dataclass

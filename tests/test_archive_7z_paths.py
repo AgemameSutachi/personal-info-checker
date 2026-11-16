@@ -2,6 +2,7 @@
 
 本物の 7-Zip は CI に有る保証が無く、壊れ方や暗号化の組み合わせもファイルでは作りにくいので、
 _run_7z を差し替えて 7-Zip の出力を手で与える。ScanContext も要る分だけの代わりを使う。
+あわせて、ディスクイメージを 7-Zip で開けないときの生データ走査への逃げ道と、7-Zip が無いときの py7zr の道も確かめる。
 """
 
 from __future__ import annotations
@@ -127,10 +128,10 @@ def test_zip_kind_passes_codepage(tmp_path, monkeypatch):
     (tmp_path / "zip").mkdir()
     (tmp_path / "7z").mkdir()
     _run(_ctx(tmp_path / "zip"), monkeypatch, spy, kind="zip")
-    assert all("-mcp=932" in a for a in seen), seen
+    assert seen and all("-mcp=932" in a for a in seen), seen
     seen.clear()
     _run(_ctx(tmp_path / "7z"), monkeypatch, spy, kind="7z")
-    assert not any("-mcp=932" in a for a in seen), seen
+    assert seen and not any("-mcp=932" in a for a in seen), seen
 
 
 def test_header_encrypted_listing_opens_with_candidate(tmp_path, monkeypatch):
@@ -454,7 +455,7 @@ def test_py7zr_without_matching_password(tmp_path):
     """どの候補でも開けない 7z は要パスワードにする。
 
     一覧まで暗号化された 7z を違うパスワードで開くと、py7zr は復号した一覧を読んで TypeError（Unknown field）・
-    Bad7zFile などを投げる（どれになるかは塩しだい）。最後の例外の型で決めていたときは「壊れている」になっていた。
+    Bad7zFile などを投げる（どれになるかは暗号の乱数しだい。手元の実測では TypeError が多い）。最後の例外の型で決めていたときは「壊れている」になっていた。
     """
     arc = _py7z(tmp_path, {"a.txt": b"a"}, password="right")
     (tmp_path / "w").mkdir()

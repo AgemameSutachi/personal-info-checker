@@ -1048,6 +1048,8 @@ class _LzipReader:
     def __init__(self, f):
         self._f = f
         self._buf = b""
+        # 途中で切れていたときの説明（空なら最後まで読めた）。_GzipStream と同じく handle_single_compressed が読む
+        self.truncated = ""
         self._members = self._decode_all()
 
     CHUNK = 1024 * 1024
@@ -1083,10 +1085,15 @@ class _LzipReader:
                 if dec.needs_input:
                     data = self._f.read(self.CHUNK)
                     if not data:
-                        return  # 途中で切れている
+                        # 読めた分だけで「検査済み」と黙らない（gzip の終わりの印が無いときと同じ扱い）
+                        self.truncated = "圧縮データの終わりの印が無い（途中で切れている）"
+                        return
                 else:
                     data = b""
             buf = self._fill(buf, 20)
+            if len(buf) < 20:
+                self.truncated = "メンバーの末尾（検査値と大きさ）が欠けている（途中で切れている）"
+                return
             buf = buf[20:]  # 末尾（CRC32・元の大きさ・メンバーの大きさ）を飛ばす
 
     def read(self, n=-1):

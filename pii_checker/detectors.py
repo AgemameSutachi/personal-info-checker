@@ -2262,8 +2262,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
             if h.confidence == Confidence.MEDIUM:
                 if _RE_THING_LABEL_BEFORE.search(text, max(0, h.start - 20), h.start):
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_LABEL_THING_NOTE)
-                elif _RE_NAME_CHAR.match(text, h.end):
-                    # 値の字数の上限（8字）で切れて、後ろに仮名・漢字が続く（「氏名：突然送られてくるメールは…」の文）
+                elif first == h.value and _RE_NAME_CHAR.match(text, h.end):
+                    # 値の字数の上限（8字）で切れて、後ろに仮名・漢字が続く（「氏名：突然送られてくるメールは…」の文）。
+                    # 空白の後の語まで取り込んだ値（「氏名：山田太郎 新宿駅前のマンション」）は、切れたのが後ろの語なので下げない
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_LABEL_CUT_NOTE)
         elif h.rule == NAME_LABEL_EN_RULE:
             # 姓で始まる地名・会社・部署（「name: 石川県」「name: 山田電機」「name: 山田 営業部」）

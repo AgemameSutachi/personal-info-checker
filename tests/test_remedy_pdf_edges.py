@@ -331,15 +331,58 @@ def test_clean_residue_really_empties_the_form_field_value(tmp_path, shape):
     assert [w.field_value for w in doc[0].widgets()] == [MAIL]  # 形を変えても値が読めること
     done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
     assert done["widgets"] == 1
-    out = tmp_path / "w2.pdf"
+    assert_no_mail_after_save(doc, tmp_path / "w2.pdf")
+
+
+def assert_no_mail_after_save(doc, out: Path) -> None:
+    """本体と同じ保存（garbage=4）の後、欄の値が空で、どのオブジェクト・ストリームにも値が残らないこと。"""
     doc.save(str(out), garbage=4, deflate=True)
     doc.close()
     doc = reopen(out)
-    assert [w.field_value for w in doc[0].widgets()] == [""]
-    for xref in range(1, doc.xref_length()):
-        assert MAIL not in doc.xref_object(xref)
-        if doc.xref_is_stream(xref):
-            assert MAIL.encode() not in (doc.xref_stream(xref) or b"")
+    try:
+        assert [w.field_value for page in doc for w in page.widgets()] == [""] * sum(
+            len(list(page.widgets())) for page in doc
+        )
+        for xref in range(1, doc.xref_length()):
+            assert MAIL not in doc.xref_object(xref)
+            if doc.xref_is_stream(xref):
+                assert MAIL.encode() not in (doc.xref_stream(xref) or b"")
+    finally:
+        doc.close()
+
+
+def test_clean_residue_empties_sibling_fields_on_other_pages(tmp_path):
+    """同じ親から値を継ぐ欄が2ページに分かれていても、どちらの見た目にも値が残らないこと。
+
+    1つ目の欄で親の値を空にすると2つ目の欄の値が読めなくなるので、当たる欄を先に集めておく必要がある。
+    """
+    doc = reopen(make_pdf(tmp_path / "x.pdf", "plain", "plain"))
+    add_text_widget(doc[0], MAIL)
+    add_text_widget(doc[1], MAIL)
+    doc = save_reopen(doc, tmp_path / "w.pdf")
+    kids = [next(doc[i].widgets()).xref for i in (0, 1)]
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<< /FT /Tx /T (f1) /V ({MAIL}) /Kids [{kids[0]} 0 R {kids[1]} 0 R] >>")
+    for kid in kids:
+        doc.xref_set_key(kid, "Parent", f"{parent} 0 R")
+        doc.xref_set_key(kid, "V", "null")
+        doc.xref_set_key(kid, "T", "null")
+    doc = save_reopen(doc, tmp_path / "w1.pdf")
+    assert [w.field_value for page in doc for w in page.widgets()] == [MAIL, MAIL]
+    done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    assert done["widgets"] == 2
+    assert_no_mail_after_save(doc, tmp_path / "w2.pdf")
+
+
+def test_clear_field_values_stops_at_a_broken_parent(tmp_path):
+    """親が無い番号を指していても、欄の値は空にし、例外を出さずに打ち切ること。"""
+    doc = reopen(make_pdf(tmp_path / "x.pdf", "plain"))
+    add_text_widget(doc[0], MAIL)
+    doc = save_reopen(doc, tmp_path / "w.pdf")
+    xref = next(doc[0].widgets()).xref
+    doc.xref_set_key(xref, "Parent", f"{doc.xref_length() + 50} 0 R")
+    remedy_pdf._clear_field_values(doc, xref)
+    assert doc.xref_get_key(xref, "V") == ("string", "")
     doc.close()
 
 

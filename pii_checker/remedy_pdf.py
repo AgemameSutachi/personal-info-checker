@@ -226,14 +226,20 @@ def _clear_field_values(doc, xref: int) -> None:
     PyMuPDF は field_value を空文字にして update しても /V を書き換えないので、項目を直に書く。
     文字列の値だけを空にする（チェック・ラジオの名前の値や、複数選択の配列は触らない）。
     コンボ・リストの選択肢の一覧（/Opt）も触らない（一覧そのものは欄の値ではない）。
+    値を別のオブジェクトに置いた形（/V 15 0 R）も触らない（まれ。残れば検査し直しの残りに出る）。
     """
     seen: set[int] = set()
     while xref and xref not in seen:
         seen.add(xref)
-        for key in ("V", "DV"):
-            if doc.xref_get_key(xref, key)[0] == "string":
-                doc.xref_set_key(xref, key, "()")
-        kind, value = doc.xref_get_key(xref, "Parent")
+        try:
+            for key in ("V", "DV"):
+                if doc.xref_get_key(xref, key)[0] == "string":
+                    doc.xref_set_key(xref, key, "()")
+            kind, value = doc.xref_get_key(xref, "Parent")
+        except (ValueError, RuntimeError):
+            if len(seen) == 1:
+                raise  # 欄そのものを書けないなら、呼び出し元で数えない
+            return  # 壊れた親（無い番号など）はそこで打ち切る
         xref = int(value.split()[0]) if kind == "xref" else 0
 
 
@@ -264,7 +270,14 @@ def clean_residue(fitz, doc, residue: Residue) -> dict:
     if xmp and residue.hit_markup(xmp):
         doc.del_xml_metadata()
         done["metadata"] += 1
-    # 注釈・リンク・フォーム欄
+    # 注釈・リンク・フォーム欄。値の当たる欄は先に全ページで集める（同じ親から値を継ぐ兄弟の欄は、
+    # 1つ目を空にすると値が読めなくなり、見た目（/AP）が作り直されずに残るため）
+    hit_widgets = {
+        w.xref
+        for page in doc
+        for w in page.widgets() or []
+        if isinstance(w.field_value, str) and w.field_value and residue.hit(w.field_value)
+    }
     for page in doc:
         for annot in list(page.annots() or []):
             info = annot.info or {}
@@ -283,8 +296,7 @@ def clean_residue(fitz, doc, residue: Residue) -> dict:
                 page.delete_link(link)
                 done["links"] += 1
         for w in page.widgets() or []:
-            value = w.field_value
-            if isinstance(value, str) and value and residue.hit(value):
+            if w.xref in hit_widgets:
                 try:
                     _clear_field_values(doc, w.xref)
                     w.field_value = ""

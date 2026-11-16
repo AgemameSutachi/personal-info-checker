@@ -101,11 +101,19 @@ def test_plan_workers_counts_full_limit_only_for_big_files(monkeypatch):
     assert procguard.plan_workers(None)[0] == 12
 
 
+def test_plan_workers_small_memory_pc(monkeypatch):
+    """物理メモリが少ない PC（上限が 4GB より小さい）でも、大きなファイルを1本ずつにして本数を出す。"""
+    gb = 1024**3
+    monkeypatch.setattr(procguard.os, "cpu_count", lambda: 8)
+    # 物理 8GB → 上限 2GB。空き 6GB の7割 = 4.2GB: 2GB×2本 + 1GB×0本では4本に届かないので、2GB×1本 + 1GB×2本 = 3本
+    monkeypatch.setattr(procguard, "memory_status", lambda: (8 * gb, 6 * gb))
+    assert procguard.plan_workers(None) == (3, 2 * gb)
+    # 空き 3GB の7割 = 2.1GB: 上限1本分だけ
+    monkeypatch.setattr(procguard, "memory_status", lambda: (8 * gb, 3 * gb))
+    assert procguard.plan_workers(None) == (1, 2 * gb)
+
+
 def test_full_limit_workers_matches_runner():
     from pii_checker import runner
 
     assert procguard.FULL_LIMIT_WORKERS == runner.BIG_FILE_CONCURRENCY
-    # runner が大きなファイルを2本配り始める本数（`BIG_FILE_CONCURRENCY if self.workers >= 4 else 1`）とも揃える
-    import inspect
-
-    assert f"self.workers >= {procguard.FULL_LIMIT_MIN_WORKERS} else 1" in inspect.getsource(runner)

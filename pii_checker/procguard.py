@@ -20,7 +20,7 @@ MAX_LIMIT = 4 * GB
 MAX_AUTO_WORKERS = 12
 # 上限まで使いうる大きなファイルを同時に配る本数（runner.BIG_FILE_CONCURRENCY と同じ）
 FULL_LIMIT_WORKERS = 2
-# 大きなファイルを FULL_LIMIT_WORKERS 本配るのはワーカーがこの本数以上のとき（runner と同じ・それ未満は1本ずつ）
+# 大きなファイルを FULL_LIMIT_WORKERS 本配るのはワーカーがこの本数以上のとき（runner もこの値を使う・それ未満は1本ずつ）
 FULL_LIMIT_MIN_WORKERS = 4
 # 大きなファイル以外のワーカーが使うメモリの見込み（実測の 0.5GB 前後に倍の余裕を取る）
 TYPICAL_WORKER_BYTES = 1 * GB
@@ -68,8 +68,10 @@ def plan_workers(requested: int | None = None) -> tuple[int, int]:
     """(ワーカー数, 1ワーカーのメモリ上限) を決める。指定があっても空きメモリで収まる数までにする。
 
     上限は暴走を止めるためのもので、ふつうのワーカーはその1割ほどしか使わない（1〜100MB のファイル
-    300 件の測定で、12本の合計が最大 5.8GB）。上限まで使いうる大きなファイルは同時に FULL_LIMIT_WORKERS 本までに
-    絞って配るので、その分だけ上限を丸ごと見込み、残りは TYPICAL_WORKER_BYTES で見込む。
+    300 件の測定で、12本の合計が最大 5.8GB＝1本あたりの平均で約 0.5GB。1本ごとの最大ではない）。
+    上限まで使いうる大きなファイルは同時に FULL_LIMIT_WORKERS 本までに絞って配るので、その分だけ上限を丸ごと
+    見込み、残りは TYPICAL_WORKER_BYTES で見込む。大きな書庫の区切りも、ふつうのワーカーと同じく
+    TYPICAL_WORKER_BYTES で見込んでいる（区切りごとのメモリはまだ測っていない）。
     """
     cpu = max(1, min(MAX_AUTO_WORKERS, (os.cpu_count() or 2) - 1))
     total, avail = memory_status()

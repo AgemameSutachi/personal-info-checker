@@ -28,7 +28,7 @@ from .engine import (
 )
 from .folderacl import AccessCache
 from .models import PasswordBook, ScanOptions, Status
-from .procguard import plan_workers, worker_init
+from .procguard import FULL_LIMIT_MIN_WORKERS, plan_workers, worker_init
 from .remote import LOGIN_LOST_MARK, Connection, LoginLost, ftp_stat, is_ftp_path, reset_login_failures
 from .remote import close_pool as close_ftp_pool
 from .safeio import NETWORK_LOST_MSG, HashStopped, NetworkLost, SourceInfo, free_bytes, hash_file, is_disk_full
@@ -671,7 +671,7 @@ class JobRunner:
             part_futures: dict = {}
             shared_tmps: dict[str, SharedTemp] = {}
             parallel = ARCHIVE_SPLIT_PARALLEL or max(2, self.workers // 2)
-            queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= 4 else 1)
+            queue = PendingQueue(pending, BIG_FILE_CONCURRENCY if self.workers >= FULL_LIMIT_MIN_WORKERS else 1)
             exhausted = False
             # 同じ中身のファイルの使い回し（再検査・設定で切ったときは使わない）
             same = None

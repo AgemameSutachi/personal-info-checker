@@ -49,6 +49,29 @@ def _child(items, part: str):
     return found[0]
 
 
+# ------------------------------------------------------------------ 試験の道具そのもの
+
+
+def test_olebuild_round_trip_through_mini_and_regular_sectors():
+    """書き手の往復: ミニストリーム（4096 バイト未満）と通常のセクター（以上）の両方、FAT が複数セクターになる大きさ。"""
+    import olefile
+
+    sizes = [0, 1, 63, 64, 4095, 4096, 4097, 20000]
+    streams = {f"S{n}": bytes((i * 7 + n) % 256 for i in range(n)) for n in sizes}
+    streams.update({f"Many/P{i:03d}": bytes([i % 256]) * 4000 for i in range(150)})  # FAT が2セクター以上
+    ole = olefile.OleFileIO(ob.build(streams))
+    for path, data in streams.items():
+        assert ole.openstream(path).read() == data, path
+
+
+def test_large_doc_body_in_regular_sectors(tmp_path):
+    wd, table = ob.doc_stream([("あ" * 3000 + f"\r電話 {PHONE}\r", False)])
+    assert len(wd) >= ob.CUTOFF
+    item = _scan(tmp_path, "long.doc", ob.build({"WordDocument": wd, "1Table": table}))[0]
+    assert item.status == Status.SCANNED, item.reason
+    assert any(loc.startswith("本文 ") for loc in _locations(item, "phone")), item.findings
+
+
 # ------------------------------------------------------------------ Word 97-2003
 
 
@@ -63,7 +86,9 @@ def test_doc_piece_table_reads_both_unicode_and_compressed_pieces(tmp_path):
     assert item.kind == "Word 97-2003（doc）"
     assert item.method.startswith("本文（piece table"), item.method
     assert {"phone", "email"} <= _types(item)
+    # 位置まで見る（ASCII のメールは生データ走査でも拾えるので、種類だけでは圧縮 piece を読めたか分からない）
     assert all(loc.startswith("本文 ") for loc in _locations(item, "phone")), item.findings
+    assert all(loc.startswith("本文 ") for loc in _locations(item, "email")), item.findings
 
 
 def test_doc_control_characters_become_separators():
@@ -110,7 +135,8 @@ def test_xls_book_stream_is_excel95(tmp_path):
     wb = ob.xls_workbook({"Sheet1": [["電話"], [PHONE]]})
     item = _scan(tmp_path, "old95.xls", ob.build({"Book": wb}))[0]
     assert item.kind == "Excel 5.0/95（xls）"
-    assert "phone" in _types(item)
+    assert item.status == Status.SCANNED, item.reason
+    assert "Sheet1!A2" in _locations(item, "phone"), item.findings  # xlrd でセルとして読めた
 
 
 def test_xls_broken_workbook_stream_is_partial(tmp_path):
@@ -147,7 +173,7 @@ def test_xls_biff2_legacy_cells(tmp_path):
     item = _scan(tmp_path, "ancient.xls", data)[0]
     assert item.status == Status.SCANNED, item.reason
     assert item.method == "xlrd でセル＋生データ走査"
-    assert "phone" in _types(item)
+    assert any(loc.endswith("!A2") for loc in _locations(item, "phone")), item.findings
 
 
 def test_xls_biff_legacy_unreadable_is_uncheckable_but_raw_sweeps(tmp_path):
@@ -170,7 +196,7 @@ def test_ppt_texts_from_nested_containers(tmp_path):
     doc = _ppt(
         ob.ppt_record(0x0FA0, f"電話 {PHONE}".encode("utf-16-le")),
         ob.ppt_record(0x0FA8, f"mail {EMAIL}".encode("latin-1")),
-        ob.ppt_record(0x0FBA, "ノートの文字".encode("utf-16-le")),
+        ob.ppt_record(0x0FBA, "CString の文字".encode("utf-16-le")),  # 0x0FBA は CString（表題などの文字）
     )
     item = _scan(tmp_path, "slides.ppt", ob.build({"PowerPoint Document": doc}))[0]
     assert item.status == Status.SCANNED, item.reason
@@ -193,6 +219,9 @@ def test_ppt_embedded_objects_compressed_and_raw(tmp_path):
     assert "phone" in _types(_child(items, "埋め込みオブジェクト1"))
     assert "phone" in _types(_child(items, "埋め込みオブジェクト2"))
     _child(items, "埋め込みオブジェクト3")
+    # 解けなかった圧縮は、レコードの中身をそのまま渡す
+    _, objects = office._ppt_parse(doc)
+    assert objects[2] == struct.pack("<I", 10) + b"not zlib data"
 
 
 def test_ppt_embedded_object_over_limit_is_noted(tmp_path, monkeypatch):
@@ -224,9 +253,8 @@ def test_msg_subject_body_and_attachment(tmp_path):
 
 
 def test_msg_unreadable_structure_is_partial(tmp_path):
-    # 名前つきプロパティの置き場が無い msg は extract_msg が断る
+    # 添付の属性（添付の方法など）が空の msg は extract_msg が規格違反として断る
     streams = ob.msg_streams("件名", f"本文 {PHONE}")
-    streams = {k: v for k, v in streams.items() if not k.startswith("__nameid")}
     streams["__attach_version1.0_#00000000/__properties_version1.0"] = b"\x00" * 8
     streams["__properties_version1.0"] = b"\x00" * 8 + struct.pack("<IIII", 0, 1, 0, 1) + b"\x00" * 8
     item = _scan(tmp_path, "broken.msg", ob.build(streams))[0]
@@ -316,9 +344,8 @@ def _zip_with(name: str, text: str) -> bytes:
 
 def test_ole10native_payload_is_carved(tmp_path):
     payload = f"添付の電話 {PHONE2}\n".encode()
-    native = (
-        struct.pack("<I", 0)
-        + b"\x02\x00"
+    body = (
+        b"\x02\x00"
         + "メモ.txt".encode("cp932")
         + b"\x00"
         + b"C:\\memo.txt\x00"
@@ -328,6 +355,7 @@ def test_ole10native_payload_is_carved(tmp_path):
         + struct.pack("<I", len(payload))
         + payload
     )
+    native = struct.pack("<I", len(body)) + body  # 先頭は続く中身の長さ（コードは読まない）
     items = _scan(tmp_path, "pkg.bin", ob.build({"ObjectPool/_1/\x01Ole10Native": native}))
     assert "埋め込み 1 件" in items[0].method, items[0].method
     child = _child(items, "（埋め込み メモ.txt）")

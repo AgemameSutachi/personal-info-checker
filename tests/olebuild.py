@@ -252,7 +252,7 @@ def msg_streams(subject: str, body: str, attachments: list[tuple[str, bytes]] = 
     entries = [(0x001A, 0x001F, 0), (0x0037, 0x001F, 0), (0x1000, 0x001F, 0)]
     header = b"\x00" * 8 + struct.pack("<IIII", 0, len(attachments), 0, len(attachments)) + b"\x00" * 8
     streams["__properties_version1.0"] = props(header, entries)
-    # 名前つきプロパティの置き場（中身は空でよいが、無いと extract_msg が規格違反として断る）
+    # 名前つきプロパティの置き場（中身は空でよい）。添付があると extract_msg が読みに行き、無ければ規格違反として断る
     for tag in ("00020102", "00030102", "00040102"):
         streams[f"__nameid_version1.0/__substg1.0_{tag}"] = b""
     for i, (name, data) in enumerate(attachments):

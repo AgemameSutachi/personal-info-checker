@@ -1895,19 +1895,20 @@ def _era_date_is_broken(text: str, h: Hit) -> bool:
 
 _RE_ONE_LETTER_ERA = re.compile(r"[明大昭平令]\s?(?:[0-9]|元)")
 _RE_KANA_KANJI = re.compile(r"[一-龥々ぁ-んァ-ヶー]")
-_RE_BIRTH_WORD_END = re.compile(r"(?:生年月日|誕生日|生年|生まれ|出生日?)$")
+_RE_BIRTH_WORD_END = re.compile(r"(?:生年月日|誕生日|生年|生まれ|出生日?)[はが]?$")
 _RE_YEAR_LAST_FULL = re.compile(r"([0-9]{1,2})[/.\-]([0-9]{1,2})[/.\-](?:19|20)[0-9]{2}")
 
 
 def _birth_date_is_broken(text: str, h: Hit) -> bool:
     """生年月日の語の近くで拾った日付が、語の一部や数の並びの一部か（「最大1.2.3」「192.168.1.2000」）。
 
-    - 1字の元号の略（昭・平…）の直前が漢字・仮名: 「最大」「公平」の字の途中。直前が生年月日の語なら日付とみなす
+    - 1字の元号の略（昭・平…）の直前が漢字・仮名: 「最大」「公平」の字の途中。直前が生年月日の語（「は」「が」を
+      挟んでもよい・「生年月日は昭60.4.1」）なら日付とみなす
     - 年が後ろの日付: 直前が数字・区切り（IP アドレスや版の番号の途中）か、月・日がありえない（「39.39.2000」）
     """
     v = h.value
     if _RE_ONE_LETTER_ERA.match(v):
-        before = text[max(0, h.start - 4) : h.start]
+        before = text[max(0, h.start - 5) : h.start]
         if before and _RE_KANA_KANJI.fullmatch(before[-1]) and not _RE_BIRTH_WORD_END.search(before):
             return True
     m = _RE_YEAR_LAST_FULL.fullmatch(v)
@@ -1925,10 +1926,13 @@ _RE_ADDR_NUM_TAIL = re.compile(rf"{NUM}(?:丁目|番地|番|号|{H}[0-9]+)")
 
 
 def _aza_tail_not_after_town(value: str) -> bool:
-    """住所の番地が字の形（「大字軽井沢9999」）だけで、字の直前が市区町村郡でないか（「千代田区の文字コード1」）。"""
+    """住所の番地が字の形（「大字軽井沢9999」）だけで、字の直前が市区町村郡でないか（「千代田区の文字コード1」）。
+
+    見るのは最初の「字」（「大字湯本字上原123」は大字の側を見る）。
+    """
     if _RE_ADDR_NUM_TAIL.search(value):
         return False
-    i = value.rfind("字")
+    i = value.find("字")
     if i <= 0:
         return False
     if value[i - 1] == "大":

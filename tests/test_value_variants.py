@@ -80,6 +80,8 @@ def test_year_last_date_without_birth_word_is_not_birthdate():
         ("長野県北佐久郡軽井沢町大字軽井沢9999", "長野県北佐久郡軽井沢町大字軽井沢9999"),
         ("沖縄県島尻郡与那原町字与那原999", "沖縄県島尻郡与那原町字与那原999"),
         ("長野県北佐久郡軽井沢町大字軽井沢9999-9", "長野県北佐久郡軽井沢町大字軽井沢9999-9"),
+        # 大字の後に小字が続くもの（最後の「字」でなく大字の側を見る）
+        ("神奈川県足柄下郡箱根町大字湯本字上原123", "神奈川県足柄下郡箱根町大字湯本字上原123"),
     ],
 )
 def test_rural_address_with_aza(text, value):
@@ -109,8 +111,11 @@ def test_birth_word_date_inside_other_words(text):
     assert "birthdate" not in found(text)
 
 
-def test_one_letter_era_right_after_birth_word():
-    assert found("生年月日平2.12.24")["birthdate"][0] == "high"
+@pytest.mark.parametrize(
+    "text", ["生年月日平2.12.24", "生年月日は昭60.4.1です", "誕生日は平2.12.24", "生年月日が昭60.4.1"]
+)
+def test_one_letter_era_right_after_birth_word(text):
+    assert found(text)["birthdate"][0] == "high"
 
 
 @pytest.mark.parametrize(

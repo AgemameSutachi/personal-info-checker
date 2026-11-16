@@ -70,6 +70,14 @@ def test_truncated_lzip_is_partial_not_silently_scanned(tmp_path):
     assert 0 < _phones(items) < 3000  # 読めた分は検査している
 
 
+def test_lzip_cut_inside_second_member():
+    first, second = _lzip_member(b"first\n"), _lzip_member(TEXT)
+    reader = _LzipReader(io.BytesIO(first + second[:2000]))
+    out = reader.read()
+    assert out.startswith(b"first\n") and len(out) < 6 + len(TEXT)  # 1つ目は全部・2つ目は読めた分だけ
+    assert reader.truncated
+
+
 def test_lzip_missing_trailer_is_partial(tmp_path):
     """本体は終わりの印まで読めても、末尾（検査値と大きさ）が欠けていれば切れたファイルとして扱う。"""
     items = _scan(tmp_path, "notail.csv.lz", _lzip_member(TEXT)[:-10])

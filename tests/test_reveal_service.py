@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 import pytest
+from pebble.common import ProcessExpired
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -79,6 +80,16 @@ def test_ftp_with_broken_connection_setting_gives_reason(tmp_path):
     assert "接続先の設定を読めない" in r["message"] and "ポート（abc）" in r["message"]
 
 
+@pytest.mark.parametrize("registry", [_Registry(), _Registry(_Runner(PasswordBook(common=["c1"])))])
+def test_ftp_without_connection_password_gives_reason(tmp_path, registry):
+    """アプリを開き直した後（検査が動いていない）や、接続のパスワードを持たない検査では、FTP を読み直せない。"""
+    top = "ftp://u@192.0.2.1:21/a.txt"
+    store, job = _job_with_file(tmp_path, top, ScanOptions(connection=FTP_CONN))
+    r = reveal_mod.RevealService(store, registry).request(job, top)
+    assert r["state"] == "error"
+    assert "パスワードは保存していない" in r["message"] and "入れ直す" in r["message"]
+
+
 def test_plan_copies_passwords_from_running_job(tmp_path):
     """FTP のパスワードは検査を動かしているメモリにだけある。それを写して使い、元の帳面は渡さない。"""
     top = "ftp://u@192.0.2.1:21/a.txt"
@@ -132,6 +143,7 @@ def test_match_without_source_returns_first_reason():
     svc = reveal_mod.RevealService(_FakeStore([]), _Registry())
     with pytest.raises(reveal_mod.RevealUnavailable, match="元のファイルを読めませんでした: 権限がありません"):
         svc._match(_plan(), {"items": [("t", "error", "権限がありません")], "findings": [], "source": None})
+    # 写しの情報が空の辞書でも「写せなかった」と同じに扱う。項目が無ければ理由を付けない
     with pytest.raises(reveal_mod.RevealUnavailable, match=r"^元のファイルを読めませんでした$"):
         svc._match(_plan(), {"items": [], "findings": [], "source": {}})
 
@@ -194,7 +206,7 @@ def _ready_service(tmp_path, runner_fn):
 
 
 def _wait(svc, job, top):
-    for _ in range(200):
+    for _ in range(500):  # 最大 10 秒（共有の CI で遅れても落ちない余裕）
         r = svc.request(job, top)
         if r["state"] != "running":
             return r
@@ -231,7 +243,7 @@ def test_running_state_reports_elapsed_and_is_not_restarted(tmp_path):
     assert len(calls) == 1
 
 
-def test_error_is_kept_briefly_then_retried(tmp_path, monkeypatch):
+def test_error_is_kept_briefly_then_retried(tmp_path):
     calls = []
 
     def fail(*a):
@@ -262,7 +274,8 @@ def test_done_result_expires_and_cache_is_capped(monkeypatch):
         ("j", "a"): entry("done", 30),
         ("j", "b"): entry("done", 20),
         ("j", "c"): entry("done", 10),
-        ("j", "run"): reveal_mod.RevealEntry(),  # 走っている間の finished は 0（古い順に並べると先頭に来る）
+        # 走っている間の finished は 0。古い順の並びに入れてしまうと真っ先に捨てられるので、並びから外していることを確かめる
+        ("j", "run"): reveal_mod.RevealEntry(),
     }
     svc._purge()
     # 期限切れを捨て、上限を超えた分は終わったものの古い順に捨てる。走っているものは捨てない
@@ -308,12 +321,10 @@ def _fake_pool(exc):
 @pytest.mark.parametrize(
     "make_exc, words",
     [
+        # 3.11 からは同じ例外だが、3.10 以前は別物なので両方を確かめる
         (lambda: FutureTimeout(), "時間制限（10 分）を超えた"),
         (lambda: TimeoutError(), "時間制限（10 分）を超えた"),
-        (
-            lambda: __import__("pebble.common", fromlist=["ProcessExpired"]).ProcessExpired("x", code=-9),
-            "プロセスが終了",
-        ),
+        (lambda: ProcessExpired("x", code=-9), "プロセスが終了"),
     ],
 )
 def test_run_in_process_turns_failures_into_reasons(monkeypatch, make_exc, words):

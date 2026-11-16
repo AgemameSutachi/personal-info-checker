@@ -23,6 +23,9 @@ from pii_checker import engine, runner, splitscan
 from pii_checker.models import ScanOptions, Status
 from pii_checker.store import Store
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from zipcrypto import zipcrypto_zip  # noqa: E402
+
 N_ENTRIES = 40
 
 
@@ -488,46 +491,6 @@ def test_same_content_copy_of_split_parent(tmp_path, store, small_split, monkeyp
 # ------------------------------------------------------------------ 区切りの時間切れ・パスワード・停止と再開
 
 PASSWORD = "secret-pw-1"
-
-
-def zipcrypto_zip(name: str, data: bytes, password: str) -> bytes:
-    """中身1件を ZipCrypto（従来の PKWARE 暗号）・無圧縮で格納した zip（標準の zipfile は暗号化して書けないので手で組む）。"""
-    import struct
-    import zlib
-
-    table = []
-    for i in range(256):
-        v = i
-        for _ in range(8):
-            v = (v >> 1) ^ 0xEDB88320 if v & 1 else v >> 1
-        table.append(v)
-    keys = [0x12345678, 0x23456789, 0x34567890]
-
-    def crc_byte(crc, b):
-        return (crc >> 8) ^ table[(crc ^ b) & 0xFF]
-
-    def update(b):
-        keys[0] = crc_byte(keys[0], b)
-        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
-        keys[2] = crc_byte(keys[2], (keys[1] >> 24) & 0xFF)
-
-    for b in password.encode():
-        update(b)
-    crc = zlib.crc32(data)
-    plain = bytes(range(11)) + bytes([crc >> 24]) + data
-    out = bytearray()
-    for b in plain:
-        t = (keys[2] | 2) & 0xFFFF
-        out.append(b ^ (((t * (t ^ 1)) >> 8) & 0xFF))
-        update(b)
-    fname = name.encode()
-    fixed = struct.pack("<HHHHHIII", 20, 1, 0, 0, 0x21, crc, len(out), len(data))
-    local = b"PK\x03\x04" + fixed + struct.pack("<HH", len(fname), 0) + fname + bytes(out)
-    central = (
-        b"PK\x01\x02" + struct.pack("<H", 20) + fixed + struct.pack("<HHHHHII", len(fname), 0, 0, 0, 0, 0, 0) + fname
-    )
-    end = b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, len(central), len(local), 0)
-    return local + central + end
 
 
 def make_zip_with_locked(path: Path) -> Path:

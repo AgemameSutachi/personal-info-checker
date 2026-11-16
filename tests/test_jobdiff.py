@@ -151,7 +151,7 @@ def test_settings_change_with_no_difference_says_changes_may_be_hidden(tmp_path)
     root = r"C:\共有"
     S = Status.SCANNED
     _job(store, [root], {root + r"\a.txt": (2, S)})
-    cur = _job(store, [root], {root + r"\a.txt": (2, S)}, ocr=False)
+    cur = _job(store, [root], {root + r"\a.txt": (2, S)}, ocr=True)
     d = jobdiff.compute(store, cur)
     assert not any(d["counts"].values())
     text = jobdiff.summary_text(d)
@@ -167,7 +167,7 @@ def test_settings_or_version_change_is_noted(tmp_path):
     root = r"C:\共有"
     S = Status.SCANNED
     _job(store, [root], {root + r"\a.txt": (2, S)})
-    cur = _job(store, [root], {root + r"\a.txt": (1, S)}, allow_values=["03-1234-5678"], ocr=False)
+    cur = _job(store, [root], {root + r"\a.txt": (1, S)}, allow_values=["03-1234-5678"], ocr=True)
     d = jobdiff.compute(store, cur)
     assert d["settings_changed"] == ["拾わない値（許可リスト）", "OCR"]
     text = jobdiff.summary_text(d)
@@ -175,7 +175,7 @@ def test_settings_or_version_change_is_noted(tmp_path):
     assert "前回と設定（または検査器の版）が違うため、違いにはファイルの変化でないものを含みます" in text
     assert "拾わない値（許可リスト）・OCR" in text
     # 使い回しの指定・一時フォルダの違いは結果に効かないので添えない
-    same = _job(store, [root], {root + r"\a.txt": (1, S)}, allow_values=["03 1234 5678"], ocr=False, reuse=False)
+    same = _job(store, [root], {root + r"\a.txt": (1, S)}, allow_values=["03 1234 5678"], ocr=True, reuse=False)
     assert jobdiff.compute(store, same)["settings_changed"] == []
 
     # 設定が同じでも、検査器の版（engine_sig）が違えば添える

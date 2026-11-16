@@ -119,11 +119,11 @@ def scan_counts(path: Path, tmp: Path) -> tuple[int, list[tuple[str, str]]]:
     return total, [(f.pii_type, f.raw_value) for it in res.items for f in it.findings]
 
 
-def make_service(tmp_path: Path, files: list[Path], runner=inline_runner):
+def make_service(tmp_path: Path, files: list[Path], runner=inline_runner, ocr: bool = False):
     scan_tmp = tmp_path / "scantmp"
     scan_tmp.mkdir(exist_ok=True)
     store = Store(str(tmp_path / "jobs.sqlite3"))
-    job = store.create_job([str(files[0].parent)], ScanOptions(temp_dir=str(scan_tmp)))
+    job = store.create_job([str(files[0].parent)], ScanOptions(temp_dir=str(scan_tmp), ocr=ocr))
     store.add_files(job, [(str(f), f.stat().st_size, f.stat().st_mtime) for f in files])
     with store.tx() as c:
         c.execute("UPDATE files SET state='done' WHERE job_id=?", (job,))

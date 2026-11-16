@@ -379,7 +379,7 @@ def create_app(
                 raise HTTPException(400, "見つからない・接続できない場所があります: " + "、".join(missing[:5]))
         on_ftp = conn is not None and conn.is_ftp
         opts = ScanOptions(
-            ocr=bool(o.get("ocr", True)),
+            ocr=bool(o.get("ocr", False)),
             deep_image_sweep=bool(o.get("deep_image_sweep", False)),
             reuse=bool(o.get("reuse", True)),
             temp_dir=o.get("temp_dir") or None,

@@ -364,7 +364,7 @@ def test_jpeg_xr_is_read_by_ocr(tmp_path):
     z = tmp_path / "slides.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("ppt/media/hdphoto1.wdp", data)
-    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path)))
+    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path), ocr=True))
     bad = [(it.path, it.status, it.reason) for it in res.items if it.status != Status.SCANNED]
     assert bad == []
     found = {k for it in res.items for k in it.finding_counts}
@@ -378,7 +378,7 @@ def test_broken_jpeg_xr_is_uncheckable_with_reason(tmp_path):
 
     p = tmp_path / "broken.wdp"
     p.write_bytes(b"II\xbc\x01" + b"\x00" * 100)
-    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True))
     item = res.items[0]
     assert item.status == Status.UNCHECKABLE and "JPEG XR" in item.reason, item.reason
 
@@ -427,7 +427,7 @@ def test_heic_is_read_by_ocr(tmp_path):
     assert data[4:12] in (b"ftypheic", b"ftypmif1"), data[:16]
     p = tmp_path / "IMG_0001.HEIC"
     p.write_bytes(data)
-    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path)))
+    res = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True))
     item = res.items[0]
     assert item.kind == sniff.KIND_LABELS["image_unsupported"]
     assert item.status == Status.SCANNED, item.reason
@@ -436,7 +436,7 @@ def test_heic_is_read_by_ocr(tmp_path):
     z = tmp_path / "photos.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("DCIM/IMG_0001.HEIC", data)
-    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path)))
+    res = scan_file(str(z), ScanOptions(temp_dir=str(tmp_path), ocr=True))
     bad = [(it.path, it.status, it.reason) for it in res.items if it.status != Status.SCANNED]
     assert bad == []
     assert "phone" in {k for it in res.items for k in it.finding_counts}
@@ -472,7 +472,7 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(ocr, "open_with_wic", missing)
-    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
+    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0].reason
     assert "この PC の Windows では" in reason and "Microsoft Store" in reason, reason
     assert "HEIF 画像表示オプション" in reason and "HEVC ビデオ拡張機能" in reason and "AV1 ビデオ拡張機能" in reason
 
@@ -482,7 +482,7 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(ocr, "open_with_wic", broken)
-    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0].reason
+    reason = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0].reason
     assert "壊れているか" in reason and "（詳細: [WinError -1072875842] 準拠していません）" in reason, reason
     assert "壊れている可能性" not in reason  # 中の誤りの「（壊れている可能性があります）」は重ねない
 
@@ -490,11 +490,11 @@ def test_heic_uncheckable_reasons(tmp_path, monkeypatch):
         raise OSError("Invalid input: Unspecified: Bitstream not supported by this decoder")
 
     monkeypatch.setattr(misc, "_open_heif_with_pillow", pillow_fails)
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert item.status == Status.UNCHECKABLE and "壊れている可能性" in item.reason and "Bitstream" in item.reason
     assert "Microsoft Store" not in item.reason  # WIC の部品はあった（壊れている見込み）ので入れ方は出さない
     monkeypatch.setattr(ocr, "open_with_wic", missing)
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert "壊れている可能性" in item.reason and "Microsoft Store" in item.reason  # 部品も無かったので入れ方も出す
 
 
@@ -514,7 +514,7 @@ def test_heic_too_many_pixels_is_not_blamed_on_codec(tmp_path, monkeypatch):
         raise ValueError("画像の画素数が大きすぎるため読み込みを中止しました（20000×20000）")
 
     monkeypatch.setattr(ocr, "open_with_wic", huge)
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert item.status == Status.UNCHECKABLE and "画素数が大きすぎる" in item.reason
     assert "Microsoft Store" not in item.reason
 
@@ -526,7 +526,7 @@ def test_heic_too_many_pixels_is_not_blamed_on_codec(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ocr, "open_with_wic", missing)
     monkeypatch.setattr(misc, "_open_heif_with_pillow", bomb)
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert "画素数が大きすぎる" in item.reason and "Microsoft Store" not in item.reason
 
 
@@ -546,7 +546,7 @@ def test_heic_falls_back_to_pillow_heif(tmp_path, monkeypatch):
     monkeypatch.setattr(ocr, "open_with_wic", missing)
     monkeypatch.setattr(misc, "_open_heif_with_pillow", lambda data: Image.new("L", (800, 600), "white"))
     monkeypatch.setattr(ocr, "ocr_pil_image", lambda img: "電話 090-1234-5678")
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert item.status == Status.SCANNED, item.reason
     assert "pillow-heif" in item.method and "phone" in item.finding_counts
 

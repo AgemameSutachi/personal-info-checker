@@ -75,7 +75,7 @@ def test_truncated_image_reason_names_next_step(tmp_path, fmt):
         pytest.skip("OCR が使えない環境では、画像の中身を読む前に「OCR が使えない」で止まる")
     p = tmp_path / f"cut.{fmt.lower()}"
     p.write_bytes(_cut_image(fmt))
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path))).items[0]
+    item = scan_file(str(p), ScanOptions(ocr=True, temp_dir=str(tmp_path))).items[0]
     assert item.status == Status.UNCHECKABLE, item.reason
     assert item.reason.startswith("画像を読み込めなかった（途中で切れているか壊れている可能性"), item.reason
     assert "PNG か JPEG で別名で保存した写しを検査してください" in item.reason, item.reason
@@ -173,7 +173,7 @@ def test_ocr_off_image_reason_names_setting(tmp_path):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
     assert item.status == Status.UNCHECKABLE, item.reason
     assert "OCR を無効にして実行したため" in item.reason, item.reason
-    assert "をオンにして再検査してください。コマンドの版は --no-ocr を外します" in item.reason, item.reason
+    assert "をオンにして再検査してください。コマンドの版は --ocr を付けます" in item.reason, item.reason
 
 
 def test_ocr_off_pdf_reason_names_setting(tmp_path):
@@ -193,4 +193,4 @@ def test_ocr_off_pdf_reason_names_setting(tmp_path):
     doc.close()
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items[0]
     assert "OCR を無効にして実行した。" in item.reason, item.reason
-    assert "--no-ocr を外します" in item.reason, item.reason
+    assert "--ocr を付けます" in item.reason, item.reason

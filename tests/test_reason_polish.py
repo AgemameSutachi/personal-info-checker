@@ -95,7 +95,7 @@ def test_wic_image_ocr_off_names_setting(tmp_path, name, head, label):
     item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False, reuse=False)).items[0]
     assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
     assert item.reason.startswith(f"OCR を無効にして実行したため画像（{label}）の中の文字を検査していない（要目視。")
-    assert "をオンにして再検査してください。コマンドの版は --no-ocr を外します" in item.reason, item.reason
+    assert "をオンにして再検査してください。コマンドの版は --ocr を付けます" in item.reason, item.reason
 
 
 @pytest.mark.parametrize(
@@ -111,7 +111,7 @@ def test_wic_image_ocr_unavailable_joins_install_hint(tmp_path, monkeypatch, nam
     monkeypatch.setattr(ocr, "unavailable_reason", lambda: "日本語の OCR 認識器を入れてください。")
     p = tmp_path / name
     p.write_bytes(head)
-    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), reuse=False)).items[0]
+    item = scan_file(str(p), ScanOptions(ocr=True, temp_dir=str(tmp_path), reuse=False)).items[0]
     assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
     assert item.reason.startswith(start), item.reason
     assert item.reason.endswith("。日本語の OCR 認識器を入れてください。"), item.reason

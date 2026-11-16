@@ -139,7 +139,7 @@ class ScanOptions:
     max_expand_ratio: int = 1000  # 圧縮率がこれを超え、かつ 10GB を超える展開は zip 爆弾とみなす
     max_entries: int = 3_000_000  # 1つの実ファイルから展開してよい項目数（OS イメージは数十万件）
     extract_batch_bytes: int = 4 * 1024**3  # 7-Zip で一度に展開する量（一時領域を食い潰さないよう分割する）
-    ocr: bool = True  # 画像・画像PDFを OCR する
+    ocr: bool = False  # 画像・画像PDFを OCR する（遅いので既定は切る。切った画像は検査不能（要目視）になる）
     min_image_px: int = 48  # これより小さい画像は文字を含みえないので OCR しない
     raw_sweep: bool = True  # OLE形式・Access 等で生データ走査も重ねる（削除済み残留の検出）
     deep_image_sweep: bool = False  # ディスクイメージの未使用領域（削除済みファイル）も生データ走査する

@@ -90,7 +90,8 @@ class Residue:
             path = os.path.join(folder, "embedded" + ext)
             with open(path, "wb") as f:
                 f.write(data)
-            result = engine.scan_file(path, ScanOptions(temp_dir=folder, reuse=False), PasswordBook())
+            # 埋め込みの画像に残った値を見落とさないよう、検査の既定に依らず OCR で読む
+            result = engine.scan_file(path, ScanOptions(temp_dir=folder, reuse=False, ocr=True), PasswordBook())
         for item in result.items:
             for key, n in item.conf_counts.items():
                 pii_type, conf = key.split(":", 1)

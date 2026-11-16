@@ -228,8 +228,8 @@ def test_reuse_can_be_turned_off(env):
 
 def test_different_settings_are_not_reused(env):
     folder, store, tmp = env
-    _run(store, folder, tmp)
-    j2 = _run(store, folder, tmp, ocr=False)  # 結果に効く設定が違う
+    _run(store, folder, tmp, ocr=True)
+    j2 = _run(store, folder, tmp)  # 結果に効く設定が違う（OCR は既定で切）
     assert all(v is None for v in _reused(store, j2).values())
 
 

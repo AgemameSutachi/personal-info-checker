@@ -421,7 +421,7 @@ def _cmd_scan(args, conn, conn_password: str, store=None) -> int:
             return 2
     store = store or _open_store(args.db)
     opts = ScanOptions(
-        ocr=not args.no_ocr,
+        ocr=args.ocr and not args.no_ocr,
         deep_image_sweep=args.deep_image_sweep,
         reuse=not args.no_reuse,
         temp_dir=args.temp_dir,
@@ -750,9 +750,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="前回から変わっていないファイルも全部読み直す（既定は前回の結果を使い回して速くする）",
     )
     s.add_argument(
+        "--ocr",
+        action="store_true",
+        help="画像・画像PDFの文字を OCR で読む（遅い。既定は読まず、その分は検査不能になる）",
+    )
+    s.add_argument(
         "--no-ocr",
         action="store_true",
-        help="画像・画像PDFの OCR をしない（その分は検査不能になる）",
+        help="OCR をしない（既定。前の版の打ち方のために残している。--ocr より優先）",
     )
     s.add_argument(
         "--deep-image-sweep",

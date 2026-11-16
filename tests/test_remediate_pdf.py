@@ -454,9 +454,9 @@ def test_pdf_redact_blanks_the_image_pixels_for_text_found_by_ocr(tmp_path):
     p = build_scanned_pdf(tmp_path)
     before = render_ocr_text(p)
     assert "example.com" in before and "keep this" in before  # 陽性対照
-    got = remediate.collect_task({"path": str(p), "options": ScanOptions(temp_dir=str(tmp_path))})
+    got = remediate.collect_task({"path": str(p), "options": ScanOptions(temp_dir=str(tmp_path), ocr=True)})
     assert got["layout"] == "pdf" and {k[0] for k in got["positions"]} == {"1ページ（OCR）"}
-    svc, store, job = make_service(tmp_path, [p])
+    svc, store, job = make_service(tmp_path, [p], ocr=True)  # OCR を切ったジョブでは位置が取れず書き換えられない
     pv = analyze(svc, job, p) and svc.preview(job, str(p), {"method": "redact", "confidences": ALL_RANKS})
     assert any("OCR" in w for w in pv["warnings"] + pv["notes"])
     r = run(svc, job, p, method="redact", confidences=ALL_RANKS)

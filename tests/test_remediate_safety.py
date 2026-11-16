@@ -688,6 +688,21 @@ def test_embedded_file_scan_uses_the_job_temp_dir(tmp_path, monkeypatch):
     assert seen and all(Path(s).is_relative_to(work) for s in seen), seen
 
 
+def test_embedded_file_scan_reads_images_with_ocr(monkeypatch):
+    """検査の既定で OCR を切っても、埋め込みの画像に残った値を見落とさないよう、確かめは OCR で読む。"""
+    seen: list[bool] = []
+    real_scan = engine.scan_file
+
+    def spy(path, options, book):
+        seen.append(options.ocr)
+        return real_scan(path, options, book)
+
+    monkeypatch.setattr(engine, "scan_file", spy)
+    res = remedy_common.Residue(values=(), types={"email"}, ranks={3, 2, 1})
+    res.embedded_has_pii(b"no pii here", "memo.txt")
+    assert seen == [True]
+
+
 def test_delete_succeeds_with_a_note_when_the_record_cannot_be_added(tmp_path, monkeypatch, trash):
     """ファイルを消したあとに記録の追加が失敗しても、「変わっていません」とは出さず、削除したことと記録を残せなかったことを知らせる。"""
     p = make_csv(tmp_path)

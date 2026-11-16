@@ -315,3 +315,35 @@ def test_app_url_carries_dropped_paths():
     q = parse_qs(urlparse(app_url(1234, "tok", [r"D:\共有 1", r"\nas01\総務&経理"])).query)
     assert q["token"] == ["tok"] and q["root"] == [r"D:\共有 1", r"\nas01\総務&経理"]
     assert "root" not in parse_qs(urlparse(app_url(1234, "tok")).query)
+
+
+def _scan_options(monkeypatch, tmp_path, *flags):
+    """scan の引数から作られる ScanOptions の中身を取る（検査は始めない）。"""
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake(**kw):
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(cli, "ScanOptions", fake)
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    try:
+        cli.main(["--db", str(tmp_path / "j.sqlite3"), "scan", str(root), *flags])
+    except Stop:
+        pass
+    return seen
+
+
+def test_ocr_is_off_by_default(monkeypatch, tmp_path):
+    """画像の文字読み取りは遅いので既定は切る（使い手の決定）。--ocr で入れ、--no-ocr は前の版の打ち方として残す。"""
+    from pii_checker.models import ScanOptions
+
+    assert ScanOptions().ocr is False
+    assert _scan_options(monkeypatch, tmp_path)["ocr"] is False
+    assert _scan_options(monkeypatch, tmp_path, "--ocr")["ocr"] is True
+    assert _scan_options(monkeypatch, tmp_path, "--no-ocr")["ocr"] is False
+    assert _scan_options(monkeypatch, tmp_path, "--ocr", "--no-ocr")["ocr"] is False

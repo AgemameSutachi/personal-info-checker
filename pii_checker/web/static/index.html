@@ -94,8 +94,8 @@
           <label class="inline-check"><input type="checkbox" id="show-secret"> 入力内容を表示</label></p>
         <details class="advanced">
           <summary>詳しい設定<span id="adv-note" class="adv-note"></span></summary>
-          <label class="check"><input type="checkbox" id="opt-ocr" checked> 画像とスキャンした PDF の文字を OCR で読む</label>
-          <p id="ocr-warn" class="help warn hidden">OCR を使わないと、画像やスキャンした PDF は「検査できなかった」扱いになり、「個人情報は無い」と言い切れなくなります。</p>
+          <label class="check"><input type="checkbox" id="opt-ocr"> 画像とスキャンした PDF の文字を OCR で読む <small>（遅い。既定は読まない）</small></label>
+          <p id="ocr-warn" class="help warn">OCR を使わないと、画像やスキャンした PDF は「検査できなかった」扱いになり、「個人情報は無い」と言い切れなくなります。</p>
           <label class="check"><input type="checkbox" id="opt-reuse" checked> 前回から変わっていないファイルは前回の結果を使う <small>（速い。外すと全部読み直す）</small></label>
           <label class="check"><input type="checkbox" id="opt-deep"> ディスクイメージの空き領域（削除されたファイル）も調べる <small>（時間がかかる）</small></label>
           <div class="grid2">

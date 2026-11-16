@@ -5,7 +5,8 @@
   開いたまま残らない）。
 - 同じ Job で1プロセスあたりのメモリに上限を掛ける。大きすぎるファイルはそのファイルだけ「メモリ不足」で
   検査不能になり、他のワーカーや画面・結果の保存を巻き込まない。
-- ワーカー数は CPU の数だけでなく空きメモリからも決める（上限×ワーカー数が空きの7割に収まるように）。
+- ワーカー数は CPU の数だけでなく空きメモリからも決める（大きなファイルの本数分の上限と、残りのワーカーの
+  ふつうの使用量の合計が空きの7割に収まるように）。
 """
 
 from __future__ import annotations
@@ -15,6 +16,14 @@ import os
 GB = 1024**3
 MIN_LIMIT = int(1.5 * GB)
 MAX_LIMIT = 4 * GB
+# 自動で決めるワーカー数の上限（16 コアの PC で、小さなファイルは 12 本まで本数どおりに速くなった）
+MAX_AUTO_WORKERS = 12
+# 上限まで使いうる大きなファイルを同時に配る本数（runner.BIG_FILE_CONCURRENCY と同じ）
+FULL_LIMIT_WORKERS = 2
+# 大きなファイルを FULL_LIMIT_WORKERS 本配るのはワーカーがこの本数以上のとき（runner もこの値を使う・それ未満は1本ずつ）
+FULL_LIMIT_MIN_WORKERS = 4
+# 大きなファイル以外のワーカーが使うメモリの見込み（実測の 0.5GB 前後に倍の余裕を取る）
+TYPICAL_WORKER_BYTES = 1 * GB
 
 _job_handle = None  # ワーカーが生きている間は閉じない（閉じると自分ごと終わる）
 
@@ -56,11 +65,30 @@ def per_worker_limit(total: int | None = None) -> int:
 
 
 def plan_workers(requested: int | None = None) -> tuple[int, int]:
-    """(ワーカー数, 1ワーカーのメモリ上限) を決める。指定があっても空きメモリで収まる数までにする。"""
-    cpu = max(1, min(8, (os.cpu_count() or 2) - 1))
+    """(ワーカー数, 1ワーカーのメモリ上限) を決める。指定があっても空きメモリで収まる数までにする。
+
+    上限は暴走を止めるためのもので、ふつうのワーカーはその1割ほどしか使わない（1〜100MB のファイル
+    300 件の測定で、12本の合計が最大 5.8GB＝1本あたりの平均で約 0.5GB。1本ごとの最大ではない）。
+    上限まで使いうる大きなファイルは同時に FULL_LIMIT_WORKERS 本までに絞って配るので、その分だけ上限を丸ごと
+    見込み、残りは TYPICAL_WORKER_BYTES で見込む。大きな書庫の区切りも、ふつうのワーカーと同じく
+    TYPICAL_WORKER_BYTES で見込んでいる（区切りごとのメモリはまだ測っていない）。
+    """
+    cpu = max(1, min(MAX_AUTO_WORKERS, (os.cpu_count() or 2) - 1))
     total, avail = memory_status()
     limit = per_worker_limit(total)
-    by_memory = max(1, int(avail * 0.7) // limit) if avail else cpu
+    if avail:
+        budget = int(avail * 0.7)
+        # runner は FULL_LIMIT_MIN_WORKERS 本以上のときだけ大きなファイルを FULL_LIMIT_WORKERS 本配り、それ未満なら1本ずつ
+        many = FULL_LIMIT_WORKERS + max(0, budget - FULL_LIMIT_WORKERS * limit) // TYPICAL_WORKER_BYTES
+        if budget >= FULL_LIMIT_WORKERS * limit and many >= FULL_LIMIT_MIN_WORKERS:
+            by_memory = many
+        elif budget >= limit:
+            few = 1 + (budget - limit) // TYPICAL_WORKER_BYTES
+            by_memory = min(few, FULL_LIMIT_MIN_WORKERS - 1)
+        else:
+            by_memory = 1
+    else:
+        by_memory = cpu
     want = requested or cpu
     return max(1, min(want, by_memory)), limit
 

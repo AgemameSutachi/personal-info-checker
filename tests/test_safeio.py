@@ -226,3 +226,149 @@ def test_server_that_updates_access_time_is_reported(tmp_path, monkeypatch):
     # 陽性対照: 手元の NTFS では保てる
     info = safeio.snapshot(src, str(tmp_path / "d.bin"), str(tmp_path))
     assert info.atime_kept is True and info.atime_lost_reason == ""
+
+
+def test_unknown_disk_space_does_not_block(tmp_path, monkeypatch):
+    """空き容量を問い合わせられないドライブ（一部の共有など）では、空きは分からないものとして写しを止めない。"""
+
+    def no_usage(folder):
+        raise OSError(1, "not supported")
+
+    monkeypatch.setattr(safeio.shutil, "disk_usage", no_usage)
+    assert safeio.free_bytes(str(tmp_path)) == 1 << 62
+    assert safeio.reserve_bytes(str(tmp_path)) == safeio.MIN_FREE_BYTES
+    safeio.ensure_free(str(tmp_path), 10 * 1024**3)  # 断らない
+    src = _make(tmp_path)
+    info = safeio.snapshot(src, str(tmp_path / "c"), str(tmp_path))
+    assert info.size == os.path.getsize(src)
+
+
+def _deny_write_attributes(monkeypatch):
+    """属性を書く権限が無い開き方（読み取り専用の共有など）を作る。読み取りだけなら開ける。"""
+    real = safeio._open_handle
+
+    def opener(path, access, flags):
+        if access & safeio.FILE_WRITE_ATTRIBUTES:
+            raise PermissionError(5, "アクセスが拒否されました")
+        return real(path, access, flags)
+
+    monkeypatch.setattr(safeio, "_open_handle", opener)
+
+
+def test_no_write_attribute_permission_is_reported(tmp_path, monkeypatch):
+    """属性を書けない場所では読み取りだけで開いて検査し、最終アクセス日時は「権限が無く保てなかった」と記録する。"""
+    data = os.urandom(5000)
+    src = _make(tmp_path, data)
+    _deny_write_attributes(monkeypatch)
+    info = safeio.snapshot(src, str(tmp_path / "c"), str(tmp_path))
+    assert info.atime_kept is False and info.atime_lost_reason == "no_permission"
+    assert (tmp_path / "c").read_bytes() == data
+    small = safeio.read_small(src, 1 << 20)
+    assert small is not None and small[1] == data
+    assert small[0].atime_kept is False and small[0].atime_lost_reason == "no_permission"
+    hashed = safeio.hash_file(src)
+    assert hashed.sha256 == hashlib.sha256(data).hexdigest() and hashed.atime_lost_reason == "no_permission"
+    monkeypatch.undo()
+    # 陽性対照: 属性を書けるときは保てる
+    info = safeio.snapshot(src, str(tmp_path / "d"), str(tmp_path))
+    assert info.atime_kept is True and info.atime_lost_reason == ""
+
+
+def test_read_head_shared_reads_only_the_head_and_closes(tmp_path):
+    """隣のファイルの先頭だけを読む。読み終えたら閉じている（共有なしで開き直せる）。"""
+    data = os.urandom(10_000)
+    src = _make(tmp_path, data)
+    assert safeio.read_head_shared(src, 100) == data[:100]
+    assert safeio.read_head_shared(src, 1 << 20) == data
+    safeio._k32.CloseHandle(_hold_exclusive(src))  # 開いたままなら共有なしでは開けない
+
+
+def test_read_small_gives_up_when_file_grows_while_reading(tmp_path, monkeypatch):
+    """読む前は小さかったのに読む間に limit を超えたら、読み直さずにすぐ None（写すほうで扱う）。"""
+    src = _make(tmp_path, b"x" * 5000)
+    real = safeio._handle_info
+    calls = {"n": 0}
+
+    def small_before(h):
+        info = real(h)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            info.size = 10  # 読む前は 10 バイトだった
+        return info
+
+    monkeypatch.setattr(safeio, "_handle_info", small_before)
+    assert safeio.read_small(src, 100) is None
+    assert calls["n"] == 2  # 1回読んだだけで諦めた（読み直して同じファイルを何度も読まない）
+    monkeypatch.undo()
+    # 陽性対照: 大きくならなければ読める
+    got = safeio.read_small(src, 10_000)
+    assert got is not None and got[1] == b"x" * 5000
+
+
+def test_hash_file_does_not_read_cloud_placeholder(tmp_path, monkeypatch):
+    """クラウドの代替ファイルは中身を読まず None（読むとダウンロードが起きる）。呼び戻してよいときだけ読む。"""
+    src = _make(tmp_path)
+    real_info = safeio._handle_info
+    real_read = safeio._read_chunk
+    reads = []
+
+    def offline(h):
+        info = real_info(h)
+        info.attributes |= safeio.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        return info
+
+    def counting(h, buf):
+        reads.append(1)
+        return real_read(h, buf)
+
+    monkeypatch.setattr(safeio, "_handle_info", offline)
+    monkeypatch.setattr(safeio, "_read_chunk", counting)
+    assert safeio.hash_file(src) is None
+    assert reads == []
+    # 陽性対照: 呼び戻してよいと言われたときは読む
+    assert safeio.hash_file(src, allow_recall=True).sha256 == hashlib.sha256(b"abc" * 1000).hexdigest()
+    assert reads
+
+
+def test_hash_file_changed_while_reading(tmp_path, monkeypatch):
+    """読む間に書き換えられ続けたら、読み直しを重ねたうえで ChangedWhileReading。"""
+    src = _make(tmp_path)
+    real = safeio._handle_info
+    calls = {"n": 0}
+
+    def flaky(h):
+        info = real(h)
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:  # 読み終えた後の情報だけ毎回ずらす
+            info.mtime_ns += 1
+        return info
+
+    monkeypatch.setattr(safeio, "_handle_info", flaky)
+    with pytest.raises(safeio.ChangedWhileReading):
+        safeio.hash_file(src)
+    assert calls["n"] == 6  # 3回読んで3回とも変わっていた
+
+
+def test_is_network_lost_sees_wrapped_cause():
+    """接続方式の回線断（NetworkLost）は、ほかの例外に包まれていても回線断と分かる。"""
+    assert safeio.is_network_lost(safeio.NetworkLost("切れた"))
+    try:
+        try:
+            raise safeio.NetworkLost("切れた")
+        except safeio.NetworkLost as inner:
+            raise safeio.SourceError("読めなかった") from inner
+    except safeio.SourceError as outer:
+        assert safeio.is_network_lost(outer)
+    gone = OSError()
+    gone.winerror = 2  # ファイルが無い（回線断ではない）
+    assert not safeio.is_network_lost(gone)
+    assert not safeio.is_network_lost(safeio.SourceError("ほかの理由"))
+
+
+def test_file_id_128_of_missing_file_is_empty(tmp_path):
+    """開けないファイルの 128bit の ID は空（呼び出し側は 64bit の識別子に戻す）。開けるファイルは「ボリューム-ID」の形。"""
+    assert safeio.file_id_128(str(tmp_path / "missing.bin")) == ""
+    fid = safeio.file_id_128(_make(tmp_path))
+    if not fid:
+        pytest.skip("このドライブは 128bit のファイル ID を返さない（FAT など）")
+    assert [len(p) for p in fid.split("-")] == [16, 32]

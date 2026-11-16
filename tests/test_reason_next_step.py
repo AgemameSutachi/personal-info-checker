@@ -176,6 +176,37 @@ def test_ocr_off_image_reason_names_setting(tmp_path):
     assert "をオンにして再検査してください。コマンドの版は --ocr を付けます" in item.reason, item.reason
 
 
+def test_ocr_off_docx_thumbnail_reason_says_what_it_is(tmp_path):
+    """docx の中の縮小画像（docProps/thumbnail）は、何の画像かを理由の先頭に書く。ほかの画像には付けない。"""
+    import io
+    import zipfile
+
+    import docx
+    from PIL import Image
+
+    from pii_checker.formats.office import THUMBNAIL_NOTE
+
+    src = tmp_path / "src.docx"
+    d = docx.Document()
+    d.add_paragraph("会議の議題")
+    d.save(src)
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 200), "white").save(buf, "JPEG")
+    p = tmp_path / "thumb.docx"
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(p, "w") as zout:
+        for info in zin.infolist():
+            if info.filename != "docProps/thumbnail.jpeg":  # python-docx の雛形の縮小画像は小さいので差し替える
+                zout.writestr(info, zin.read(info.filename))
+        zout.writestr("docProps/thumbnail.jpeg", buf.getvalue())
+        zout.writestr("word/media/image9.jpeg", buf.getvalue())
+    items = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=False)).items
+    by_name = {i.path.rsplit("!", 1)[-1]: i for i in items}
+    thumb, media = by_name["docProps/thumbnail.jpeg"], by_name["word/media/image9.jpeg"]
+    assert thumb.status == Status.UNCHECKABLE and thumb.reason.startswith(THUMBNAIL_NOTE), thumb.reason
+    assert "OCR を無効にして実行したため" in thumb.reason
+    assert media.status == Status.UNCHECKABLE and THUMBNAIL_NOTE not in media.reason, media.reason
+
+
 def test_ocr_off_pdf_reason_names_setting(tmp_path):
     """画像だけの PDF を OCR なしで検査したときも、同じ手を出す。"""
     import io

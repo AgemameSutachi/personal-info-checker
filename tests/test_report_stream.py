@@ -35,6 +35,37 @@ def _scan_folder(tmp_path):
     return store, store.jobs()[0]["id"], out
 
 
+def test_excel_file_sheet_is_sorted_by_risk_and_keeps_counts(tmp_path):
+    """「ファイル別」は危険度の高い順（同じ危険度の中はパスの順）に並び、危険度ごとに読んでも種類別の件数がずれない。"""
+    store, job_id, out = _scan_folder(tmp_path)
+    ws = load_workbook(out)["ファイル別"]
+    assert ws.freeze_panes == "B2"
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    order = {"高": 0, "中": 1, "低": 2}
+    keys = [(order.get(r[2] or "", 3), r[0]) for r in rows]
+    assert keys == sorted(keys)
+    assert {r[2] for r in rows} >= {"中", "なし"}  # 2つ以上の組が混じっていること（並べ替えの陽性対照）
+    head = [c.value for c in ws[1]]
+    phone = head.index(PII_TYPES["phone"])
+    for r in rows:
+        want = sum(
+            json.loads(x["counts"]).get("phone", 0)
+            for x in store.query("SELECT counts FROM items WHERE job_id=? AND top_path=?", (job_id, r[0]))
+        )
+        assert (r[phone] or 0) == want, r[0]
+
+
+def test_excel_verdict_sheet_puts_next_step_first_and_wraps(tmp_path):
+    """「判定」は総合判定のすぐ下に「次にすること」を置き、長い文（B 列）と「要対応」の理由を折り返す。"""
+    _, _, out = _scan_folder(tmp_path)
+    wb = load_workbook(out)
+    ws = wb["判定"]
+    assert ws["A2"].value == "次にすること" and ws["B2"].value
+    assert ws["B2"].alignment.wrap_text
+    notes = [c for c in ws["B"] if isinstance(c.value, str) and c.value.startswith("「確度」は")]
+    assert notes and notes[0].alignment.wrap_text
+
+
 def test_counts_by_top_matches_whole_dict(tmp_path):
     """ファイルごとの件数を、全ファイル分の辞書で数えたときと同じに返す（呼ばれないファイルが挟まっても崩れない）。"""
     store, job_id, _ = _scan_folder(tmp_path)

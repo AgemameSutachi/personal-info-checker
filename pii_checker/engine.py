@@ -46,7 +46,8 @@ TEMP_PREFIX = "piichk_"  # 一時フォルダの名前の頭（片付けの目�
 OWNER_MARK = "_owner.lock"  # 一時フォルダの持ち主が開いたままにする目印のファイル
 # OCR を切って検査したときの次の手（画面の項目名と、コマンドの版の引数）
 OCR_OFF_HINT = (
-    "「画像とスキャンした PDF の文字を OCR で読む」をオンにして再検査してください。コマンドの版は --ocr を付けます"
+    "目で見て確かめるか、画面の「詳しい設定」の「画像とスキャンした PDF の文字を OCR で読む」をオンにして"
+    "再検査してください。コマンドの版は --ocr を付けます"
 )
 # 一時フォルダの空きが足りないときの次の手
 TEMP_DIR_HINT = (
@@ -148,6 +149,30 @@ def _securities_name_columns(headers) -> set[int]:
 COLUMN_ORG_PREFETCH_ROWS = 2000
 COLUMN_ORG_PREFETCH_CHARS = 4_000_000
 HEADER_NAME_RULE = "列見出しが「氏名」の列の値"
+HEADER_COLUMN_RULE_PREFIX = "列見出しが「"
+# 列見出しで拾った値の中の数字の並びを、読み直しで同じ値と見なす最短の桁数（短い数は別の値と重なりやすい）
+HEADER_DIGITS_MIN = 6
+_RE_DIGIT_RUN = re.compile(r"\d+")
+
+
+def header_digit_keys(pii_type: str, value: str) -> list[int]:
+    """列見出しで拾ったセル丸ごとの値から、読み直しで同じ値と見なす (種類, 数字の並び) の hash を作る。
+
+    「三菱UFJ銀行 新宿支店 普通 1234567」のセルは列見出しで丸ごと1件になるが、xlsx のシートの XML の読み直しでは
+    「口座の語＋7桁」で「1234567」だけを拾い、別の値として二重に数えていた（2026-11-16・レポートの評価）。
+    数字の並びごとと、つないだ全体の両方を覚える（「090-1234-5678」は「09012345678」で引く）。
+    """
+    runs = _RE_DIGIT_RUN.findall(value)
+    keys = {"".join(runs)} | set(runs)
+    return [hash((pii_type, k)) for k in keys if len(k) >= HEADER_DIGITS_MIN]
+
+
+def hit_digit_key(pii_type: str, value: str) -> int | None:
+    """読み直しで拾った値の (種類, 数字だけ) の hash（header_digit_keys と突き合わせる）。桁が足りなければ None。"""
+    digits = "".join(_RE_DIGIT_RUN.findall(value))
+    return hash((pii_type, digits)) if len(digits) >= HEADER_DIGITS_MIN else None
+
+
 # 前に「品番」などの語があり、型番とみなして 低 にした検出の規則に detectors が足す注（読み直しで引き上げない値の印）
 MODEL_NUMBER_NOTE = "型番などの番号とみなした"
 # 表の形で確度を 低 に下げたときに、明細の「検出規則」の末尾へ足す注（なぜ 低 なのかを使い手が引けるように）
@@ -357,6 +382,8 @@ class Collector:
     # 見出しの語や、値の前の「品番」などの語で型番とみなし 低 にした (種類, 値) の hash。xlsx のシートの XML の読み直しでは見出しが
     # 分からず 中 に見えるので、ここで見て引き上げない（「伝票番号,品番,数量」の表の品番が 中 に戻っていた・2026-11-08）
     model_seen: set = field(default_factory=set)
+    # 列見出しで拾ったセル丸ごとの値の中の数字の並び（header_digit_keys）。読み直しで同じ数字だけを拾っても数えない
+    header_digits_seen: set = field(default_factory=set)
     # ファイル全体の異なる値を集める先（種類 → {正規化した値の hash → 見た最も高い確度の順位}）。ScanContext が渡す
     distinct_sink: dict | None = None
     # CHECKPOINT_EVERY 回の add_text ごとに呼ぶ（ScanContext が途中経過を書き出す。巨大なファイルの時間切れで検出を失わない）
@@ -522,8 +549,15 @@ class Collector:
             if raw or skip_seen:
                 if prev is not None and key in self.model_seen:
                     continue  # 表で型番とみなした値を、見出しの分からない読み直しで引き上げない（数えもしない）
-            elif MODEL_NUMBER_NOTE in hit.rule and len(self.model_seen) < SEEN_LIMIT:
-                self.model_seen.add(key)
+                if prev is None and self.header_digits_seen:
+                    dkey = hit_digit_key(hit.pii_type, hit.value)
+                    if dkey is not None and dkey in self.header_digits_seen:
+                        continue  # 列見出しで丸ごと拾ったセルの中の番号を、読み直しで別の値として数えない
+            else:
+                if MODEL_NUMBER_NOTE in hit.rule and len(self.model_seen) < SEEN_LIMIT:
+                    self.model_seen.add(key)
+                if hit.rule.startswith(HEADER_COLUMN_RULE_PREFIX) and len(self.header_digits_seen) < SEEN_LIMIT:
+                    self.header_digits_seen.update(header_digit_keys(hit.pii_type, hit.value))
             if prev is not None:
                 self._maybe_upgrade(prev, hit, confidence, norm, location, location_fn, method, raw, key)
                 if raw or skip_seen:

@@ -978,7 +978,35 @@ def handle_tar(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, d
         item.method = f"tar を展開（{n:,}件）"
 
 
-class _GzipStream:
+class _BufferedExpand:
+    """少しずつ展開する読み手の共通部分。_fill で self._buf に足し、尽きたら self._done を立てる。"""
+
+    _buf: bytearray
+    _pos: int
+    _done: bool
+
+    def _fill(self) -> None:
+        raise NotImplementedError
+
+    def read(self, n: int = -1) -> bytes:
+        while not self._done and (n < 0 or len(self._buf) - self._pos < n):
+            self._fill()
+        end = len(self._buf) if n < 0 else min(len(self._buf), self._pos + n)
+        out = bytes(self._buf[self._pos : end])
+        self._pos = end
+        if self._pos > 8 * 1024 * 1024:  # 読み終えた分を捨てる（毎回丸ごと写さない）
+            del self._buf[: self._pos]
+            self._pos = 0
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _GzipStream(_BufferedExpand):
     """gzip を zlib で少しずつ展開する。途中で切れていても、そこまでに展開できた分は必ず返す。
 
     （gzip.open は終わりの印が無いと、直前まで展開した分ごと例外にしてしまう）連結した gzip にも対応する。
@@ -1024,22 +1052,80 @@ class _GzipStream:
             return
         self._pending = self._d.unused_data if self._d.eof else self._d.unconsumed_tail
 
-    def read(self, n: int = -1) -> bytes:
-        while not self._done and (n < 0 or len(self._buf) - self._pos < n):
-            self._fill()
-        end = len(self._buf) if n < 0 else min(len(self._buf), self._pos + n)
-        out = bytes(self._buf[self._pos : end])
-        self._pos = end
-        if self._pos > 8 * 1024 * 1024:  # 読み終えた分を捨てる（毎回丸ごと写さない）
-            del self._buf[: self._pos]
-            self._pos = 0
-        return out
 
-    def __enter__(self):
-        return self
+class _StreamExpand(_BufferedExpand):
+    """xz・lzma・bz2 を少しずつ展開する。途中で切れていても、そこまでに展開できた分は必ず返す。
 
-    def __exit__(self, *a):
-        return False
+    lzma.open・bz2.open は 1MB ずつまとめて展開して返すため、終わりの印が無いと、その回に
+    展開した分（小さいファイルなら全部）を例外とともに捨ててしまう。また lzma.open は、
+    xz の仕様で認められた末尾の詰め物（4 の倍数個のゼロのバイト）でも同じ例外になる。
+    連結したストリームは続けて読み、末尾の余分なバイトは無視する（lzma.open・bz2.open と同じ）。
+    """
+
+    CHUNK = 1024 * 1024
+    OUT_STEP = 4 * 1024 * 1024  # 1回の展開で出す最大量（圧縮爆弾でもメモリを食わない）
+
+    def __init__(self, f, new_decompressor, error_types: tuple, skip_zero_padding: bool = False):
+        self._f = f
+        self._new = new_decompressor
+        self._errors = error_types
+        self._skip_zero = skip_zero_padding
+        self._d = new_decompressor()
+        self._first = True  # 1つ目のストリームか（2つ目以降の頭が読めなければ末尾の余分として無視する）
+        self._got = False  # いまのストリームから何か展開できたか
+        self._buf = bytearray()
+        self._pos = 0
+        self._done = False
+        self.truncated = ""
+
+    def _next_stream(self) -> None:
+        rest = self._d.unused_data
+        while True:
+            if self._skip_zero:
+                rest = rest.lstrip(b"\x00")
+            if rest:
+                break
+            rest = self._f.read(self.CHUNK)
+            if not rest:
+                self._done = True  # 最後のストリームで終わっている
+                return
+        self._d, self._first, self._got = self._new(), False, False
+        self._decompress(rest)
+
+    def _decompress(self, data: bytes) -> None:
+        try:
+            out = self._d.decompress(data, self.OUT_STEP)
+        except self._errors as e:
+            if not self._first and not self._got:
+                self._done = True  # 末尾の余分なバイトは無視する
+            else:
+                self.truncated = f"圧縮データが壊れている: {e}"
+                self._done = True
+            return
+        if out:
+            self._got = True
+            self._buf += out
+
+    def _fill(self) -> None:
+        if self._d.eof:
+            self._next_stream()
+        elif not self._d.needs_input:
+            self._decompress(b"")  # 展開しきれていない入力の続き
+        else:
+            raw = self._f.read(self.CHUNK)
+            if not raw:
+                self.truncated = "圧縮データの終わりの印が無い（途中で切れている）"
+                self._done = True
+                return
+            self._decompress(raw)
+
+
+def _xz_open(f):
+    return _StreamExpand(f, lambda: lzma.LZMADecompressor(), (lzma.LZMAError,), skip_zero_padding=True)
+
+
+def _bz2_open(f):
+    return _StreamExpand(f, bz2.BZ2Decompressor, (OSError, ValueError))
 
 
 class _LzipReader:
@@ -1124,7 +1210,7 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
     if head.startswith(b"\x1f\x8b"):
         opener, suffixes = _GzipStream, (".gz", ".gzip", ".tgz", ".z")
     elif head.startswith(b"BZh"):
-        opener, suffixes = bz2.open, (".bz2", ".tbz", ".tbz2")
+        opener, suffixes = _bz2_open, (".bz2", ".tbz", ".tbz2")
     elif head.startswith(b"\x28\xb5\x2f\xfd"):
         try:
             import zstandard
@@ -1158,7 +1244,7 @@ def handle_single_compressed(ctx: ScanContext, blob: Blob, item: ItemResult, col
     elif head.startswith(b"LZIP"):
         opener, suffixes = _lzip_open, (".lz", ".tlz")
     else:
-        opener, suffixes = lzma.open, (".xz", ".txz", ".lzma")
+        opener, suffixes = _xz_open, (".xz", ".txz", ".lzma")
     name = Path(blob.name_hint or blob.display).name
     for s in suffixes:
         if name.lower().endswith(s):

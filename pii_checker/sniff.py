@@ -310,6 +310,8 @@ def sniff(blob: Blob) -> str:
         return "wim"
     if len(head) >= 0x8006 and head[0x8001:0x8006] == b"CD001":
         return "iso"
+    if ext == ".lzma" and _looks_like_lzma_alone(head):
+        return "xz"
     # Excel 2.x〜4.0 は OLE ではなく BIFF レコードがそのまま並ぶ
     if head[:2] in (b"\x09\x00", b"\x09\x02", b"\x09\x04") and ext in (".xls", ".xlw", ".xlc", ""):
         return "xls_biff_legacy"
@@ -415,6 +417,23 @@ def _is_pyinstaller_archive(blob: Blob) -> bool:
     except OSError:
         return False
     return tail.startswith(PYINSTALLER_COOKIE) and int.from_bytes(tail[8:12], "big") == size
+
+
+def _looks_like_lzma_alone(head: bytes) -> bool:
+    """見出しの印の無い旧い LZMA（.lzma）か。
+
+    性質の1バイト・辞書の大きさ・元の大きさ（不明なら全部 FF）の並びを見たうえで、先頭を実際に展開してみる
+    （印が無いので、並びだけでは拡張子の付け違えたほかのファイルと見分けられない）。
+    """
+    if len(head) < 13 or head[0] >= 225 or not (head[5:13] == b"\xff" * 8 or head[12] == 0):
+        return False
+    import lzma
+
+    try:
+        out = lzma.LZMADecompressor(lzma.FORMAT_ALONE).decompress(head, 4096)
+    except lzma.LZMAError:
+        return False
+    return bool(out) or len(head) < 64  # 中身がごく小さいものは出る前に head が尽きる
 
 
 def _looks_like_icon(head: bytes, size: int | None) -> bool:

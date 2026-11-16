@@ -735,7 +735,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="レポート（.xlsx）の出力先（既定はドキュメント。検査するフォルダの中は指定できない）",
     )
     s.add_argument("--csv", action="store_true", help="CSV も出す")
-    s.add_argument("--workers", type=int, help="同時に検査するファイル数（既定: CPU数-1、最大8）")
+    s.add_argument(
+        "--workers",
+        type=int,
+        help="同時に検査するファイル数（既定: CPU数-1、最大12。空きメモリが少なければ減らす）",
+    )
     s.add_argument(
         "--timeout",
         type=int,

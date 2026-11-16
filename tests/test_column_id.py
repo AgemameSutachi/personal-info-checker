@@ -278,6 +278,29 @@ def test_xlsx_values_are_not_counted_twice(tmp_path):
     assert item.finding_counts.get("phone", 0) == 1, item.finding_counts
 
 
+def test_xlsx_number_inside_header_cell_is_not_counted_twice(tmp_path):
+    """列見出しで丸ごと拾ったセル（銀行名・支店・番号）の中の番号を、XML の読み直しで別の値として数えない。"""
+    item = _scan_xlsx(
+        tmp_path,
+        [
+            ["氏名", "口座"],
+            ["架空太郎", "三菱UFJ銀行 新宿支店 普通 1234567"],
+            ["架空花子", "ゆうちょ 記号10120 番号12345671"],
+        ],
+    )
+    assert item.finding_counts.get("bank_account", 0) == 2, item.finding_counts
+    assert item.distinct_counts.get("bank_account:high", 0) == 2, item.distinct_counts
+
+
+def test_reread_still_counts_other_number_than_header_cell():
+    """陽性対照: 列見出しのセルに無い番号は、読み直しでも今までどおり数える。"""
+    item = ItemResult(path="t", kind="", status=Status.PENDING)
+    col = Collector(item, 20)
+    col.add_table([["氏名", "口座"], ["架空太郎", "三菱UFJ銀行 新宿支店 普通 1234567"]], lambda r, c: f"R{r}C{c + 1}")
+    col.add_lines("口座番号 7654321", location_prefix="sheet1.xml ", skip_seen=True)
+    assert item.finding_counts.get("bank_account", 0) == 2, item.finding_counts
+
+
 def test_docx_values_are_not_counted_twice(tmp_path):
     """docx も、本文として読んだ値を document.xml の読み直しでもう一度数えない。"""
     import docx

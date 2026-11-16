@@ -34,6 +34,12 @@ CONF_LABELS = {c.value: c.label for c in Confidence}
 STATUS_JA = {s.value: label for s, label in STATUS_LABELS.items()}
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
+# 理由・対処などの長い文の列は折り返す（折り返さないと右の列に隠れ、後ろの「〜してください」が読めない）
+WRAP = Alignment(wrap_text=True, vertical="top")
+NEXT_STEP_FILL = PatternFill("solid", fgColor="DDEBF7")
+# ファイル別の表の並び（危険度の高い順。None は残り全部＝「なし」・未検査）と塗り
+FILE_RISK_ORDER = ("高", "中", "低", None)
+FILE_RISK_FILL = {"高": "F8CBAD", "中": "FCE4D6", "低": "FFF2CC"}
 LEVEL_FILL = {
     "found": "F8CBAD",
     "undetermined": "FFE699",
@@ -65,14 +71,16 @@ def _display_width(text: str) -> int:
     return sum(2 if ord(c) > 0x2E7F else 1 for c in str(text))
 
 
-def _sheet(wb, name: str, widths: list[int], header_row: int = 1):
+def _sheet(wb, name: str, widths: list[int], header_row: int = 1, wrap_cols: tuple[int, ...] = ()):
     """表のシート: 列幅・見出し行の固定を先に決める（書き込み専用モードでは行を足す前に設定する）。
 
     header_row は見出しの行（表の上に要約などを置くときは 2 以上。その行までは _row でなく ws.append で書く）。
+    wrap_cols は折り返す列の番号（1始まり。理由・対処など長い文の列）。
     """
     from openpyxl.utils import get_column_letter
 
     ws = wb.create_sheet(name)
+    ws._piichk_wrap = frozenset(wrap_cols)
     ws._piichk_widths = {}
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -115,13 +123,17 @@ def _row(ws, values, bold=False, fill=None):
             if need > ws._piichk_widths.get(i, 0):
                 ws.column_dimensions[get_column_letter(i)].width = need
     cells = []
-    for v in values:
+    wrap = getattr(ws, "_piichk_wrap", frozenset())
+    for i, v in enumerate(values, start=1):
         c = WriteOnlyCell(ws, value=_safe(v))
         if bold:
             c.font = HEADER_FONT
             c.fill = HEADER_FILL
-        elif fill:
-            c.fill = PatternFill("solid", fgColor=fill)
+        else:
+            if fill:
+                c.fill = PatternFill("solid", fgColor=fill)
+            if i in wrap:
+                c.alignment = WRAP
         cells.append(c)
     ws.append(cells)
     if hasattr(ws, "_piichk_rows"):
@@ -223,6 +235,10 @@ def reading_notes(job: dict) -> list[str]:
     """レポートの読み方の注意（Excel と Web で同じ）。"""
     n = job["options"].get("max_samples_per_type", 20)
     return [
+        "「確度」は1件ずつの検出が本当に個人情報である見込み（高＞中＞低）。低 は形が似ているだけのことが多く、"
+        "低 だけのファイルは目で見て判断する。",
+        "「危険度」はファイルごとの扱いの重さ。高＝マイナンバー・カード・口座・要配慮個人情報などが確度 中以上である"
+        "（または確度 中以上が100件以上）、中＝確度 中の検出がある、低＝確度 低の検出だけ。",
         "検出値はマスクしてある（元の値はこのレポートにも DB にも残していない）。場所の欄で元ファイルの位置を示す。"
         "ファイルのパスと名前は伏せていない。",
         "「簡易検査」は形式を解釈できず文字として読める部分だけを見たもの。「対象外」は文字情報を持たない形式。",
@@ -284,14 +300,34 @@ def file_tail_cells(r) -> list:
     ]
 
 
-def _counts_by_top(store: Store, job_id: str):
+def _risk_cond(column: str) -> str:
+    """危険度の組（FILE_RISK_ORDER の1つ）で絞る SQL の条件。引数は _risk_args で渡す。"""
+    return f"(COALESCE({column}, '') = ? OR (? IS NULL AND COALESCE({column}, '') NOT IN ('高', '中', '低')))"
+
+
+def _risk_args(risk: str | None) -> tuple:
+    return (risk if risk is not None else "\x00", risk)
+
+
+_ALL_RISKS = object()
+
+
+def _counts_by_top(store: Store, job_id: str, risk=_ALL_RISKS):
     """ファイルごとの種類別の件数を、ファイルの並び（top_path の昇順）に合わせて少しずつ返す関数を作る。
 
     全ファイル分の辞書を持たないよう、項目も top_path の昇順で読み、呼ばれたファイルまで読み進めて足し合わせる。
+    risk を渡すと、その危険度の組（FILE_RISK_ORDER の1つ。None は 高・中・低 以外の残り全部）のファイルだけを読む。
     """
-    rows = store.iter_query(
-        "SELECT top_path, counts FROM items WHERE job_id=? AND counts != '{}' ORDER BY top_path", (job_id,)
-    )
+    if risk is _ALL_RISKS:
+        rows = store.iter_query(
+            "SELECT top_path, counts FROM items WHERE job_id=? AND counts != '{}' ORDER BY top_path", (job_id,)
+        )
+    else:
+        rows = store.iter_query(
+            "SELECT i.top_path, i.counts FROM items i JOIN files f ON f.job_id=i.job_id AND f.top_path=i.top_path "
+            f"WHERE i.job_id=? AND i.counts != '{{}}' AND {_risk_cond('f.risk')} ORDER BY i.top_path",
+            (job_id, *_risk_args(risk)),
+        )
     pending = [next(rows, None)]
 
     def counts_of(top_path: str) -> dict[str, int]:
@@ -326,25 +362,35 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     title.font = Font(bold=True, size=16)
     title.fill = PatternFill("solid", fgColor=LEVEL_FILL.get(v.level, "FFFFFF"))
     ws.append([title])
+
+    def wrapped(text, **style):
+        # B 列（幅 110）に収まらない長い文を、画面の外へ流さず折り返す
+        c = WriteOnlyCell(ws, value=_safe(text))
+        c.alignment = WRAP
+        for k, val in style.items():
+            setattr(c, k, val)
+        return c
+
+    if v.next_step:
+        # 最初の画面で何をすればよいかが目に入るよう、判定のすぐ下に置く
+        label = WriteOnlyCell(ws, value="次にすること")
+        label.font = Font(bold=True)
+        label.fill = NEXT_STEP_FILL
+        ws.append([label, wrapped(v.next_step, font=Font(bold=True), fill=NEXT_STEP_FILL)])
     ws.append([])
     for line in v.detail:
-        ws.append(["", _safe(line)])
-    ws.append([])
-    if v.next_step:
-        nxt = WriteOnlyCell(ws, value=_safe("次にすること: " + v.next_step))
-        nxt.font = Font(bold=True)
-        ws.append(["", nxt])
+        ws.append(["", wrapped(line)])
     ws.append([])
     _row(ws, ["項目", "値"], bold=True)
     diff = jobdiff.compute(store, job_id)
     for k, val in overview_rows(job, summary, diff):
-        ws.append([_safe(k), _safe(val)])
+        ws.append([_safe(k), wrapped(val)])
     ws.append([])
     for i, note in enumerate(reading_notes(job)):
-        ws.append(["読み方" if i == 0 else "", note])
+        ws.append(["読み方" if i == 0 else "", wrapped(note)])
 
     # 2. 要対応
-    ws = _sheet(wb, "要対応", [16, 80, 26, 70, 11])
+    ws = _sheet(wb, "要対応", [16, 80, 26, 70, 11], wrap_cols=(4,))
     _row(ws, ["区分", "パス", "形式", "理由・対処", "大きさ(KB)"], bold=True)
     order = {"needs_password": 0, "uncheckable": 1, "pending": 2, "partial": 3}
     for r in store.iter_query(
@@ -369,6 +415,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     # 3. ファイル別
     type_keys = list(PII_TYPES)
     ws = _sheet(wb, "ファイル別", [80, 12, 8, 10, 40, 12, 12, 40, 22] + [9] * len(type_keys) + [11, 19, 10, 14, 24, 30])
+    ws.freeze_panes = "B2"  # 右へ送ってもパスが見えるように（書き込み専用なので行を足す前に決める）
     _row(
         ws,
         ["パス", "最終状態", "危険度", "検出件数"]
@@ -378,19 +425,28 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
         + FILE_TAIL_HEADS,
         bold=True,
     )
-    counts_of = _counts_by_top(store, job_id)
-    for r in store.iter_query("SELECT * FROM files WHERE job_id=? ORDER BY top_path", (job_id,)):
-        c = counts_of(r["top_path"])
-        fill = {"高": "F8CBAD", "中": "FCE4D6", "低": "FFF2CC"}.get(r["risk"] or "")
-        _row(
-            ws,
-            [r["top_path"], STATUS_JA.get(r["worst_status"] or "pending", "未検査"), r["risk"] or "", r["n_findings"]]
-            + file_mark_cells(r)
-            + [c.get(k, "") for k in type_keys]
-            + [_size(r["size"]), _ts(r["mtime"]), round(r["elapsed"] or 0, 2)]
-            + file_tail_cells(r),
-            fill=fill,
-        )
+    # 危険度の高いものから見られるよう、危険度ごと（同じ危険度の中はパスの順）に並べる
+    for risk in FILE_RISK_ORDER:
+        counts_of = _counts_by_top(store, job_id, risk)
+        for r in store.iter_query(
+            f"SELECT * FROM files WHERE job_id=? AND {_risk_cond('risk')} ORDER BY top_path",
+            (job_id, *_risk_args(risk)),
+        ):
+            c = counts_of(r["top_path"])
+            _row(
+                ws,
+                [
+                    r["top_path"],
+                    STATUS_JA.get(r["worst_status"] or "pending", "未検査"),
+                    r["risk"] or "",
+                    r["n_findings"],
+                ]
+                + file_mark_cells(r)
+                + [c.get(k, "") for k in type_keys]
+                + [_size(r["size"]), _ts(r["mtime"]), round(r["elapsed"] or 0, 2)]
+                + file_tail_cells(r),
+                fill=FILE_RISK_FILL.get(r["risk"] or ""),
+            )
     _finish(ws)
 
     # 4. 前回との違い（同じ検査先を最後まで終えた前回の検査と比べる）。要約は表の上に置き、絞り込みの範囲に入れない
@@ -453,7 +509,7 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     _finish(ws)
 
     # 6. 全項目
-    ws = _sheet(wb, "全項目", [80, 24, 10, 50, 40, 40, 11, 19, 8, 9])
+    ws = _sheet(wb, "全項目", [80, 24, 10, 50, 40, 40, 11, 19, 8, 9], wrap_cols=(4, 6))
     _row(
         ws,
         ["パス", "形式", "状態", "理由", "読み方", "補足", "大きさ(KB)", "更新日時", "入れ子の深さ", "検出件数"],

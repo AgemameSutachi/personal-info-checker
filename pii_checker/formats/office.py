@@ -45,6 +45,9 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 SKIP_PARTS = re.compile(r"(^|/)(printerSettings|fonts?)/|\.(odttf|fntdata|ttf|otf)$", re.I)
 # 値を要素ごとに並べる部品（文書のプロパティ・ユーザー定義の XML・OpenDocument のメタ情報）
 PROPERTY_PARTS = re.compile(r"^(docProps|customXml)/|^meta\.xml$", re.I)
+# 文書の1ページ目・表紙の縮小画像（OOXML の docProps/thumbnail.*・OpenDocument の Thumbnails/thumbnail.png）
+THUMBNAIL_PART = re.compile(r"^(docProps/thumbnail|Thumbnails/thumbnail)\.\w+$", re.I)
+THUMBNAIL_NOTE = "文書の1ページ目の縮小画像（本文の文字は別に検査している）。"
 PPT_OBJECT_LIMIT = 512 * 1024**2  # PPT の埋め込みオブジェクトを展開してよい大きさ
 DEFAULT_OFFICE_PASSWORDS = ["VelvetSweatshop"]  # Excel の「読み取りパスワードなし」暗号化の既定値
 
@@ -116,7 +119,10 @@ def sweep_zip_parts(
             for s in iter_strings(data):
                 col.add_text(s, name, method="生データ走査", raw=raw_parts(name))
             continue
-        ctx.scan_nested(f"{blob.display}!{name}", data=data, depth=depth + 1, name_hint=name)
+        child = ctx.scan_nested(f"{blob.display}!{name}", data=data, depth=depth + 1, name_hint=name)
+        if child.status == Status.UNCHECKABLE and THUMBNAIL_PART.match(name):
+            # 使い手には「何の画像か」が分からないので、文書の表紙の縮小画像であることを先に書く
+            child.reason = THUMBNAIL_NOTE + child.reason
     return n
 
 

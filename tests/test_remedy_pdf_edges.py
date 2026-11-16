@@ -296,25 +296,91 @@ def test_clean_residue_clears_a_form_field_with_the_value(tmp_path):
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
     done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
-    # 数えることだけを見る。値が本当に消えたかは下の xfail の試験が見る
+    # 数えることだけを見る。値が本当に消えたかは下の試験が見る
     assert done["widgets"] == 1
     doc.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PyMuPDF は field_value を空文字にしても /V を書き換えない（空白 1 文字なら変わる）。本体 remedy_pdf の課題。"
-    "本体を直すか PyMuPDF の版が変わって XPASS になったら、この印を外す",
-)
-def test_clean_residue_really_empties_the_form_field_value(tmp_path):
-    """掃除が「消した」と数えた欄の値が、保存し直して読み直しても残っていないこと（今は残る）。"""
+def with_default_value(doc, xref: int) -> None:
+    """欄の既定値（/DV）にも同じ値を持たせる。"""
+    doc.xref_set_key(xref, "DV", f"({MAIL})")
+
+
+def with_parent_field(doc, xref: int) -> None:
+    """値を親のフィールドに持たせ、欄（ウィジェット）は親から値を継ぐ形にする。"""
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<< /FT /Tx /T (f1) /V ({MAIL}) /Kids [{xref} 0 R] >>")
+    doc.xref_set_key(xref, "Parent", f"{parent} 0 R")
+    doc.xref_set_key(xref, "V", "null")
+    doc.xref_set_key(xref, "T", "null")
+
+
+@pytest.mark.parametrize("shape", [None, with_default_value, with_parent_field], ids=["value", "default", "parent"])
+def test_clean_residue_really_empties_the_form_field_value(tmp_path, shape):
+    """掃除が「消した」と数えた欄の値が、本体と同じ保存（garbage=4）の後に、値にも見た目のストリームにも残らないこと。
+
+    PyMuPDF は field_value を空文字にしても /V を書き換えないので、本体は /V・/DV を親までたどって直に空にしている。
+    """
     p = make_pdf(tmp_path / "x.pdf", "plain")
     doc = reopen(p)
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
-    remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
-    doc = save_reopen(doc, tmp_path / "w2.pdf")
-    assert [w.field_value for w in doc[0].widgets()] == [""]
+    if shape:
+        shape(doc, next(doc[0].widgets()).xref)
+        doc = save_reopen(doc, tmp_path / "w1.pdf")
+    assert [w.field_value for w in doc[0].widgets()] == [MAIL]  # 形を変えても値が読めること
+    done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    assert done["widgets"] == 1
+    assert_no_mail_after_save(doc, tmp_path / "w2.pdf")
+
+
+def assert_no_mail_after_save(doc, out: Path, fields: int = 1) -> None:
+    """本体と同じ保存（garbage=4）の後、欄が fields 個とも残って値が空で、どのオブジェクト・ストリームにも値が残らないこと。"""
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+    doc = reopen(out)
+    try:
+        assert [w.field_value for page in doc for w in page.widgets()] == [""] * fields
+        for xref in range(1, doc.xref_length()):
+            assert MAIL not in doc.xref_object(xref)
+            if doc.xref_is_stream(xref):
+                assert MAIL.encode() not in (doc.xref_stream(xref) or b"")
+    finally:
+        doc.close()
+
+
+def test_clean_residue_empties_sibling_fields_on_other_pages(tmp_path):
+    """同じ親から値を継ぐ欄が2ページに分かれていても、どちらの見た目にも値が残らないこと。
+
+    1つ目の欄で親の値を空にすると2つ目の欄の値が読めなくなるので、当たる欄を先に集めておく必要がある。
+    """
+    doc = reopen(make_pdf(tmp_path / "x.pdf", "plain", "plain"))
+    add_text_widget(doc[0], MAIL)
+    add_text_widget(doc[1], MAIL)
+    doc = save_reopen(doc, tmp_path / "w.pdf")
+    kids = [next(doc[i].widgets()).xref for i in (0, 1)]
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<< /FT /Tx /T (f1) /V ({MAIL}) /Kids [{kids[0]} 0 R {kids[1]} 0 R] >>")
+    for kid in kids:
+        doc.xref_set_key(kid, "Parent", f"{parent} 0 R")
+        doc.xref_set_key(kid, "V", "null")
+        doc.xref_set_key(kid, "T", "null")
+    doc = save_reopen(doc, tmp_path / "w1.pdf")
+    assert [w.field_value for page in doc for w in page.widgets()] == [MAIL, MAIL]
+    done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    assert done["widgets"] == 2
+    assert_no_mail_after_save(doc, tmp_path / "w2.pdf", fields=2)
+
+
+def test_clear_field_values_stops_at_a_broken_parent(tmp_path):
+    """親が無い番号を指していても、欄の値は空にし、例外を出さずに打ち切ること。"""
+    doc = reopen(make_pdf(tmp_path / "x.pdf", "plain"))
+    add_text_widget(doc[0], MAIL)
+    doc = save_reopen(doc, tmp_path / "w.pdf")
+    xref = next(doc[0].widgets()).xref
+    doc.xref_set_key(xref, "Parent", f"{doc.xref_length() + 50} 0 R")
+    remedy_pdf._clear_field_values(doc, xref)
+    assert doc.xref_get_key(xref, "V") == ("string", "")
     doc.close()
 
 

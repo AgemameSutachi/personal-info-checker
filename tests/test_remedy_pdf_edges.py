@@ -296,13 +296,15 @@ def test_clean_residue_clears_a_form_field_with_the_value(tmp_path):
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
     done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    # 数えることだけを見る。値が本当に消えたかは下の xfail の試験が見る
     assert done["widgets"] == 1
     doc.close()
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="PyMuPDF は field_value を空文字にしても /V を書き換えない（空白 1 文字なら変わる）。本体 remedy_pdf の課題",
+    reason="PyMuPDF は field_value を空文字にしても /V を書き換えない（空白 1 文字なら変わる）。本体 remedy_pdf の課題。"
+    "本体を直すか PyMuPDF の版が変わって XPASS になったら、この印を外す",
 )
 def test_clean_residue_really_empties_the_form_field_value(tmp_path):
     """掃除が「消した」と数えた欄の値が、保存し直して読み直しても残っていないこと（今は残る）。"""

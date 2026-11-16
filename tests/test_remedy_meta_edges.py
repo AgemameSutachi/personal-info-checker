@@ -148,6 +148,7 @@ def fake_advapi(get_rc=0, set_rc=0):
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="ctypes.WinDLL は Windows だけ")
 def test_acl_unreadable(monkeypatch):
     monkeypatch.setattr(remedy_meta.ctypes, "WinDLL", lambda *_a, **_k: fake_advapi(get_rc=5))
     k32 = FakeK32()
@@ -155,6 +156,7 @@ def test_acl_unreadable(monkeypatch):
     assert k32.freed == []  # 読めなかったときは解放するものが無い
 
 
+@pytest.mark.skipif(os.name != "nt", reason="ctypes.WinDLL は Windows だけ")
 def test_acl_set_failure_still_frees(monkeypatch):
     monkeypatch.setattr(remedy_meta.ctypes, "WinDLL", lambda *_a, **_k: fake_advapi(set_rc=5))
     k32 = FakeK32()

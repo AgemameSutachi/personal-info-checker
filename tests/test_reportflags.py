@@ -278,3 +278,25 @@ def test_per_file_people_flag_wording():
 
 def test_financial_short_label_does_not_read_as_happened():
     assert reportflags.FLAG_SHORT["financial"] == "被害のおそれ（カード・口座）"
+
+
+def test_total_lines_says_old_scans_are_left_out():
+    """古い版の検査で異なる値を数えていないファイルは、合計に入れていないと書く（数えたファイルが無ければ何も書かない）。"""
+    assert reportflags.total_lines({"distinct_totals": {"uncounted_files": 3}}) == []
+    lines = reportflags.total_lines({"distinct_totals": {"people": 5, "uncounted_files": 1234}})
+    assert "古い版の検査のファイル 1,234 件は、合計に入れていない" in "\n".join(lines)
+    assert lines[-1] == reportflags.PER_FILE_NOTE
+    assert not any("古い版" in x for x in reportflags.total_lines({"distinct_totals": {"people": 5}}))
+
+
+def test_verdict_lines_counts_files_in_broadly_readable_folders():
+    """広く読めるフォルダにあるファイルの数を添える（0 件なら行を出さない）。"""
+    lines = reportflags.verdict_lines({"access": {"broad": 1500}})
+    assert lines == ["広く読めるフォルダ（Everyone など）にある、個人情報の可能性があるファイル 1,500 件"]
+    assert reportflags.verdict_lines({"access": {"broad": 0}}) == []
+
+
+def test_distinct_text_marks_old_scans():
+    """異なる値を数えていない古い版の検査は「数えていない」と出し、空の数え（0 種類）とは分ける。"""
+    assert reportflags.distinct_text(None) == "（数えていない・古い版の検査）"
+    assert reportflags.distinct_text("{}") == ""

@@ -120,6 +120,8 @@ pub struct Rules {
     date_era_full: Regex,
     bank: Rg,
     bank_full: Rg,
+    yucho: Rg,
+    postal_label: Rg,
     pension: Rg,
     passport: Rg,
     residence_card: Rg,
@@ -201,6 +203,8 @@ impl Rules {
             date_era_full: plain("RE_DATE_ERA_FULL")?,
             bank: rg("RE_BANK")?,
             bank_full: rg("RE_BANK_FULL")?,
+            yucho: rg("RE_YUCHO")?,
+            postal_label: rg("RE_POSTAL_LABEL")?,
             pension: rg("RE_PENSION")?,
             passport: rg("RE_PASSPORT")?,
             residence_card: rg("RE_RESIDENCE_CARD")?,
@@ -755,6 +759,10 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
         scan(&hs, &r.postal_mark, text, &lb_none, &lb_none, &mut |c, end| {
             hits.push(hit(POSTAL, MED, c.get(0).unwrap().start(), end, "〒＋7桁"));
         });
+        scan(&hs, &r.postal_label, text, &lb_none, &lb_none, &mut |c, _| {
+            let g = c.get(1).unwrap();
+            hits.push(hit(POSTAL, MED, g.start(), g.end(), "郵便番号の語＋7桁"));
+        });
         scan(&hs, &r.postal_before_pref, text, &lb_digit_h, &lb_none, &mut |c, end| {
             let ms = c.get(0).unwrap().start();
             if d.has(ms, end, &r.order_kw) {
@@ -787,6 +795,7 @@ pub fn detect_body(r: &Rules, text: &str, prefix: &str, category: Option<&str>, 
             });
         }
         for (rg, ty, rule) in [
+            (&r.yucho, BANK, "ゆうちょの記号＋番号"),
             (&r.pension, PEN, "年金番号の語＋10桁"),
             (&r.passport, PASS, "旅券の語＋番号"),
             (&r.residence_card, RES, "在留カードの語＋番号"),

@@ -98,7 +98,11 @@ RE_MY_NUMBER = re.compile(
     rf"(?<![0-9])(?<![0-9][ \-])([0-9]{{4}}){SEP}([0-9]{{4}}){SEP}([0-9]{{4}})(?![0-9])(?![ \-][0-9])"
 )
 RE_CARD = re.compile(rf"{NOT_DIGIT_BEFORE}(?:[0-9][ \-]?){{12,18}}[0-9]{NOT_DIGIT_AFTER}")
-RE_MOBILE = re.compile(rf"(?<![0-9{H[1:-1]}])0[5789]0{SEP}[0-9]{{4}}{SEP}[0-9]{{4}}{NOT_DIGIT_AFTER}")
+# 括弧で区切る書き方（「090(1234)5678」「(090)1234-5678」。申込書の手書きの写しに多い）も拾う
+RE_MOBILE = re.compile(
+    rf"(?<![0-9{H[1:-1]}])(?:\(0[5789]0\)\s?[0-9]{{4}}{SEP}|0[5789]0(?:{SEP}[0-9]{{4}}{SEP}|\s?\(\s?[0-9]{{4}}\s?\)\s?))"
+    rf"[0-9]{{4}}{NOT_DIGIT_AFTER}"
+)
 RE_MOBILE_INTL = re.compile(r"\+81[\s\-]?\(?0?\)?[5789]0[\s\-]?[0-9]{4}[\s\-]?[0-9]{4}(?![0-9])")
 # 「+81-3-1234-5678」の固定電話（市外局番の頭の0を除いて9桁）。携帯（[5789]0）は RE_MOBILE_INTL で拾う
 RE_LANDLINE_INTL = re.compile(
@@ -160,11 +164,14 @@ RE_EMAIL = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})*\.[A-Za-z]{2,24}(?![A-Za-z])"
 )
 RE_POSTAL_MARK = re.compile(rf"〒\s?[0-9]{{3}}{H}?[0-9]{{4}}{NOT_DIGIT_AFTER}")
+# 「郵便番号 100-0005」（〒の印の代わりに語で書く）。値は7桁の部分
+RE_POSTAL_LABEL = re.compile(rf"郵便番号[\s:：]{{0,3}}([0-9]{{3}}{H}?[0-9]{{4}}){NOT_DIGIT_AFTER}")
 RE_POSTAL_BEFORE_PREF = re.compile(
     rf"(?<![0-9{H[1:-1]}])[0-9]{{3}}{H}[0-9]{{4}}(?![0-9{H[1:-1]}])(?=\s{{0,3}}(?:{PREFECTURES}))"
 )
 NUM = r"(?:[0-9]+|[一二三四五六七八九十〇]+)"
-ADDR_TAIL = rf"{NUM}(?:丁目|番地|番|号|{H}[0-9]+)"
+# 郡部の「大字軽井沢9999」「字西原123」は番地に丁目・番・号を付けずに数だけで書くので、字の後の数も番地とみなす
+ADDR_TAIL = rf"(?:{NUM}(?:丁目|番地|番|号|{H}[0-9]+)|大?字[一-龥々ぁ-んァ-ヶー]{{1,10}}?[0-9]+)"
 RE_ADDRESS = re.compile(
     # 市区町村の後の空白1つも許す（「東京都千代田区 丸の内1-1-1」と書く人がいる）。ただし空白の後が町名の文字で
     # 始まるときだけ（「東京都港区 03-1234-5678」「横浜市 10-15名」の数字を番地と取り違えない）。漢数字は外さない
@@ -177,15 +184,22 @@ RE_ADDRESS_NO_PREF = re.compile(
     rf"(?<![一-龥])[一-龥]{{1,5}}[市区][一-龥ぁ-んァ-ヶー]{{1,10}}(?:[0-9]+{H}[0-9]+(?:{H}[0-9]+)?|{NUM}丁目(?:{NUM}番地?)?(?:{NUM}号)?[0-9\-]*|{NUM}番地)"
 )
 DATE_WEST = r"(?:19|20)[0-9]{2}\s?[年/.\-]\s?[0-9]{1,2}\s?[月/.\-]\s?[0-9]{1,2}日?"
+# 年が後ろの「01/04/1985」（英文の書式の日・月・年と月・日・年）。生年月日の語か列があるときだけ拾う（下の RE_DATE の使い方）
+DATE_YEAR_LAST = r"[0-3]?[0-9][/.\-][0-3]?[0-9][/.\-](?:19|20)[0-9]{2}"
+# 元号は1字の略（「昭60.4.1」「平2.12.24」。書類の欄の狭い書き方）も読む。語の無い和暦の日付を 低 で拾うのは
+# 「昭和」「平成」「大正」と S・T・H だけのまま（1字の略は本文の「最大1.2.3」の類に当たるため）
 DATE_ERA = (
-    r"(?:明治|大正|昭和|平成|令和|[MTSHR])\s?(?:[0-9]{1,2}|元)\s?[年.\-/]\s?[0-9]{1,2}\s?[月.\-/]\s?[0-9]{1,2}日?"
+    r"(?:明治|大正|昭和|平成|令和|[明大昭平令MTSHR])\s?(?:[0-9]{1,2}|元)\s?[年.\-/]\s?[0-9]{1,2}\s?[月.\-/]\s?[0-9]{1,2}日?"
 )
-RE_DATE = re.compile(rf"(?:{DATE_WEST}|{DATE_ERA})")
+RE_DATE = re.compile(rf"(?:{DATE_WEST}|{DATE_ERA}|{DATE_YEAR_LAST})")
 RE_DATE_ERA = re.compile(DATE_ERA)
+# 「(普)」「(当)」は振込先の略記（「丸の内支店（普）1234567」。全角の括弧は NFKC で半角になる）
 RE_BANK = re.compile(
-    r"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座)[^0-9\n]{0,12}?([0-9]{7})(?![0-9])",
+    r"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座|\(普\)|\(当\))[^0-9\n]{0,12}?([0-9]{7})(?![0-9])",
     re.I,
 )
+# ゆうちょ銀行の「記号 10120 番号 12345671」（記号は1で始まり0で終わる5桁・番号は8桁まで）。値は番号の部分
+RE_YUCHO = re.compile(r"記号[\s:：]{0,3}1[0-9]{3}0[\s、,]{0,3}番号[\s:：]{0,3}([0-9]{6,8})(?![0-9])")
 # 「運転免許 123…」（証・番号を付けない書き方）も免許証番号として拾う。免許の語があるとマイナンバーからは外すので、
 # ここで拾わないとどちらにも数えられずに落ちていた（不具合の修正）
 RE_LICENSE = re.compile(r"(?:免許証番号|免許番号|免許証|運転免許)[^0-9\n]{0,12}?([0-9]{12})(?![0-9])")
@@ -217,7 +231,7 @@ RE_MEMBER_ID = re.compile(
 )
 # 口座の「金融機関コード-支店番号-口座番号」（4桁-3桁-7桁）の書き方
 RE_BANK_FULL = re.compile(
-    rf"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座|振込先)[^0-9\n]{{0,12}}?"
+    rf"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座|\(普\)|\(当\)|振込先)[^0-9\n]{{0,12}}?"
     rf"([0-9]{{4}}{H}[0-9]{{3}}{H}[0-9]{{7}})(?![0-9])",
     re.I,
 )
@@ -232,8 +246,12 @@ NAME_LABEL_WORDS = (
 RE_NAME_LABEL = re.compile(
     rf"(?:<{NAME_LABEL_WORDS}>|{NAME_LABEL_WORDS}{LABEL_SEP})({NAME_CHARS}{{2,8}}(?:[ 　]{NAME_CHARS}{{1,8}})?)"
 )
+# 人を指す語（申込者・契約者など）は「申込者 山田太郎」と区切って書くので、区切り1つを許す。語の後ろが
+# 施設・会社の名前（「利用者 中村病院」）になりやすい患者・利用者は入れない（よくある姓で始まる名前に当たってしまう）
+NAME_TIGHT_PERSON_WORDS = r"(?:申込者|申請者|契約者|保護者|被保険者|加入者)[ 　:：]?"
 RE_NAME_LABEL_TIGHT = re.compile(
-    rf"(?:^|(?<=[\s　:：、,|]))(?:氏名|お名前|名前|患者名|顧客名|契約者名)((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])"
+    rf"(?:^|(?<=[\s　:：、,|]))(?:氏名|お名前|名前|患者名|顧客名|契約者名|{NAME_TIGHT_PERSON_WORDS})"
+    rf"((?:{SURNAMES})[ 　]?[一-龥々]{{1,3}})(?![一-龥々])"
 )
 # 英語の見出し語＋日本語の名前（「Name: 山田太郎」「Customer name = 佐藤花子」）。「name:」は YAML・設定の項目名にも多いので、
 # 値がよくある姓で始まり、漢字の名が続くものだけを拾う。区切りは「:」「=」だけ（空白だけの区切りは英文の途中に多い）。
@@ -1099,6 +1117,10 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
                 hits.append(_phone_unless_model(m, "電話の語＋区切りなし番号", model_word, category))
         for m in RE_POSTAL_MARK.finditer(text):
             hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "〒＋7桁"))
+        for m in RE_POSTAL_LABEL.finditer(text):
+            hits.append(
+                Hit("postal_code", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "郵便番号の語＋7桁")
+            )
         for m in RE_POSTAL_BEFORE_PREF.finditer(text):
             if ctx(m.start(), m.end(), ORDER_KW):
                 continue
@@ -1126,6 +1148,10 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
                     m.end(1),
                     "口座の語＋金融機関コード-支店番号-口座番号",
                 )
+            )
+        for m in RE_YUCHO.finditer(text):
+            hits.append(
+                Hit("bank_account", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "ゆうちょの記号＋番号")
             )
         for m in RE_PENSION.finditer(text):
             hits.append(Hit("pension", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "年金番号の語＋10桁"))

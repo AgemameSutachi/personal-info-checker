@@ -7,20 +7,20 @@ from __future__ import annotations
 
 import json
 import socket
-import struct
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 import zipfile
-import zlib
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from zipcrypto import zipcrypto_zip  # noqa: E402
 
 SAMPLES = [
     "excel/meibo.xlsx",
@@ -30,47 +30,6 @@ SAMPLES = [
     "pdf/encrypted_password.pdf",
 ]
 TOKEN = "test-token-123"
-
-
-def _zipcrypto_zip(name: str, data: bytes, password: str) -> bytes:
-    """中身1件を ZipCrypto（従来の PKWARE 暗号）・無圧縮で格納した zip を作る。
-
-    標準の zipfile は暗号化して書けないため、ヘッダーを手で組む。
-    """
-    crc_table = []  # CRC32（多項式 0xEDB88320）の1バイト分の表
-    for i in range(256):
-        v = i
-        for _ in range(8):
-            v = (v >> 1) ^ 0xEDB88320 if v & 1 else v >> 1
-        crc_table.append(v)
-
-    def crc_byte(crc: int, b: int) -> int:
-        return (crc >> 8) ^ crc_table[(crc ^ b) & 0xFF]
-
-    keys = [0x12345678, 0x23456789, 0x34567890]
-
-    def update(b: int) -> None:
-        keys[0] = crc_byte(keys[0], b)
-        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
-        keys[2] = crc_byte(keys[2], (keys[1] >> 24) & 0xFF)
-
-    for b in password.encode():
-        update(b)
-    crc = zlib.crc32(data)
-    plain = bytes(range(11)) + bytes([crc >> 24]) + data  # 暗号ヘッダーの末尾は CRC の上位バイト（照合用）
-    out = bytearray()
-    for b in plain:
-        t = (keys[2] | 2) & 0xFFFF
-        out.append(b ^ (((t * (t ^ 1)) >> 8) & 0xFF))
-        update(b)
-    fname = name.encode()
-    fixed = struct.pack("<HHHHHIII", 20, 1, 0, 0, 0x21, crc, len(out), len(data))  # 版・暗号の印・無圧縮・日時
-    local = b"PK\x03\x04" + fixed + struct.pack("<HH", len(fname), 0) + fname + bytes(out)
-    central = (
-        b"PK\x01\x02" + struct.pack("<H", 20) + fixed + struct.pack("<HHHHHII", len(fname), 0, 0, 0, 0, 0, 0) + fname
-    )
-    end = b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, len(central), len(local), 0)
-    return local + central + end
 
 
 def _make_samples(target: Path, work: Path) -> None:
@@ -87,7 +46,7 @@ def _make_samples(target: Path, work: Path) -> None:
     # 対照は画像を含まないテキストにする（python-docx のひな形にはサムネイル画像が入り、OCR の無い PC では
     # 「検査不能」が1件増えて、要対応の件数が環境で変わってしまう）
     (target / "clean/orders.txt").write_text(mc.clean_text() + "\n", encoding="utf-8")
-    (target / "archive/zipcrypto_password.zip").write_bytes(_zipcrypto_zip("meibo.xlsx", xlsx, mc.PASSWORD))
+    (target / "archive/zipcrypto_password.zip").write_bytes(zipcrypto_zip("meibo.xlsx", xlsx, mc.PASSWORD))
     (target / "encrypted/password.xlsx").write_bytes(mc.encrypt_ooxml(xlsx, mc.PASSWORD))
     doc = pymupdf.open()
     mc._pdf_text_page(doc, mc.pii_text())
@@ -104,7 +63,7 @@ def test_zipcrypto_sample_is_really_encrypted(tmp_path):
     """手で組んだ ZipCrypto の zip が、正しいパスワードでだけ元に戻ること（検体そのものの確かめ）。"""
     data = "山田太郎 090-1234-5678".encode() * 50
     path = tmp_path / "a.zip"
-    path.write_bytes(_zipcrypto_zip("a.txt", data, "secret123"))
+    path.write_bytes(zipcrypto_zip("a.txt", data, "secret123"))
     with zipfile.ZipFile(path) as zf:
         assert zf.infolist()[0].flag_bits & 1
         with pytest.raises(RuntimeError):

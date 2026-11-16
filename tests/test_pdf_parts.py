@@ -39,9 +39,8 @@ def test_metadata_bookmarks_and_annotation_text(tmp_path):
     def build(doc):
         page = doc.new_page()
         page.insert_text((60, 80), "本文は空でない")
-        annot = page.add_text_annot(
-            (100, 100), f"注釈の電話 {PHONE2}"
-        )  # しおりと別の値（同じ値は1件目の場所でだけ数える）
+        # 注釈にはしおりと別の値を入れる（同じ値は1件目の場所でだけ数える）
+        annot = page.add_text_annot((100, 100), f"注釈の電話 {PHONE2}")
         annot.update()
         doc.new_page()
         doc.set_metadata({"author": f"作成 {EMAIL}"})
@@ -68,7 +67,7 @@ def test_file_attachment_annotation_is_scanned_as_nested(tmp_path):
     assert "phone" in child[0].finding_counts
 
 
-def test_form_field_value_is_scanned_with_field_name_as_header(tmp_path):
+def test_form_field_value_is_scanned_with_field_name_as_header(tmp_path, monkeypatch):
     def build(doc):
         page = doc.new_page()
         w = fitz.Widget()
@@ -86,10 +85,20 @@ def test_form_field_value_is_scanned_with_field_name_as_header(tmp_path):
         off.rect = fitz.Rect(50, 100, 70, 120)
         page.add_widget(off)
 
+    # 読んだフォーム欄を記録する（チェックボックスの「Off」は個人情報にならないので、結果からは読んだか分からない）
+    read_fields = []
+    real_add_text = engine.Collector.add_text
+
+    def recording_add_text(self, text, location, *args, **kwargs):
+        if kwargs.get("method") == "フォーム欄":
+            read_fields.append((kwargs.get("header"), text))
+        return real_add_text(self, text, location, *args, **kwargs)
+
+    monkeypatch.setattr(engine.Collector, "add_text", recording_add_text)
     item = _scan(tmp_path, "form.pdf", _doc_bytes(build))[0]
     assert not any(f.method == "本文" for f in item.findings), item.findings  # 前提: 値は本文に出ていない
     assert "1ページ フォーム欄「電話番号」" in _locations(item, "phone"), item.findings
-    assert not any("同意" in f.location for f in item.findings)  # 「Off」の欄は読まない
+    assert read_fields == [("電話番号", PHONE)]  # 「Off」の欄（同意）は読まない
 
 
 def test_embedded_file_that_cannot_be_extracted_is_recorded(tmp_path, monkeypatch):
@@ -184,7 +193,10 @@ def test_image_only_pages_when_ocr_is_unavailable(tmp_path, monkeypatch):
 
 def test_encrypted_pdf_with_separate_encrypt_object_cut_before_xref(tmp_path):
     """暗号化の辞書を別の object に置く PDF（Acrobat 等の形）が途中で切れると、MuPDF は暗号化されていない PDF として
-    組み直す。辞書の印が残っているので、読んでも暗号のままと分かり「検査済み」と黙らない。"""
+    組み直す。辞書の印が残っているので、読んでも暗号のままと分かり「検査済み」と黙らない。
+
+    検体は、PyMuPDF の暗号化 PDF を相互参照表の前で切り、暗号化の辞書の印（/Filter/Standard）を持つ object を
+    後ろに足しただけの最小の再現（実物の辞書にある /O・/U や、trailer の /Encrypt N 0 R は無い）。"""
     data = _doc_bytes(
         lambda doc: doc.new_page().insert_text((60, 80), f"電話 {PHONE}"),
         encryption=fitz.PDF_ENCRYPT_AES_256,

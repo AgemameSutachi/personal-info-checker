@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -79,7 +80,7 @@ def test_source_fingerprint_ignores_excluded_files_and_line_endings(tmp_path):
     assert signature.source_fingerprint(str(pkg)) != base
 
 
-def test_environment_stamps_tools_and_survives_missing_ones(monkeypatch, fresh_caches, tmp_path):
+def test_environment_stamps_tools_and_survives_missing_ones_and_odbc_failure(monkeypatch, fresh_caches, tmp_path):
     from pii_checker import ocr
     from pii_checker.formats import archive, database, dbdump
 
@@ -91,16 +92,12 @@ def test_environment_stamps_tools_and_survives_missing_ones(monkeypatch, fresh_c
     # 見つかったと返されたのに消えている道具は、名前だけを手がかりにする（版を出せないので落とさない）
     monkeypatch.setattr(dbdump, "find_pg_restore", lambda: str(tmp_path / "gone" / "pg_restore.exe"))
 
-    import pyodbc
-
+    # ODBC の一覧が取れなくても落とさない（pyodbc の入っていない環境でも試せるよう、偽の部品を差し込む）
     def broken_drivers():
         raise RuntimeError("ODBC の一覧を取れない")
 
-    monkeypatch.setattr(pyodbc, "drivers", broken_drivers)
-    env = signature._environment(None, None)
-    import json
-
-    got = json.loads(env)
+    monkeypatch.setitem(sys.modules, "pyodbc", types.SimpleNamespace(drivers=broken_drivers))
+    got = json.loads(signature._environment(None, None))
     assert got["7z"].startswith("7z.exe:5:")
     assert got["pg_restore"] == "pg_restore.exe"
     assert got["access"] == []

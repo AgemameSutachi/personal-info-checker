@@ -132,6 +132,7 @@ def test_xls_cells_are_read_with_sheet_and_cell_location(tmp_path):
 
 
 def test_xls_book_stream_is_excel95(tmp_path):
+    """Excel 95 かどうかはストリームの名前（Book）だけで決める。中身は BIFF8 のままの検体で、BIFF5 の中身ではない。"""
     wb = ob.xls_workbook({"Sheet1": [["電話"], [PHONE]]})
     item = _scan(tmp_path, "old95.xls", ob.build({"Book": wb}))[0]
     assert item.kind == "Excel 5.0/95（xls）"

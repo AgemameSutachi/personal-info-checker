@@ -81,7 +81,8 @@ def test_real_junction_is_recorded_as_link_and_not_followed(tmp_path):
     links = [e for e in entries if e.kind == "link"]
     assert [e.path for e in links] == [str(root / "jn")]
     assert links[0].reason.startswith(f"リンク（{target} を指す）。指す先は辿っていない")
-    assert "サーバー上の" not in links[0].reason
+    if not walker._on_remote(str(root)):  # 一時フォルダがネットワークドライブの上なら、サーバー上の場所と出るのが正しい
+        assert "サーバー上の" not in links[0].reason
 
 
 def test_link_to_server_location_adds_how_to_scan_it(tmp_path, monkeypatch):
@@ -100,6 +101,8 @@ def test_is_link_by_attributes_and_readlink(monkeypatch):
     plain = SimpleNamespace(st_file_attributes=0)
     reparse = SimpleNamespace(st_file_attributes=FILE_ATTRIBUTE_REPARSE_POINT)
     called = []
+    # 手元の D: がネットワークドライブの PC でも結果が変わらないよう、手元のドライブとして扱う
+    monkeypatch.setattr(walker, "_on_remote", lambda path: False)
     monkeypatch.setattr(walker.os, "readlink", lambda p: called.append(p) or "\\??\\D:\\other")
     # 再解析ポイントの印が無ければ、指す先を問い合わせない（NAS へ1件ずつ問い合わせ直さない）
     assert walker._is_link(r"D:\data\a", plain) is None
@@ -177,7 +180,20 @@ def test_single_file_root_and_ftp_root_without_connection(tmp_path):
     assert entries[1].reason.startswith("FTP の接続先の設定が無い")
 
 
-def test_entry_whose_attributes_cannot_be_read_is_recorded(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "error, message, lost",
+    [
+        (PermissionError(13, "アクセスが拒否されました"), "アクセスが拒否されました", False),
+        # 回線断（64）なら実行器が列挙を止めて再開で読み直せるよう、回線断の印を付ける
+        pytest.param(
+            OSError(None, "指定されたネットワーク名は利用できません", None, 64),
+            "指定されたネットワーク名は利用できません",
+            True,
+            marks=pytest.mark.skipif(os.name != "nt", reason="winerror は Windows だけ"),
+        ),
+    ],
+)
+def test_entry_whose_attributes_cannot_be_read_is_recorded(tmp_path, monkeypatch, error, message, lost):
     """1件の属性が読めなくても、黙って飛ばさずエラーとして残し、ほかの項目は続けて列挙する。"""
     (tmp_path / "bad.txt").write_text("x", encoding="utf-8")
     (tmp_path / "good.txt").write_text("x", encoding="utf-8")
@@ -188,7 +204,7 @@ def test_entry_whose_attributes_cannot_be_read_is_recorded(tmp_path, monkeypatch
             self._de, self.name = de, de.name
 
         def stat(self, follow_symlinks=True):
-            raise PermissionError(13, "アクセスが拒否されました")
+            raise error
 
         def is_dir(self, follow_symlinks=True):
             return False
@@ -207,8 +223,8 @@ def test_entry_whose_attributes_cannot_be_read_is_recorded(tmp_path, monkeypatch
     entries = list(walker.walk([str(tmp_path)]))
     errors = [e for e in entries if e.kind == "error"]
     assert [e.path for e in errors] == [str(tmp_path / "bad.txt")]
-    assert errors[0].reason.startswith("属性を読めなかった: アクセスが拒否されました。")
-    assert errors[0].network_lost is False
+    assert errors[0].reason.startswith(f"属性を読めなかった: {message}。")
+    assert errors[0].network_lost is lost
     assert [e.path for e in entries if e.kind == "file"] == [str(tmp_path / "good.txt")]
 
 

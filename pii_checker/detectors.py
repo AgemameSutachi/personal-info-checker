@@ -1979,6 +1979,20 @@ NAME_IN_HEADER_ROW_NOTE = "（固定幅の表の見出し行の形のため 低�
 _RE_CODE_AFTER_VALUE = re.compile(r"[ \t]*÷|[ \t]+[×*%+][ \t]+[0-9A-Za-z_]|\[[\"']|\.[A-Za-z_][0-9A-Za-z_]*\(")
 _CALL_LOOKBACK = 200
 NAME_IN_CALL_NOTE = "（閉じていない括弧の中の「=」の書き方のため 低）"
+# 「氏名の見出し語＋名前」の値に来る、人の名前でない一般の語（2026-11-16・手元の文書の「宛先: 窓口」「名前: 本文」）
+_NOT_NAMES_AFTER_LABEL = frozenset(
+    "窓口 本文 パス 組織 未定 不明 なし 無し 各位 全員 本人 一覧 不要 同上 空欄 事務局 オーナー 管理者 "
+    "自分 合言葉".split()
+)
+# 「送り手の名前: 合言葉」「窓口の宛先 窓口」「引数の名前: 検索語」: 物の名前・宛先の項目名。「担当者の名前」
+# 「お客様の宛先」のように「の」の前が人を指す字なら人の名前なので、ここには当てない
+_RE_THING_LABEL_BEFORE = re.compile(r"([^\s])の(?:名前|宛先)(?:[\"']?\s*[:：=]\s*[\"']?|[ 　]+)$")
+_PERSON_CHARS_BEFORE_NO = frozenset("者様人員客方")
+# 列見出しの語でもあるが、仮名の名（「メイ」「かな」）にもなるもの。値の最初の語がこれでも落とさない
+_KANA_NAMES_LIKE_HEADER = frozenset("セイ メイ かな カナ".split())
+_RE_NAME_CHAR = re.compile(NAME_CHARS)
+NAME_LABEL_CUT_NOTE = "（名前の長さの上限で切れ、後ろに文が続くため 低）"
+NAME_LABEL_THING_NOTE = "（「〜の名前」「〜の宛先」の項目名の後のため 低）"
 
 
 def _fixed_width_cells(line: str) -> list[str]:
@@ -2219,7 +2233,13 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
         elif h.rule == "氏名の見出し語＋名前":
             # 説明の文の「名前: 戦略の名前。」「名前: 表示用の名前。」（引数の説明）。人の名前に「名前」の語は入らない。
             # 値は空白の後の語まで取り込む（「名前: 山田太郎 名前: …」の値は「山田太郎 名前」）ので、最初の語だけを見る
-            if "名前" in _RE_SPACE.split(h.value, maxsplit=1)[0]:
+            first = _RE_SPACE.split(h.value, maxsplit=1)[0]
+            if "名前" in first:
+                continue
+            # 値が別の欄の見出しの語（「氏名 住所 電話番号」の項目の並び・「ご担当者：氏名、…」）か、一般の語
+            if first in _NOT_NAMES_AFTER_LABEL or (
+                first not in _KANA_NAMES_LIKE_HEADER and header_category(first) is not None
+            ):
                 continue
             # 固定幅の表の見出し行（「名前      年率      超過」の「年率」）
             header_row = _name_label_in_header_row(text, h)
@@ -2234,6 +2254,13 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                     continue
                 if shape == "low":
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
+            if h.confidence == Confidence.MEDIUM:
+                thing = _RE_THING_LABEL_BEFORE.search(text, max(0, h.start - 16), h.start)
+                if thing and thing.group(1) not in _PERSON_CHARS_BEFORE_NO:
+                    h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_LABEL_THING_NOTE)
+                elif _RE_NAME_CHAR.match(text, h.end):
+                    # 値の字数の上限（8字）で切れて、後ろに仮名・漢字が続く（「氏名：突然送られてくるメールは…」の文）
+                    h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_LABEL_CUT_NOTE)
         elif h.rule == NAME_LABEL_EN_RULE:
             # 姓で始まる地名・会社・部署（「name: 石川県」「name: 山田電機」「name: 山田 営業部」）
             if _RE_NAME_EN_ORG_TAIL.search(h.value):

@@ -1320,6 +1320,51 @@ def test_name_label_not_header_row_still_found(text):
     assert _label_name_confidences(text) == ["MEDIUM"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 値が別の欄の見出しの語（項目の並び・書類の欄の説明）か、人の名前でない一般の語（2026-11-16・手元の文書）
+        "顧客管理システムの情報 氏名 住所 電話番号 ※対象となる方",
+        "お取引先のご担当者：氏名、メールアドレス",
+        "宛先: 窓口（初回のみ）",
+        "`名前: 本文` か本文だけ",
+        "担当 組織・人材戦略部門",
+    ],
+)
+def test_name_label_before_field_or_common_word_is_not_name(text):
+    assert _label_name_confidences(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 「〜の名前」「〜の宛先」の項目名（物の名前・宛先）
+        "書き出すファイルの名前: 設定ファイル",
+        "引数の名前: 検索語は GET なら q",
+        "窓口の宛先         再起動で変わった",
+        # 値の字数の上限で切れて文が続くもの
+        "電話番号、住所、氏名：突然送られてくるメールは無視する",
+        "宛先: 提案ダッシュボード（台帳）",
+    ],
+)
+def test_name_label_thing_or_cut_sentence_is_low(text):
+    assert _label_name_confidences(text) == ["LOW"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "担当 伊藤佳子",
+        "担当者の名前: 山田太郎",  # 「の」の前が人を指す字
+        "お客様の宛先：佐藤花子",
+        "氏名：山田太郎様",
+        "名前: メイ",  # 列見出しの語（メイ）と同じ仮名の名
+    ],
+)
+def test_name_label_real_names_stay_medium(text):
+    assert _label_name_confidences(text) == ["MEDIUM"]
+
+
 def test_name_label_header_row_check_is_not_quadratic():
     # 改行の無い長い本文で、検出ごとに行の端を本文の全体から探さない（評価で 4 万回 4.9 秒だった）
     import time

@@ -39,10 +39,12 @@ from ..ooxml_text import (
     pptx_slide_parts,
 )
 from ..textdecode import iter_strings, iter_strings_chunked
-from .misc import attribute_texts, markup_to_text, rtf_to_text
+from .misc import attribute_texts, data_xml_to_text, markup_to_text, rtf_to_text
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 SKIP_PARTS = re.compile(r"(^|/)(printerSettings|fonts?)/|\.(odttf|fntdata|ttf|otf)$", re.I)
+# 値を要素ごとに並べる部品（文書のプロパティ・ユーザー定義の XML・OpenDocument のメタ情報）
+PROPERTY_PARTS = re.compile(r"^(docProps|customXml)/|^meta\.xml$", re.I)
 PPT_OBJECT_LIMIT = 512 * 1024**2  # PPT の埋め込みオブジェクトを展開してよい大きさ
 DEFAULT_OFFICE_PASSWORDS = ["VelvetSweatshop"]  # Excel の「読み取りパスワードなし」暗号化の既定値
 
@@ -95,6 +97,12 @@ def sweep_zip_parts(
             raw = raw_parts(name)
             # 表・本文として読み終えた部品の読み直しでは、既に数えた値を数えない（xlsx のセル・docx の本文の値が2件になっていた）
             col.add_lines(markup_to_text(text_src), location_prefix=f"{name} ", method="XML部品", skip_seen=raw)
+            if PROPERTY_PARTS.search(name):
+                # 文書のプロパティは値を区切りなく並べるので、タグを外すだけでは値が隣の値とつながる（コメントの
+                # 「携帯 090-1234-5678」の後ろに版の番号「1」と日時が続き、番号の形でなくなっていた）。要素ごとに1行にして読み直す
+                col.add_lines(
+                    data_xml_to_text(text_src), location_prefix=f"{name} ", method="XML部品（要素ごと）", skip_seen=True
+                )
             for v in attribute_texts(text_src):
                 col.add_text(v, f"{name}（属性値）", method="属性値", raw=raw)
             continue

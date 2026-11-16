@@ -90,7 +90,7 @@ def test_line_that_does_not_round_trip_is_refused(tmp_path):
     """cp932 の NEC 選定の重複文字（0x8790 の ≒）は、読んで書き戻すと別のバイト列（0x81E0）になる。"""
     src = tmp_path / "nec.sql"
     src.write_bytes(b"SELECT 1;\n\x87\x90\n")
-    assert "\x87\x90".encode("latin-1").decode("cp932").encode("cp932") != b"\x87\x90"
+    assert b"\x87\x90".decode("cp932").encode("cp932") != b"\x87\x90"
     with pytest.raises(RemedyError, match="元と同じ中身にならない行"):
         list(rs._stream_lines(str(src), "cp932", b""))
 

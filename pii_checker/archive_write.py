@@ -892,7 +892,10 @@ class SingleHandler(Handler):
             check = head[7] & 0x0F if len(head) >= 8 else lzma.CHECK_CRC64
             if check not in (lzma.CHECK_NONE, lzma.CHECK_CRC32, lzma.CHECK_CRC64, lzma.CHECK_SHA256):
                 check = lzma.CHECK_CRC64
-            comp = lzma.LZMACompressor(format=lzma.FORMAT_XZ, check=check, preset=6)
+            if head.startswith(b"\xfd7zXZ\x00"):
+                comp = lzma.LZMACompressor(format=lzma.FORMAT_XZ, check=check, preset=6)
+            else:  # 見出しの印の無い旧い LZMA（.lzma）は同じ形で書く（xz に変えると読めない道具がある）
+                comp = lzma.LZMACompressor(format=lzma.FORMAT_ALONE, preset=6)
             with open(new_file, "rb") as src, open(dst, "wb") as out:
                 for chunk in iter(lambda: src.read(CHUNK), b""):
                     out.write(comp.compress(chunk))

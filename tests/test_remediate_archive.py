@@ -831,7 +831,7 @@ def test_tar_remove_entry_inside_tgz(tmp_path):
     assert names == ["readme.txt", "other.bin", "emptydir"]
 
 
-@pytest.mark.parametrize("ext", ["gz", "bz2", "xz"])
+@pytest.mark.parametrize("ext", ["gz", "bz2", "xz", "lzma"])
 def test_single_compressed_file_is_rewrapped(tmp_path, ext, trash):
     import bz2
     import lzma
@@ -848,6 +848,8 @@ def test_single_compressed_file_is_rewrapped(tmp_path, ext, trash):
             gz.write(data)
     elif ext == "bz2":
         archive.write_bytes(bz2.compress(data, 5))
+    elif ext == "lzma":
+        archive.write_bytes(lzma.compress(data, format=lzma.FORMAT_ALONE))
     else:
         archive.write_bytes(lzma.compress(data, check=lzma.CHECK_CRC32))
     svc, store, job = make_archive_service(tmp_path, archive)
@@ -864,6 +866,8 @@ def test_single_compressed_file_is_rewrapped(tmp_path, ext, trash):
         assert gz_header(raw) == (1_640_000_000, b"people.csv") and gzip.decompress(raw) == expect
     elif ext == "bz2":
         assert raw[3:4] == b"5" and bz2.decompress(raw) == expect
+    elif ext == "lzma":  # xz に変えず、同じ旧い LZMA の形で書き直す
+        assert not raw.startswith(b"\xfd7zXZ") and lzma.decompress(raw, format=lzma.FORMAT_ALONE) == expect
     else:
         assert raw[7] & 0x0F == lzma.CHECK_CRC32 and lzma.decompress(raw) == expect
     assert r["remaining"]["total"] == 0

@@ -366,7 +366,9 @@ def test_is_network_lost_sees_wrapped_cause():
 
 
 def test_file_id_128_of_missing_file_is_empty(tmp_path):
-    """開けないファイルの 128bit の ID は空（呼び出し側は 64bit の識別子に戻す）。"""
+    """開けないファイルの 128bit の ID は空（呼び出し側は 64bit の識別子に戻す）。開けるファイルは「ボリューム-ID」の形。"""
     assert safeio.file_id_128(str(tmp_path / "missing.bin")) == ""
     fid = safeio.file_id_128(_make(tmp_path))
-    assert fid == "" or [len(p) for p in fid.split("-")] == [16, 32]
+    if not fid:
+        pytest.skip("このドライブは 128bit のファイル ID を返さない（FAT など）")
+    assert [len(p) for p in fid.split("-")] == [16, 32]

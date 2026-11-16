@@ -60,6 +60,7 @@ def test_allow_list_is_stated_even_when_zero_removed():
 
 
 def test_allow_list_that_removed_hits_leads_the_detail():
+    """許可リストで検出を外して無くなったときは、その前提を根拠の頭と言い切りの文の両方に置く。"""
     v = verdict.decide(_summary(allowed=3), "done")
     assert v.detail[0] == "拾わない値（許可リスト）の値を除いて、検出は無かった（外した検出 3 件）"
     assert "拾わない値（許可リスト）の値を除いて" in v.next_step

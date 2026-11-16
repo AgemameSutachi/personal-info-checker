@@ -459,8 +459,14 @@ def find_pg_restore() -> str | None:
     w = shutil.which("pg_restore")
     if w:
         return w
-    cands = sorted(glob.glob(r"C:\Program Files\PostgreSQL\*\bin\pg_restore.exe"), reverse=True)
-    return cands[0] if cands else None
+    cands = glob.glob(r"C:\Program Files\PostgreSQL\*\bin\pg_restore.exe")
+    # 版のフォルダ（9.6・17 など）は文字の順では 9.6 が 17 より後ろになるので、数の組で比べて一番新しい版を使う
+    return max(cands, key=_pg_version_key) if cands else None
+
+
+def _pg_version_key(path: str) -> tuple:
+    folder = os.path.basename(os.path.dirname(os.path.dirname(path)))
+    return tuple(int(x) for x in re.findall(r"\d+", folder)), folder
 
 
 def handle_pg_custom(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
@@ -520,6 +526,7 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
     pat = re.compile(rb"\x01\x00(.{%d})\x00(.{%d})" % (int_size, int_size), re.S)
     blocks: list[str] = []
     failed = 0
+    truncated = 0
     pos = 0
     expanded = 0  # 展開した合計（圧縮爆弾でメモリを食い潰さないよう上限を掛ける）
     cut_short = False
@@ -555,6 +562,8 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
                 text_bytes = d.decompress(raw, max(1, READ_ALL_LIMIT - expanded))
                 if d.unconsumed_tail:
                     cut_short = True
+                elif not d.eof:
+                    truncated += 1  # zlib の流れが終わりの印の前で切れている（読めた分だけを検査する）
             except zlib.error:
                 failed += 1
                 pos = q
@@ -605,10 +614,17 @@ def _scan_pg_custom_bytes(data: bytes, col: Collector, item: ItemResult) -> None
             f"展開した中身が大きすぎる（{READ_ALL_LIMIT // 1024**2}MB を超えた）ため、そこまでを検査した。"
             "pg_restore を入れると全部を少しずつ読める"
         )
+    reasons = []
     if failed:
-        raise PartialScan(
+        reasons.append(
             f"データ部 {failed} 個は未対応の圧縮（lz4/zstd 等）で展開できなかった。pg_restore を入れると全部読める"
         )
+    if truncated:
+        reasons.append(
+            f"データ部 {truncated} 個は圧縮の途中で切れていて、読めた分だけを検査した（壊れているか途中で切れている可能性。元のファイルを取り直してください）"
+        )
+    if reasons:
+        raise PartialScan("。".join(reasons))
 
 
 # ------------------------------------------------------------------ 内部形式の分からないダンプ・データファイル

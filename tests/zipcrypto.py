@@ -8,12 +8,19 @@ from __future__ import annotations
 import struct
 import zlib
 
-_CRC_TABLE = []  # CRC32（多項式 0xEDB88320）の1バイト分の表
-for _i in range(256):
-    _v = _i
-    for _ in range(8):
-        _v = (_v >> 1) ^ 0xEDB88320 if _v & 1 else _v >> 1
-    _CRC_TABLE.append(_v)
+
+def _make_crc_table() -> list[int]:
+    """CRC32（多項式 0xEDB88320）の1バイト分の表を作る。"""
+    table = []
+    for i in range(256):
+        v = i
+        for _ in range(8):
+            v = (v >> 1) ^ 0xEDB88320 if v & 1 else v >> 1
+        table.append(v)
+    return table
+
+
+_CRC_TABLE = _make_crc_table()
 
 
 def _crc_byte(crc: int, b: int) -> int:
@@ -35,7 +42,8 @@ def zipcrypto_zip(name: str, data: bytes, password: str | bytes) -> bytes:
     for b in password.encode() if isinstance(password, str) else password:
         update(b)
     crc = zlib.crc32(data)
-    plain = bytes(range(11)) + bytes([crc >> 24]) + data  # 暗号ヘッダーの末尾は CRC の上位バイト（照合用）
+    # 暗号ヘッダー12バイト: 先頭11バイトは本来乱数だが、試験では結果を毎回同じにするため固定値。末尾は CRC の上位バイト（照合用）
+    plain = bytes(range(11)) + bytes([crc >> 24]) + data
     out = bytearray()
     for b in plain:
         t = (keys[2] | 2) & 0xFFFF

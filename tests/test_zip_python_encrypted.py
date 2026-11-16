@@ -29,6 +29,7 @@ def no_7z(monkeypatch):
 
 
 def scan(path: Path, tmp_path: Path, passwords: list[str]):
+    """検査して、書庫の中の名前→結果の辞書を返す。書庫そのものの結果はキー "" に入れる。"""
     r = scan_file(str(path), ScanOptions(temp_dir=str(tmp_path)), PasswordBook(common=passwords))
     return {it.path.rsplit("!", 1)[-1] if "!" in it.path else "": it for it in r.items}
 
@@ -68,7 +69,9 @@ def test_wrong_or_missing_password_is_reported(tmp_path, passwords):
     assert it.size == len(SECRET)
     assert "暗号化されている" in it.reason
     if passwords:
-        assert "受け取ったパスワード 2 個" in it.reason, it.reason
+        assert f"受け取ったパスワード {len(passwords)} 個" in it.reason, it.reason
+    else:
+        assert "受け取ったパスワード" not in it.reason, it.reason
 
 
 def test_plain_member_beside_encrypted_one_is_scanned(tmp_path):
@@ -83,7 +86,11 @@ def test_plain_member_beside_encrypted_one_is_scanned(tmp_path):
 
 
 def test_aes_or_unknown_method_is_uncheckable(tmp_path):
-    """AES（方式 99）は Python で開けないので、7-Zip を入れる案内つきの検査不能にする。"""
+    """AES（方式 99）は Python で開けないので、7-Zip を入れる案内つきの検査不能にする。
+
+    中身は ZipCrypto のまま方式の番号だけ 99 に書き換えた擬似物（AES の追加欄 0x9901 は無い）。
+    いまの実装は方式の番号だけで判断するので、これで足りる。
+    """
     blob = bytearray(zipcrypto_zip("a.txt", SECRET, "secret"))
     blob[8:10] = (99).to_bytes(2, "little")  # 項目の頭の圧縮方式
     cd = blob.index(b"PK\x01\x02")

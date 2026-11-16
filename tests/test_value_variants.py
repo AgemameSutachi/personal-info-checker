@@ -86,6 +86,11 @@ def test_rural_address_with_aza(text, value):
     assert found(text)["address"][1] == value
 
 
+def test_aza_in_prose_is_not_address():
+    # 字の名にひらがなを許すと「小字の1件」を番地と読んでいた
+    assert "address" not in found("「湯前」は福島県石川町の小字の1件だけ")
+
+
 @pytest.mark.parametrize(
     "text",
     ["サンプル銀行 丸の内支店（普）1234567", "サンプル銀行 丸の内支店(当)1234567", "振込先 (普) 0009-123-1234567"],

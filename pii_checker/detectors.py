@@ -170,8 +170,9 @@ RE_POSTAL_BEFORE_PREF = re.compile(
     rf"(?<![0-9{H[1:-1]}])[0-9]{{3}}{H}[0-9]{{4}}(?![0-9{H[1:-1]}])(?=\s{{0,3}}(?:{PREFECTURES}))"
 )
 NUM = r"(?:[0-9]+|[一二三四五六七八九十〇]+)"
-# 郡部の「大字軽井沢9999」「字西原123」は番地に丁目・番・号を付けずに数だけで書くので、字の後の数も番地とみなす
-ADDR_TAIL = rf"(?:{NUM}(?:丁目|番地|番|号|{H}[0-9]+)|大?字[一-龥々ぁ-んァ-ヶー]{{1,10}}?[0-9]+)"
+# 郡部の「大字軽井沢9999」「字西原123」は番地に丁目・番・号を付けずに数だけで書くので、字の後の数も番地とみなす。
+# 字の名は漢字・カタカナだけ（ひらがなを許すと本文の「小字の1件」を番地と読む）
+ADDR_TAIL = rf"(?:{NUM}(?:丁目|番地|番|号|{H}[0-9]+)|大?字[一-龥々ァ-ヶー]{{1,10}}?[0-9]+)"
 RE_ADDRESS = re.compile(
     # 市区町村の後の空白1つも許す（「東京都千代田区 丸の内1-1-1」と書く人がいる）。ただし空白の後が町名の文字で
     # 始まるときだけ（「東京都港区 03-1234-5678」「横浜市 10-15名」の数字を番地と取り違えない）。漢数字は外さない
@@ -188,9 +189,7 @@ DATE_WEST = r"(?:19|20)[0-9]{2}\s?[年/.\-]\s?[0-9]{1,2}\s?[月/.\-]\s?[0-9]{1,2
 DATE_YEAR_LAST = r"[0-3]?[0-9][/.\-][0-3]?[0-9][/.\-](?:19|20)[0-9]{2}"
 # 元号は1字の略（「昭60.4.1」「平2.12.24」。書類の欄の狭い書き方）も読む。語の無い和暦の日付を 低 で拾うのは
 # 「昭和」「平成」「大正」と S・T・H だけのまま（1字の略は本文の「最大1.2.3」の類に当たるため）
-DATE_ERA = (
-    r"(?:明治|大正|昭和|平成|令和|[明大昭平令MTSHR])\s?(?:[0-9]{1,2}|元)\s?[年.\-/]\s?[0-9]{1,2}\s?[月.\-/]\s?[0-9]{1,2}日?"
-)
+DATE_ERA = r"(?:明治|大正|昭和|平成|令和|[明大昭平令MTSHR])\s?(?:[0-9]{1,2}|元)\s?[年.\-/]\s?[0-9]{1,2}\s?[月.\-/]\s?[0-9]{1,2}日?"
 RE_DATE = re.compile(rf"(?:{DATE_WEST}|{DATE_ERA}|{DATE_YEAR_LAST})")
 RE_DATE_ERA = re.compile(DATE_ERA)
 # 「(普)」「(当)」は振込先の略記（「丸の内支店（普）1234567」。全角の括弧は NFKC で半角になる）
@@ -1118,9 +1117,7 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
         for m in RE_POSTAL_MARK.finditer(text):
             hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(0), m.start(), m.end(), "〒＋7桁"))
         for m in RE_POSTAL_LABEL.finditer(text):
-            hits.append(
-                Hit("postal_code", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "郵便番号の語＋7桁")
-            )
+            hits.append(Hit("postal_code", Confidence.MEDIUM, m.group(1), m.start(1), m.end(1), "郵便番号の語＋7桁"))
         for m in RE_POSTAL_BEFORE_PREF.finditer(text):
             if ctx(m.start(), m.end(), ORDER_KW):
                 continue
@@ -1150,9 +1147,7 @@ def _detect_py(text: str, header: str | None = None) -> list[Hit]:
                 )
             )
         for m in RE_YUCHO.finditer(text):
-            hits.append(
-                Hit("bank_account", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "ゆうちょの記号＋番号")
-            )
+            hits.append(Hit("bank_account", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "ゆうちょの記号＋番号"))
         for m in RE_PENSION.finditer(text):
             hits.append(Hit("pension", Confidence.HIGH, m.group(1), m.start(1), m.end(1), "年金番号の語＋10桁"))
         for m in RE_PASSPORT.finditer(text):

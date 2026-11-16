@@ -25,6 +25,8 @@ def test_safe_drops_control_chars_and_keeps_numbers():
     assert _safe(None) == ""
     assert _safe("a\x00b\x07c") == "abc"
     assert len(_safe("あ" * 40000)) == 32000
+    long_formula = _safe("=" + "1" * 40000)
+    assert long_formula.startswith("'=") and len(long_formula) == 32000  # ' を足してから切る
     assert _safe(12) == 12 and _safe(1.5) == 1.5
 
 
@@ -64,7 +66,7 @@ def test_needs_action_sheet_lists_pending_files_and_folder_errors(tmp_path):
     # 読めなかったフォルダの行だけ色を付ける
     cells = {c[0].value: c[0].fill.fgColor.rgb for c in ws.iter_rows(min_row=2)}
     assert cells["読めなかったフォルダ"].endswith("F8CBAD")
-    assert not cells["リンク"].endswith("F8CBAD")
+    assert cells["リンク"] == "00000000"  # 塗りなし
 
 
 def test_write_xlsx_reports_unknown_job(tmp_path):

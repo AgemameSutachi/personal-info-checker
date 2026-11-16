@@ -84,9 +84,18 @@ def test_plan_workers_counts_full_limit_only_for_big_files(monkeypatch):
     monkeypatch.setattr(procguard, "memory_status", lambda: (64 * gb, 28 * gb))
     assert procguard.plan_workers(None) == (12, 4 * gb)
     assert procguard.plan_workers(16) == (13, 4 * gb)  # 指定は自動の上限を超えてよいが空きメモリで絞る
-    # 空き 10GB の7割 = 7GB: 4GB×1本 + 1GB×3本 = 4本（前は 4GB×1本で1本だった）
+    # 空き 10GB の7割 = 7GB: 4GB×1本 + 1GB×3本 = 4本だが、4本だと大きなファイルを2本配るので3本（前は1本だった）
     monkeypatch.setattr(procguard, "memory_status", lambda: (16 * gb, 10 * gb))
-    assert procguard.plan_workers(8) == (4, 4 * gb)
+    assert procguard.plan_workers(8) == (3, 4 * gb)
+    # 空き 12GB の7割 = 8.4GB: 4GB×2本 + 0本では4本に届かないので、大きなファイルを1本ずつにして3本（空きが増えて本数が減らない）
+    monkeypatch.setattr(procguard, "memory_status", lambda: (16 * gb, 12 * gb))
+    assert procguard.plan_workers(8) == (3, 4 * gb)
+    # 空き 20GB の7割 = 14GB: 4GB×2本 + 1GB×6本 = 8本
+    monkeypatch.setattr(procguard, "memory_status", lambda: (32 * gb, 20 * gb))
+    assert procguard.plan_workers(None) == (8, 4 * gb)
+    # 空きが上限1本分に満たなければ1本
+    monkeypatch.setattr(procguard, "memory_status", lambda: (16 * gb, 5 * gb))
+    assert procguard.plan_workers(8) == (1, 4 * gb)
     # 分からなければ CPU の数から
     monkeypatch.setattr(procguard, "memory_status", lambda: (0, 0))
     assert procguard.plan_workers(None)[0] == 12
@@ -96,3 +105,7 @@ def test_full_limit_workers_matches_runner():
     from pii_checker import runner
 
     assert procguard.FULL_LIMIT_WORKERS == runner.BIG_FILE_CONCURRENCY
+    # runner が大きなファイルを2本配り始める本数（`BIG_FILE_CONCURRENCY if self.workers >= 4 else 1`）とも揃える
+    import inspect
+
+    assert f"self.workers >= {procguard.FULL_LIMIT_MIN_WORKERS} else 1" in inspect.getsource(runner)

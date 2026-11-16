@@ -20,6 +20,8 @@ MAX_LIMIT = 4 * GB
 MAX_AUTO_WORKERS = 12
 # 上限まで使いうる大きなファイルを同時に配る本数（runner.BIG_FILE_CONCURRENCY と同じ）
 FULL_LIMIT_WORKERS = 2
+# 大きなファイルを FULL_LIMIT_WORKERS 本配るのはワーカーがこの本数以上のとき（runner と同じ・それ未満は1本ずつ）
+FULL_LIMIT_MIN_WORKERS = 4
 # 大きなファイル以外のワーカーが使うメモリの見込み（実測の 0.5GB 前後に倍の余裕を取る）
 TYPICAL_WORKER_BYTES = 1 * GB
 
@@ -74,8 +76,15 @@ def plan_workers(requested: int | None = None) -> tuple[int, int]:
     limit = per_worker_limit(total)
     if avail:
         budget = int(avail * 0.7)
-        full = min(FULL_LIMIT_WORKERS, budget // limit)
-        by_memory = max(1, full + (budget - full * limit) // TYPICAL_WORKER_BYTES) if full else 1
+        # runner は FULL_LIMIT_MIN_WORKERS 本以上のときだけ大きなファイルを FULL_LIMIT_WORKERS 本配り、それ未満なら1本ずつ
+        many = FULL_LIMIT_WORKERS + max(0, budget - FULL_LIMIT_WORKERS * limit) // TYPICAL_WORKER_BYTES
+        if budget >= FULL_LIMIT_WORKERS * limit and many >= FULL_LIMIT_MIN_WORKERS:
+            by_memory = many
+        elif budget >= limit:
+            few = 1 + (budget - limit) // TYPICAL_WORKER_BYTES
+            by_memory = min(few, FULL_LIMIT_MIN_WORKERS - 1)
+        else:
+            by_memory = 1
     else:
         by_memory = cpu
     want = requested or cpu

@@ -297,7 +297,9 @@ def test_ocr_unavailable_reason_is_joined_with_period(tmp_path, monkeypatch):
     monkeypatch.setattr(ocr, "unavailable_reason", lambda: "日本語の OCR 認識器を入れてください。")
     buf = io.BytesIO()
     Image.new("RGB", (400, 300), "white").save(buf, "PNG")
-    item = _scan(tmp_path, "scan.png", buf.getvalue())[0]
+    p = tmp_path / "scan.png"
+    p.write_bytes(buf.getvalue())
+    item = scan_file(str(p), ScanOptions(temp_dir=str(tmp_path), ocr=True)).items[0]
     assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
     assert item.reason == (
         "OCR が使えないため画像の中の文字を検査できない（要目視）。日本語の OCR 認識器を入れてください。"

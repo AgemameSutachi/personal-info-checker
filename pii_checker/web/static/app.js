@@ -110,7 +110,7 @@ async function loadInfo() {
   state.desktop = !!i.desktop && !!(window.pywebview && window.pywebview.api);
   // [使えるか, 名前, 説明, 無くても困らないか]
   const badges = [
-    [i.ocr, "OCR", i.ocr ? "画像とスキャンした PDF の文字を読める" : (i.ocr_reason || "OCR が使えない（画像は「検査不能」になる）"), false],
+    [i.ocr, "OCR", i.ocr ? "画像とスキャンした PDF の文字を読める（詳しい設定でオンにしたとき）" : (i.ocr_reason || "OCR が使えない（画像は「検査不能」になる）"), false],
     [!!i.sevenzip, "7-Zip", i.sevenzip ? "rar・lzh・暗号化 zip・ディスクイメージを展開できる" : "7-Zip が無い（一部のアーカイブが「検査不能」になる）", false],
     [i.access64 || i.helper32, "Access", i.access64 ? "Access を読める" + (i.helper32 ? "（Access 97 も可）" : "") : "Access のドライバが無い（読める範囲が狭くなる）", false],
     [!!i.pg_restore, "pg_restore", i.pg_restore ? "PostgreSQL のダンプを完全に読める" : "無くても PostgreSQL のダンプはほぼ読める（任意）", true],
@@ -359,7 +359,10 @@ $("#btn-pick").addEventListener("click", async () => {
   }
 });
 
-$("#opt-ocr").addEventListener("change", () => $("#ocr-warn").classList.toggle("hidden", $("#opt-ocr").checked));
+$("#opt-ocr").addEventListener("change", () => {
+  $("#ocr-warn").classList.toggle("hidden", $("#opt-ocr").checked);
+  updateAdvNote();
+});
 
 const lines = (id) => $(id).value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 
@@ -372,7 +375,10 @@ function updateAdvNote() {
   const parts = [];
   if (a) parts.push(`拾わない値（許可リスト）${fmtNum(a)} 件`);
   if (r) parts.push(`自分で足す規則 ${fmtNum(r)} 件`);
-  $("#adv-note").textContent = parts.length ? `（${parts.join("・")}を使う）` : "";
+  let note = parts.length ? `（${parts.join("・")}を使う）` : "";
+  // OCR は既定で切なので、閉じたままでも画像の文字を読まないことが見えるようにする
+  if (!$("#opt-ocr").checked) note += "（画像の文字は読まない・OCR 切）";
+  $("#adv-note").textContent = note;
 }
 $("#opt-allow").addEventListener("input", updateAdvNote);
 $("#opt-rules").addEventListener("input", updateAdvNote);

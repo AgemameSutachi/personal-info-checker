@@ -36,7 +36,7 @@ def main() -> int:
             continue
         top = e["path"].split("!", 1)[0]
         by_top.setdefault(top, []).append(e)
-    opts = ScanOptions()
+    opts = ScanOptions(ocr=True)
     book = PasswordBook(common=args.password)
     problems = 0
     for top, exps in sorted(by_top.items()):

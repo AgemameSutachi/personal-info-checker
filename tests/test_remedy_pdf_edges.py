@@ -334,15 +334,13 @@ def test_clean_residue_really_empties_the_form_field_value(tmp_path, shape):
     assert_no_mail_after_save(doc, tmp_path / "w2.pdf")
 
 
-def assert_no_mail_after_save(doc, out: Path) -> None:
-    """本体と同じ保存（garbage=4）の後、欄の値が空で、どのオブジェクト・ストリームにも値が残らないこと。"""
+def assert_no_mail_after_save(doc, out: Path, fields: int = 1) -> None:
+    """本体と同じ保存（garbage=4）の後、欄が fields 個とも残って値が空で、どのオブジェクト・ストリームにも値が残らないこと。"""
     doc.save(str(out), garbage=4, deflate=True)
     doc.close()
     doc = reopen(out)
     try:
-        assert [w.field_value for page in doc for w in page.widgets()] == [""] * sum(
-            len(list(page.widgets())) for page in doc
-        )
+        assert [w.field_value for page in doc for w in page.widgets()] == [""] * fields
         for xref in range(1, doc.xref_length()):
             assert MAIL not in doc.xref_object(xref)
             if doc.xref_is_stream(xref):
@@ -371,7 +369,7 @@ def test_clean_residue_empties_sibling_fields_on_other_pages(tmp_path):
     assert [w.field_value for page in doc for w in page.widgets()] == [MAIL, MAIL]
     done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
     assert done["widgets"] == 2
-    assert_no_mail_after_save(doc, tmp_path / "w2.pdf")
+    assert_no_mail_after_save(doc, tmp_path / "w2.pdf", fields=2)
 
 
 def test_clear_field_values_stops_at_a_broken_parent(tmp_path):

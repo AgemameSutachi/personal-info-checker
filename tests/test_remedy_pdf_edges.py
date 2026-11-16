@@ -301,16 +301,36 @@ def test_clean_residue_clears_a_form_field_with_the_value(tmp_path):
     doc.close()
 
 
-def test_clean_residue_really_empties_the_form_field_value(tmp_path):
+def with_default_value(doc, xref: int) -> None:
+    """欄の既定値（/DV）にも同じ値を持たせる。"""
+    doc.xref_set_key(xref, "DV", f"({MAIL})")
+
+
+def with_parent_field(doc, xref: int) -> None:
+    """値を親のフィールドに持たせ、欄（ウィジェット）は親から値を継ぐ形にする。"""
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<< /FT /Tx /T (f1) /V ({MAIL}) /Kids [{xref} 0 R] >>")
+    doc.xref_set_key(xref, "Parent", f"{parent} 0 R")
+    doc.xref_set_key(xref, "V", "null")
+    doc.xref_set_key(xref, "T", "null")
+
+
+@pytest.mark.parametrize("shape", [None, with_default_value, with_parent_field], ids=["value", "default", "parent"])
+def test_clean_residue_really_empties_the_form_field_value(tmp_path, shape):
     """掃除が「消した」と数えた欄の値が、本体と同じ保存（garbage=4）の後に、値にも見た目のストリームにも残らないこと。
 
-    PyMuPDF は field_value を空文字にしても /V を書き換えないので、本体は /V を直に空にしている。
+    PyMuPDF は field_value を空文字にしても /V を書き換えないので、本体は /V・/DV を親までたどって直に空にしている。
     """
     p = make_pdf(tmp_path / "x.pdf", "plain")
     doc = reopen(p)
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
-    remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    if shape:
+        shape(doc, next(doc[0].widgets()).xref)
+        doc = save_reopen(doc, tmp_path / "w1.pdf")
+    assert [w.field_value for w in doc[0].widgets()] == [MAIL]  # 形を変えても値が読めること
+    done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
+    assert done["widgets"] == 1
     out = tmp_path / "w2.pdf"
     doc.save(str(out), garbage=4, deflate=True)
     doc.close()

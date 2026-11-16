@@ -220,6 +220,23 @@ def encryption_method(fitz, doc) -> int:
     return fitz.PDF_ENCRYPT_AES_256
 
 
+def _clear_field_values(doc, xref: int) -> None:
+    """フォーム欄の値（/V）と既定値（/DV）を、値を継ぐ親のフィールドまでたどって空にする。
+
+    PyMuPDF は field_value を空文字にして update しても /V を書き換えないので、項目を直に書く。
+    文字列の値だけを空にする（チェック・ラジオの名前の値や、複数選択の配列は触らない）。
+    コンボ・リストの選択肢の一覧（/Opt）も触らない（一覧そのものは欄の値ではない）。
+    """
+    seen: set[int] = set()
+    while xref and xref not in seen:
+        seen.add(xref)
+        for key in ("V", "DV"):
+            if doc.xref_get_key(xref, key)[0] == "string":
+                doc.xref_set_key(xref, key, "()")
+        kind, value = doc.xref_get_key(xref, "Parent")
+        xref = int(value.split()[0]) if kind == "xref" else 0
+
+
 def clean_residue(fitz, doc, residue: Residue) -> dict:
     """本文の外（文書情報・XMP・注釈・フォーム欄・しおり・リンク・埋め込みファイル）に残った値を取り除き、ページの縮小画像（/Thumb）も外す。件数を種類別に返す。"""
     done = {
@@ -269,9 +286,7 @@ def clean_residue(fitz, doc, residue: Residue) -> dict:
             value = w.field_value
             if isinstance(value, str) and value and residue.hit(value):
                 try:
-                    # PyMuPDF は field_value を空文字にしても /V を書き換えないので、値の項目を直に空にしてから
-                    # 見た目（/AP）を作り直す（古い見た目は保存の garbage で落ちる）
-                    doc.xref_set_key(w.xref, "V", "()")
+                    _clear_field_values(doc, w.xref)
                     w.field_value = ""
                     w.update()
                     done["widgets"] += 1

@@ -319,7 +319,7 @@ EN_NAME_LABEL_OK_BEFORE = frozenset(
 # 値の末尾がこの語なら、姓で始まる地名・会社・部署（「石川県」「山田工業」「山田 営業部」）とみなして落とす。
 # 人の名の末尾にまず来ない語だけ（「浩市」「英機」「美園」のように名にも来る字は下の _RE_NAME_EN_ORG_TAIL_WEAK）
 _RE_NAME_EN_ORG_TAIL = re.compile(
-    r"(?:業|県|府|区|郡|組|部|課|係|室|屋|会|社|店|署|館|院|校|場|薬|組合|商事|銀行|電機|工機|商店|書店)$"
+    r"(?:業|県|府|区|郡|組|部|課|係|室|屋|会|社|店|署|館|院|校|場|薬|組合|商事|銀行|電機|工機|商店|書店|役所|学園)$"
 )
 # 地名・組織の語尾だが人の名の末尾にも来るもの（「松本市」と「鈴木浩市」・「内田洋行」と「山田 洋行」）。落とさず 低 にする
 _RE_NAME_EN_ORG_TAIL_WEAK = re.compile(r"(?:[市町村所機園局]|洋行)$")
@@ -1893,6 +1893,68 @@ def _era_date_is_broken(text: str, h: Hit) -> bool:
     return text[h.end : h.end + 1] == "." and text[h.end + 1 : h.end + 2].isdigit()
 
 
+_RE_ONE_LETTER_ERA = re.compile(r"[明大昭平令]\s?(?:[0-9]|元)")
+_RE_KANA_KANJI = re.compile(r"[一-龥々ぁ-んァ-ヶー]")
+_RE_BIRTH_WORD_END = re.compile(r"(?:生年月日|誕生日|生年|生まれ|出生日?)$")
+_RE_YEAR_LAST_FULL = re.compile(r"([0-9]{1,2})[/.\-]([0-9]{1,2})[/.\-](?:19|20)[0-9]{2}")
+
+
+def _birth_date_is_broken(text: str, h: Hit) -> bool:
+    """生年月日の語の近くで拾った日付が、語の一部や数の並びの一部か（「最大1.2.3」「192.168.1.2000」）。
+
+    - 1字の元号の略（昭・平…）の直前が漢字・仮名: 「最大」「公平」の字の途中。直前が生年月日の語なら日付とみなす
+    - 年が後ろの日付: 直前が数字・区切り（IP アドレスや版の番号の途中）か、月・日がありえない（「39.39.2000」）
+    """
+    v = h.value
+    if _RE_ONE_LETTER_ERA.match(v):
+        before = text[max(0, h.start - 4) : h.start]
+        if before and _RE_KANA_KANJI.fullmatch(before[-1]) and not _RE_BIRTH_WORD_END.search(before):
+            return True
+    m = _RE_YEAR_LAST_FULL.fullmatch(v)
+    if m:
+        prev = text[h.start - 1 : h.start]
+        if prev and prev in "0123456789./-":
+            return True
+        a, b = int(m.group(1)), int(m.group(2))
+        if not (1 <= a <= 31 and 1 <= b <= 31 and min(a, b) <= 12):
+            return True
+    return False
+
+
+_RE_ADDR_NUM_TAIL = re.compile(rf"{NUM}(?:丁目|番地|番|号|{H}[0-9]+)")
+
+
+def _aza_tail_not_after_town(value: str) -> bool:
+    """住所の番地が字の形（「大字軽井沢9999」）だけで、字の直前が市区町村郡でないか（「千代田区の文字コード1」）。"""
+    if _RE_ADDR_NUM_TAIL.search(value):
+        return False
+    i = value.rfind("字")
+    if i <= 0:
+        return False
+    if value[i - 1] == "大":
+        i -= 1
+    return i == 0 or value[i - 1] not in "市区町村郡"
+
+
+# 人を指す語（申込者・契約者など。NAME_TIGHT_PERSON_WORDS）が値のすぐ前にあるか
+_RE_PERSON_WORD_BEFORE = re.compile(r"(?:申込者|申請者|契約者|保護者|被保険者|加入者)[ 　:：]?$")
+# 人を指す語の後の「鈴木 名義」「佐藤 欄」の空白の後に来る、書類の欄・項目の語
+_NOT_GIVEN_AFTER_PERSON_WORD = frozenset(
+    "名義 欄 印 情報 本人 契約 一覧 氏名 名前 様式 記入 署名 住所 電話 番号 区分 変更 確認 登録 申請 手続 手続き".split()
+)
+# 口座の略記「(普)」「(当)」が値のすぐ前の口座の語か（「(当)注文番号 1234567」の「当社」の略と見分ける）
+_RE_BANK_WORD_LAST = re.compile(r"(?:口座番号|口座no\.?|口座|普通預金|当座預金|普通|当座|\(普\)|\(当\))", re.I)
+
+
+def _bank_abbrev_not_next(text: str, h: Hit) -> bool:
+    """口座の語が略記の「(普)」「(当)」だけで、略記と7桁の間に語を挟むか（空白だけなら口座とみなす）。"""
+    seg = text[max(0, h.start - 16) : h.start]
+    words = list(_RE_BANK_WORD_LAST.finditer(seg))
+    if not words or not words[-1].group(0).startswith("("):
+        return False
+    return seg[words[-1].end() :].strip() != ""
+
+
 # 「よくある姓＋空白＋名」の名の側に来る一般の語（2026-11-07・株のデータの報告の文。証券会社「松井」「野村」の後の語）。
 # 1字の名（実・勉・茂・等・計・全）があるので、名にまず使わない語だけを並べる
 _NOT_GIVEN_NAMES = frozenset(
@@ -2060,6 +2122,9 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
     Google Cloud のプロジェクト番号の置き場のもの（_in_gcp_project_number）
     2026-11-08: カード番号（手がかりなしの 中）のすぐ前が ID の項目のキーのものは 低 に下げる（RE_ID_KEY_BEFORE）
     2026-11-08: 「英語の氏名の見出し語＋よくある姓の名前」にも、コードの代入・引数の見分け（_name_label_code_shape）をかける
+    2026-11-16: 書き方の揺れで足した形の誤検出。生年月日の語の近くの「最大1.2.3」「192.168.1.2000」（_birth_date_is_broken）・
+    字の番地の「文字コード1」（_aza_tail_not_after_town）・「(当)注文番号 1234567」（_bank_abbrev_not_next）・
+    人を指す語の後の会社・施設・地名と欄の語（「契約者 佐藤工業」「契約者 鈴木 名義」）
     """
     out = []
     for h in hits:
@@ -2090,6 +2155,26 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
         elif h.rule == "和暦の日付（生年月日の可能性）":
             if _era_date_is_broken(text, h):
                 continue
+        elif h.rule == "生年月日の語＋日付":
+            if _birth_date_is_broken(text, h):
+                continue
+        elif h.pii_type == "address" and h.rule.startswith("都道府県＋市区町村＋番地"):
+            if _aza_tail_not_after_town(h.value):
+                continue
+        elif h.rule == "口座の語＋7桁":
+            if _bank_abbrev_not_next(text, h):
+                continue
+        elif h.rule == "氏名の見出し語＋よくある姓の名前" and _RE_PERSON_WORD_BEFORE.search(
+            text[max(0, h.start - 6) : h.start]
+        ):
+            # 人を指す語の後は、姓で始まる会社・施設・地名（「契約者 佐藤工業」「申請者 山口県」）や
+            # 書類の欄の語（「契約者 鈴木 名義」）が来やすい。英語の見出し語と同じ語尾で見分ける
+            if _RE_NAME_EN_ORG_TAIL.search(h.value):
+                continue
+            if _RE_SPACE.split(h.value, maxsplit=1)[-1] in (_NOT_GIVEN_NAMES | _NOT_GIVEN_AFTER_PERSON_WORD):
+                continue
+            if _RE_NAME_EN_ORG_TAIL_WEAK.search(h.value):
+                h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_EN_ORG_TAIL_NOTE)
         elif h.pii_type == "email":
             if not _email_domain_plausible(h.value):
                 h = _email_trim_tail(h)

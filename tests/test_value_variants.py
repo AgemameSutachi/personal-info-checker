@@ -89,6 +89,56 @@ def test_rural_address_with_aza(text, value):
 def test_aza_in_prose_is_not_address():
     # 字の名にひらがなを許すと「小字の1件」を番地と読んでいた
     assert "address" not in found("「湯前」は福島県石川町の小字の1件だけ")
+    # 字の直前が市区町村郡でないもの（「文字」「最大字数」）は番地の字ではない
+    assert "address" not in found("東京都千代田区の文字コード1")
+    assert "address" not in found("東京都千代田区で使う最大字数100")
+    assert found("沖縄県那覇市字安里999")["address"][1] == "沖縄県那覇市字安里999"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "生年月日の欄は最大1.2.3まで入力可",  # 「最大」の「大」を元号と読まない
+        "誕生日会 公平5.10.20",
+        "birthday 192.168.1.2000",  # IP アドレスの途中
+        "生年月日 39.39.2000",  # 月日がありえない
+        "生年月日 13.13.1985",
+    ],
+)
+def test_birth_word_date_inside_other_words(text):
+    assert "birthdate" not in found(text)
+
+
+def test_one_letter_era_right_after_birth_word():
+    assert found("生年月日平2.12.24")["birthdate"][0] == "high"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "契約者 佐藤工業",
+        "申請者 山口県",
+        "契約者 中村病院",
+        "申込者 松本市役所",
+        "保護者 小林学園",
+        "契約者 鈴木 名義",
+        "申込者 佐藤 欄",
+        "被保険者 山田 本人",
+    ],
+)
+def test_person_word_before_organization_or_form_word(text):
+    assert "name" not in found(text)
+
+
+def test_person_word_before_weak_place_tail_is_low():
+    # 「市」「町」は名の末尾（「浩市」）にも来るので落とさず 低
+    assert found("申請者 松本市")["name"][0] == "low"
+
+
+def test_bank_abbreviation_with_other_word_between():
+    # 「(当)」は「当社」「当日」の略記にもなる。略記と7桁の間に語を挟むものは口座にしない
+    assert "bank_account" not in found("(当)注文番号 1234567")
+    assert found("口座 (普) 1234567")["bank_account"][0] == "high"
 
 
 @pytest.mark.parametrize(

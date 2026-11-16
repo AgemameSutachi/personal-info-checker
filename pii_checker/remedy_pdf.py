@@ -269,6 +269,9 @@ def clean_residue(fitz, doc, residue: Residue) -> dict:
             value = w.field_value
             if isinstance(value, str) and value and residue.hit(value):
                 try:
+                    # PyMuPDF は field_value を空文字にしても /V を書き換えないので、値の項目を直に空にしてから
+                    # 見た目（/AP）を作り直す（古い見た目は保存の garbage で落ちる）
+                    doc.xref_set_key(w.xref, "V", "()")
                     w.field_value = ""
                     w.update()
                     done["widgets"] += 1

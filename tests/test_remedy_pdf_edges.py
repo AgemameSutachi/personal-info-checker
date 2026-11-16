@@ -296,25 +296,30 @@ def test_clean_residue_clears_a_form_field_with_the_value(tmp_path):
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
     done = remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
-    # 数えることだけを見る。値が本当に消えたかは下の xfail の試験が見る
+    # 数えることだけを見る。値が本当に消えたかは下の試験が見る
     assert done["widgets"] == 1
     doc.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PyMuPDF は field_value を空文字にしても /V を書き換えない（空白 1 文字なら変わる）。本体 remedy_pdf の課題。"
-    "本体を直すか PyMuPDF の版が変わって XPASS になったら、この印を外す",
-)
 def test_clean_residue_really_empties_the_form_field_value(tmp_path):
-    """掃除が「消した」と数えた欄の値が、保存し直して読み直しても残っていないこと（今は残る）。"""
+    """掃除が「消した」と数えた欄の値が、本体と同じ保存（garbage=4）の後に、値にも見た目のストリームにも残らないこと。
+
+    PyMuPDF は field_value を空文字にしても /V を書き換えないので、本体は /V を直に空にしている。
+    """
     p = make_pdf(tmp_path / "x.pdf", "plain")
     doc = reopen(p)
     add_text_widget(doc[0], MAIL)
     doc = save_reopen(doc, tmp_path / "w.pdf")
     remedy_pdf.clean_residue(fitz, doc, Residue([MAIL], ["email"], [0]))
-    doc = save_reopen(doc, tmp_path / "w2.pdf")
+    out = tmp_path / "w2.pdf"
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+    doc = reopen(out)
     assert [w.field_value for w in doc[0].widgets()] == [""]
+    for xref in range(1, doc.xref_length()):
+        assert MAIL not in doc.xref_object(xref)
+        if doc.xref_is_stream(xref):
+            assert MAIL.encode() not in (doc.xref_stream(xref) or b"")
     doc.close()
 
 

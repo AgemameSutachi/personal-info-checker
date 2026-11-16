@@ -216,6 +216,18 @@ def test_make_parts():
     assert splitscan.make_parts([], 10, 10) == []
 
 
+def test_split_run_hands_out_biggest_parts_first():
+    """区切りは大きい順に配る（同じ大きさなら元の順）。同時の本数の上限は守る。"""
+    parts = [(0, 5, 10), (5, 6, 300), (6, 9, 10), (9, 10, 50)]
+    plan = splitscan.SplitPlan(top_path="x.zip", entries=[], parts=parts, torch_dirs=[], space_extra=0)
+    run_ = splitscan.SplitRun(plan, "x.zip", 0, time.time(), None, 2)
+    assert [run_.take(), run_.take(), run_.take()] == [1, 3, None]
+    run_.running.discard(1)
+    assert [run_.take(), run_.take()] == [0, None]
+    run_.running.clear()
+    assert [run_.take(), run_.take()] == [2, None]
+
+
 # ------------------------------------------------------------------ (2) 区切りの1つが落ちたとき
 
 

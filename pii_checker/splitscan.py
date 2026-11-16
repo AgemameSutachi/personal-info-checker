@@ -371,7 +371,12 @@ class SplitRun:
         self.started = started
         self.tmp = tmp
         self.parallel = max(1, parallel)
-        self.queue: deque[int] = deque(range(len(plan.parts)))
+        # 大きな区切りから配る。1項目だけで大きい区切りが最後に回ると、それだけが1本で走る尾になる
+        # （7.8GB の zip で 1.5GB の1項目の区切りが最後に配られ、壁の時間の約半分を1本で走っていた）。
+        # 結果は番号の順に連ねるので、全部の区切りが戻れば配る順は結果を変えない（展開の上限などで途中から
+        # 配るのをやめたときは親は打ち切りのままで、中に残る項目の範囲だけが変わる）
+        order = sorted(range(len(plan.parts)), key=lambda i: -plan.parts[i][2])
+        self.queue: deque[int] = deque(order)
         self.running: set[int] = set()
         self.outcomes: dict[int, PartResult] = {}
         self._expanded = 0

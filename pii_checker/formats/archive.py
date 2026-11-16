@@ -743,6 +743,9 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
     import py7zr
 
     last_err = None
+    # パスワードなしで PasswordRequired が出れば暗号化と分かる。一覧まで暗号化された 7z は、違うパスワードで
+    # 復号した一覧を読むので TypeError（Unknown field）などばらばらの例外になり、最後の例外の型だけでは決められない
+    encrypted = False
     for pw in [None] + ctx.password_candidates():
         try:
             with blob.open() as f, py7zr.SevenZipFile(f, mode="r", password=pw) as z:
@@ -768,14 +771,12 @@ def _handle_7z_python(ctx: ScanContext, blob: Blob, item: ItemResult, col: Colle
             raise
         except Exception as e:  # PasswordRequired・誤パスワードによる展開失敗など
             last_err = e
+            if type(e).__name__ == "PasswordRequired":
+                encrypted = True
             continue
     msg = str(last_err) if last_err else ""
-    if "password" in msg.lower() or type(last_err).__name__ in (
-        "PasswordRequired",
-        "LZMAError",
-        "Bad7zFile",
-        "CrcError",
-    ):
+    password_errors = ("PasswordRequired", "LZMAError", "Bad7zFile", "CrcError")
+    if encrypted or "password" in msg.lower() or type(last_err).__name__ in password_errors:
         raise NeedPassword("archive", _pw_reason(ctx, "7z アーカイブが暗号化されている"))
     raise Uncheckable(
         f"7z を展開できなかった（7-Zip を入れると読める可能性）。{SEVENZIP_HINT}。"

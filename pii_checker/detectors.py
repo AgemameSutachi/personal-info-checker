@@ -1984,15 +1984,19 @@ _NOT_NAMES_AFTER_LABEL = frozenset(
     "窓口 本文 パス 組織 未定 不明 なし 無し 各位 全員 本人 一覧 不要 同上 空欄 事務局 オーナー 管理者 "
     "自分 合言葉".split()
 )
-# 「送り手の名前: 合言葉」「窓口の宛先 窓口」「引数の名前: 検索語」: 物の名前・宛先の項目名。「担当者の名前」
-# 「お客様の宛先」のように「の」の前が人を指す字なら人の名前なので、ここには当てない
-_RE_THING_LABEL_BEFORE = re.compile(r"([^\s])の(?:名前|宛先)(?:[\"']?\s*[:：=]\s*[\"']?|[ 　]+)$")
-_PERSON_CHARS_BEFORE_NO = frozenset("者様人員客方")
+# 「ファイルの名前: 設定ファイル」「窓口の宛先 …」「引数の名前: 検索語」: 物の名前・宛先の項目名。
+# 「母の名前」「お客さまの名前」「請求書の宛先」のように人の名前が来る項目も多いので、「の」の前が
+# 物を指す語のときだけ当てる（人を指す語を並べるときりが無い）
+_RE_THING_LABEL_BEFORE = re.compile(
+    r"(?:ファイル|フォルダ|引数|変数|関数|項目|欄|列|設定|窓口|送り手|商品|製品|サービス|アプリ|ツール|"
+    r"ブランチ|プロジェクト|タスク|モデル|テーブル|カラム|シート|イベント|キャラクター|ペット)"
+    r"の(?:名前|宛先)(?:[\"']?\s*[:：=]\s*[\"']?|[ 　]+)$"
+)
 # 列見出しの語でもあるが、仮名の名（「メイ」「かな」）にもなるもの。値の最初の語がこれでも落とさない
 _KANA_NAMES_LIKE_HEADER = frozenset("セイ メイ かな カナ".split())
 _RE_NAME_CHAR = re.compile(NAME_CHARS)
-NAME_LABEL_CUT_NOTE = "（名前の長さの上限で切れ、後ろに文が続くため 低）"
-NAME_LABEL_THING_NOTE = "（「〜の名前」「〜の宛先」の項目名の後のため 低）"
+NAME_LABEL_CUT_NOTE = "（名前の字数の上限の8字で切れ、後ろに仮名・漢字が続くため 低）"
+NAME_LABEL_THING_NOTE = "（ファイル・引数などの物の名前・宛先の項目の後のため 低）"
 
 
 def _fixed_width_cells(line: str) -> list[str]:
@@ -2255,8 +2259,7 @@ def _drop_false_shapes(text: str, hits: list[Hit]) -> list[Hit]:
                 if shape == "low":
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_IN_CALL_NOTE)
             if h.confidence == Confidence.MEDIUM:
-                thing = _RE_THING_LABEL_BEFORE.search(text, max(0, h.start - 16), h.start)
-                if thing and thing.group(1) not in _PERSON_CHARS_BEFORE_NO:
+                if _RE_THING_LABEL_BEFORE.search(text, max(0, h.start - 20), h.start):
                     h = replace(h, confidence=Confidence.LOW, rule=h.rule + NAME_LABEL_THING_NOTE)
                 elif _RE_NAME_CHAR.match(text, h.end):
                     # 値の字数の上限（8字）で切れて、後ろに仮名・漢字が続く（「氏名：突然送られてくるメールは…」の文）

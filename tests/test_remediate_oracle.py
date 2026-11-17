@@ -1200,6 +1200,164 @@ def test_dp_records_and_job_db_have_no_raw_values(tmp_path, trash, small_granule
     assert _leak([str(f) for f in trash.files()], CUSTOMER_NEEDLES)
 
 
+# ---------------------------------------------------------------- expdp: 単位の書き直しの断りの枝
+
+
+def _keep(n: int, row: bytes):
+    return remedy_oracle._KEEP
+
+
+def _rewrite_unit(data: bytes, unit_no: int = 0, row_fn=_keep) -> tuple[int, int]:
+    """メモリの上で、unit_no 番目の表の単位を書き直す（ファイルは作らない）。"""
+    f = io.BytesIO(data)
+    seg = remedy_oracle.find_dp_segments(f, len(data))[unit_no]
+    return remedy_oracle.rewrite_dp_unit(f, io.BytesIO(), seg, len(data), row_fn)
+
+
+def _table_units(data: bytes) -> list[dict]:
+    return [u for u in parse_units(data) if u["kind"] == "table"]
+
+
+def _row_length_at(data: bytes, u: dict, k: int) -> int:
+    """k 番目（0 始まり）の行の長さの欄（3C の次の 2 バイト）の位置。"""
+    return u["at"] + 4096 + align8(u["f"][0]) + sum(len(r) for r in u["rows"][:k]) + 1
+
+
+def test_dp_unit_refuses_values_between_header_and_rows(tmp_path, small_granule):
+    data = build_dp(tmp_path).read_bytes()
+    units = _table_units(data)
+    i = next(k for k, u in enumerate(units) if u["f"][0] % 8)  # 見出しのあとにゼロ詰めのある単位
+    bad = bytearray(data)
+    bad[units[i]["at"] + 4096 + units[i]["f"][0]] = 0x01
+    assert _rewrite_unit(data, i) == (0, len(units[i]["rows"]))  # 陽性対照: 元のままなら通る
+    with pytest.raises(RemedyError, match="見出しと行のあいだ"):
+        _rewrite_unit(bytes(bad), i)
+
+
+def test_dp_unit_refuses_values_after_the_index(tmp_path, small_granule):
+    data = build_dp(tmp_path).read_bytes()
+    u = _table_units(data)[0]
+    assert u["tail"]  # 索引のあとにゼロ詰めがある
+    assert _rewrite_unit(data) == (0, len(u["rows"]))  # 陽性対照: 元のままなら通る
+    bad = bytearray(data)
+    bad[u["at"] + u["f"][5] + u["f"][4]] = 0x01  # 索引の終わりの直後（本体の始まり＋F6−制御ブロック＋F5）
+    with pytest.raises(RemedyError, match="索引のあとに"):
+        _rewrite_unit(bytes(bad))
+
+
+def test_dp_unit_refuses_a_too_short_row_length(tmp_path, small_granule):
+    data = build_dp(tmp_path).read_bytes()
+    u = _table_units(data)[0]
+    bad = bytearray(data)
+    bad[_row_length_at(data, u, 0) : _row_length_at(data, u, 0) + 2] = b"\x00\x03"
+    with pytest.raises(RemedyError, match="行の長さが小さすぎる"):
+        _rewrite_unit(bytes(bad))
+
+
+@pytest.mark.parametrize("delta", [-2, 5], ids=["leftover_bytes", "runs_past_total"])
+def test_dp_unit_refuses_rows_cut_at_the_total(tmp_path, small_granule, delta):
+    """最後の行の長さが、行の合計（F3）の境目と合わない（2 バイト余る・合計を越える）。
+
+    行は F3 で打ち切って読むので、どちらも行の合計の照合より先に「切れている」で断る。
+    """
+    data = build_dp(tmp_path).read_bytes()
+    u = _table_units(data)[0]
+    last = len(u["rows"]) - 1
+    at = _row_length_at(data, u, last)
+    bad = bytearray(data)
+    struct.pack_into(">H", bad, at, len(u["rows"][last]) + delta)
+    with pytest.raises(RemedyError, match="境目で切れている"):
+        _rewrite_unit(bytes(bad))
+
+
+def test_dp_unit_refuses_a_replacement_that_does_not_fit(tmp_path, small_granule):
+    """置き換えた行が単位の空き（末尾のゼロ詰め・最大 4,095 バイト）を越えると断る。
+
+    9,000 バイトはどの空きよりも大きい。収まるかどうかの境目そのもの（等号の側）は試していない。
+    """
+    data = build_dp(tmp_path).read_bytes()
+
+    def same(n: int, row: bytes):
+        return bytes(row) if n == 1 else remedy_oracle._KEEP
+
+    def grow(n: int, row: bytes):
+        return b"<" + b"\x00" * 9000 if n == 1 else remedy_oracle._KEEP
+
+    # 陽性対照: 同じ長さで置き換える（_KEEP でない道を通る）なら収まる
+    assert _rewrite_unit(data, 0, same) == (0, len(_table_units(data)[0]["rows"]))
+    with pytest.raises(RemedyError, match="元の場所に収まらない"):
+        _rewrite_unit(data, 0, grow)
+
+
+def test_dp_unit_end_refuses_a_broken_control_block(tmp_path, small_granule):
+    data = build_dp(tmp_path).read_bytes()
+    f = io.BytesIO(data)
+    seg = remedy_oracle.find_dp_segments(f, len(data))[0]
+    # 陽性対照: 壊していなければ、次の単位（商品）の制御ブロックの位置を返す
+    assert remedy_oracle._unit_end(f, seg, len(data)) == _table_units(data)[1]["at"]
+    bad = bytearray(data)
+    at = seg.xml_at - 2 - 4096
+    bad[at : at + 4] = b"\x00\x00\x00\x00"
+    with pytest.raises(RemedyError, match="区画の作りが想定と違う"):
+        remedy_oracle._unit_end(io.BytesIO(bytes(bad)), seg, len(data))
+
+
+def test_copy_range_refuses_a_truncated_source():
+    out = io.BytesIO()
+    remedy_oracle._copy_range(io.BytesIO(b"abcdef"), out, 1, 4)  # 陽性対照: 足りていれば範囲をそのまま写す
+    assert out.getvalue() == b"bcd"
+    out = io.BytesIO()
+    with pytest.raises(RemedyError, match="途中で切れている"):
+        remedy_oracle._copy_range(io.BytesIO(b"abc"), out, 0, 10)
+    assert out.getvalue() == b"abc"
+
+
+def test_dp_refuses_a_table_that_is_not_in_the_dump(tmp_path, small_granule):
+    from array import array
+
+    from pii_checker.remedy_write import Selection
+
+    p = build_dp(tmp_path)
+    dst = tmp_path / "out" / "none.dmp"
+    dst.parent.mkdir()
+    sel = Selection({("無い表", "phone", 3): array("q", [1, 1, 0, 13])})
+    with pytest.raises(RemedyError, match="表「無い表」の区画が見つかりませんでした"):
+        remediate.rewrite_file(str(p), str(dst), "oracle_expdp", "delete_rows", sel, None, str(p))
+
+
+def test_dp_dummy_refuses_when_no_cell_is_rewritten(tmp_path, small_granule):
+    """選んだ列が行に無い（列の数を越える）と、書き換える値が無いので断る。"""
+    from array import array
+
+    from pii_checker.remedy_write import Selection
+
+    p = build_dp(tmp_path)
+    dst = tmp_path / "out" / "nocell.dmp"
+    dst.parent.mkdir()
+    sel = Selection({("顧客", "phone", 3): array("q", [1, 99, 0, 13])})
+    with pytest.raises(RemedyError, match="書き換える値が見つかりませんでした"):
+        remediate.rewrite_file(str(p), str(dst), "oracle_expdp", "dummy", sel, DummyMaker("same"), str(p))
+    assert not dst.exists()
+
+
+def test_rewrite_oracle_dump_file_refuses_unknown_method_and_layout(tmp_path):
+    from pii_checker.remedy_write import Selection
+
+    src = tmp_path / "x.dmp"
+    src.write_bytes(b"\x00" * 16)
+    with pytest.raises(RemedyError, match="この方法は Oracle のダンプに使えません"):
+        remedy_oracle.rewrite_oracle_dump_file(
+            str(src), str(tmp_path / "a.dmp"), "oracle_exp", "zip", Selection(), None
+        )
+    dst = tmp_path / "b.dmp"
+    # 受け付ける 4 つの方法は、方法の確かめを通って、形式の確かめで断られる
+    for method in ("delete_rows", "delete_columns", "dummy", "delete_table"):
+        dst.write_bytes(b"half")  # 失敗したら書きかけの出力を消す
+        with pytest.raises(RemedyError, match="この形式の Oracle のダンプは"):
+            remedy_oracle.rewrite_oracle_dump_file(str(src), str(dst), "oracle_xml", method, Selection(), None)
+        assert not dst.exists()
+
+
 # ================================================================ 旧 exp: 文字セット・切れたダンプ・DDL の読み方・記録
 
 

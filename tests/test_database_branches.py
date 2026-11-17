@@ -255,7 +255,7 @@ class _FakeConn:
         self.closed = True
 
 
-def test_dump_odbc_tables_links_and_blobs(monkeypatch):
+def test_dump_odbc_tables_links_and_blobs():
     """システムの表を飛ばし、リンクテーブルは注記に、読めない表は項目に残す。長いバイナリだけ中を検査する。"""
     memo = database.MEMO_SIZE
     conn = _FakeConn(
@@ -269,7 +269,6 @@ def test_dump_odbc_tables_links_and_blobs(monkeypatch):
         broken=["壊れ"],
         attachments={"添付": [("a.txt", b"x"), ("空.txt", None)]},
     )
-    monkeypatch.setattr(database, "ATTACHMENT_LIMIT", 1024)
     ctx = _Ctx()
     item, col = _collector()
     database._dump_odbc(ctx, conn, col, item, 0, "db.accdb")
@@ -300,6 +299,7 @@ def test_odbc_attachment_unreadable_big_and_limit(monkeypatch):
     reasons = {i.path: i.reason for i in ctx.items}
     assert "添付ファイル型の列「a」を読めなかった" in reasons["db.accdb!表「t」"]
     big = reasons["db.accdb!表「t」列「b」の添付「big.bin」"]
+    # 上限を 1KB に下げて 2KB の添付を「大きすぎる」にしている（MB で丸めるので表示は 0MB）
     assert big.startswith("添付ファイルが大きすぎる（0MB）")
     assert [d for d, *_ in ctx.nested] == [
         "db.accdb!表「t」列「b」の添付「1.txt」"
@@ -336,7 +336,7 @@ def test_odbc_password_tried_then_opened(monkeypatch):
 
     def connect(s, Error):
         tried.append(s)
-        if "PWD=" not in s or "PWD={a;b}" not in s:
+        if "PWD={a;b}" not in s:
             raise Error("Not a valid password. (-1905)")
         return conn
 

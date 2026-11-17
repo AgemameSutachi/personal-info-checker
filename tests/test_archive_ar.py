@@ -128,6 +128,21 @@ def test_ar_object_spans_rejects_broken_headers():
     # BSD の名前の長さが負・中身より長い
     assert archive.ar_object_spans(io.BytesIO(b"!<arch>\n" + _member("#1/-5", _coff(b"abc")))) is None
     assert archive.ar_object_spans(io.BytesIO(b"!<arch>\n" + _member("#1/999", _coff(b"abc")))) is None
+    # 先頭の印が無い・大きさの欄が数でない・BSD の名前の長さが数でない
+    assert archive.ar_object_spans(io.BytesIO(b"!<arxh>\n" + good[8:])) is None
+    bad_size = f"{'a.obj/':<16}{'0':<12}{'':<6}{'':<6}{'0':<8}{'12x':<10}".encode("ascii") + b"`\n"
+    assert archive.ar_object_spans(io.BytesIO(b"!<arch>\n" + bad_size + _coff(b"abc"))) is None
+    assert archive.ar_object_spans(io.BytesIO(b"!<arch>\n" + _member("#1/ab", _coff(b"abc")))) is None
+
+
+def test_ar_object_spans_gives_up_on_too_many_members(monkeypatch):
+    import io
+
+    # 部品が上限を超える ar は1件として読まず、None を返して 7-Zip の道へ回す（目次は数えない）
+    monkeypatch.setattr(archive, "AR_MAX_MEMBERS", 2)
+    two = b"!<arch>\n" + _member("/", b"\x00\x00") + b"".join(_member(f"{c}.obj/", _coff(b"x")) for c in "ab")
+    assert archive.ar_object_spans(io.BytesIO(two)) is not None
+    assert archive.ar_object_spans(io.BytesIO(two + _member("c.obj/", _coff(b"x")))) is None
 
 
 def test_masked_reader_blanks_only_given_spans():

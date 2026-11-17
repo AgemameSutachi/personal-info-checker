@@ -157,6 +157,7 @@ def test_tar_large_member_is_written_to_a_temp_file(tmp_path, monkeypatch):
         t.addfile(info, io.BytesIO(CSV))
         small = tarfile.TarInfo("small.txt")
         small.size = 5
+        small.mtime = 1_600_000_000
         t.addfile(small, io.BytesIO(b"hello"))
     items = _scan(tmp_path, "big.tar", buf.getvalue())
     assert _phones(items) == 20
@@ -164,7 +165,7 @@ def test_tar_large_member_is_written_to_a_temp_file(tmp_path, monkeypatch):
         (f"{tmp_path / 'big.tar'}!big.csv", True),
         (f"{tmp_path / 'big.tar'}!small.txt", False),
     ]
-    assert seen[0][2] == 1_700_000_000
+    assert [s[2] for s in seen] == [1_700_000_000, 1_600_000_000]
 
 
 def test_tar_large_member_without_temp_space_is_left_with_reason(tmp_path, monkeypatch):

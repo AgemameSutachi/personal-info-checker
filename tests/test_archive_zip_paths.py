@@ -112,7 +112,10 @@ def test_torch_tensors_are_out_of_scope(tmp_path):
 
 
 def test_torch_check_unreadable_pickle_scans_normally(tmp_path, monkeypatch):
-    """torch の印の data.pkl が読めなければ torch とみなさず、data/0 もふつうに検査する（見落としの側に倒さない）。"""
+    """torch の印の data.pkl が読めなければ torch とみなさず、data/0 もふつうに検査する（見落としの側に倒さない）。
+
+    差し替えは data.pkl を開く所すべてに効くので、data.pkl 自体も取り出せない項目として残る（ここでは見ない）。
+    """
     original = archive._open_zip_member
 
     def flaky(z, info, pwd):

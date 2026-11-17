@@ -406,6 +406,79 @@ def test_section_table_line_without_newline_copied():
     assert w.st.pos == len(b'TABLE "')
 
 
+# 列 A（数値）と B（文字）の行。00 00 のあとに列ごとの長さ（2 バイト）と値が続く
+ROW1 = b"\x00\x00" + b"\x02\x00\xc1\x02" + b"\x01\x00x"
+ROW2 = b"\x00\x00" + b"\x02\x00\xc1\x03" + b"\x01\x00y"
+ROWS_END = b"\x00\x00\xff\xff"  # 表の終わりの印（次の文の改行が続く）
+
+
+def _run_rows(data: bytes, row_cb=lambda n, raws: ro._KEEP):
+    w = _rewriter(data)
+    out = io.BytesIO()
+    w._rows(TBL, row_cb, out.write, "T")
+    return w, out.getvalue()
+
+
+def test_rows_keeps_and_drops_rows_and_stops_at_end():
+    # 取り除いた行の前後は元のバイト列のまま写し、終わりの印のあとは読まない
+    w, out = _run_rows(ROW1 + ROW2 + ROWS_END + b"\nENDTABLE\n", lambda n, raws: None if n == 1 else ro._KEEP)
+    assert out == ROW2 + ROWS_END
+    assert w.st.pos == len(ROW1 + ROW2 + ROWS_END)
+
+
+def test_rows_end_mark_at_end_of_file():
+    # 終わりの印でファイルが終わるときは、読み足せないと分かってから終わりと見なす
+    _, out = _run_rows(ROW1 + ROWS_END)
+    assert out == ROW1 + ROWS_END
+
+
+def test_rows_refuses_a_row_cut_by_the_end_of_the_dump():
+    # 値の長さ 5 に対して 1 バイトしか無い。切れた行の手前までは写してから断る
+    out = io.BytesIO()
+    w = _rewriter(ROW1 + b"\x00\x00\x05\x00a")
+    with pytest.raises(RemedyError, match="表「T」の行の途中でダンプが切れている"):
+        w._rows(TBL, lambda n, raws: ro._KEEP, out.write, "T")
+    assert out.getvalue() == ROW1
+
+
+def test_rows_refuses_a_row_without_the_start_mark():
+    with pytest.raises(RemedyError, match=r"表「T」の行を読み解けない.*00 00"):
+        _run_rows(ROW1 + b"\x01\x00\x02\x00\xc1\x02")
+
+
+def test_rows_refuses_a_value_longer_than_its_column():
+    # B は VARCHAR2(10) なので、長さ 11 の値は定義と合わない
+    with pytest.raises(RemedyError, match="列「B」の長さ 11"):
+        _run_rows(b"\x00\x00\x02\x00\xc1\x02\x0b\x00" + b"z" * 11 + ROWS_END + b"\n")
+
+
+def test_rows_refuses_a_too_large_row(monkeypatch):
+    # 読み足しても1行が終わらず、手元の未処理の部分が上限を超えたら断る
+    monkeypatch.setattr(od, "MAX_ROW", 8)
+    with pytest.raises(RemedyError, match="1行が大きすぎる"):
+        _run_rows(b"\x00\x00\x02\x00\xc1\x02\x0a\x00" + b"z" * 5)
+
+
+def test_dummy_row_skips_null_and_missing_columns():
+    # 位置が NULL の値や、行に無い列を指していても、その列は飛ばす（行は元のまま・照合のために見た行として数える）
+    sel = SimpleNamespace(rows=dict, cols=dict, spans=dict, sheets=list)
+    w = ro._ExpRewriter(io.BytesIO(), io.BytesIO(), "ascii", "dummy", sel, DummyMaker("fixed", KEYS[0]))
+    plan = SimpleNamespace(by_row={1: {1: [(0, 1, "t")], 5: [(0, 1, "t")]}}, seen_rows=set())
+    cb = w._row_callback(plan, TBL, set())
+    assert cb(1, [b"\xc1\x02", None]) is ro._KEEP
+    assert cb(2, [b"\xc1\x03", b"y"]) is ro._KEEP  # 位置の無い行はそのまま（見た行にも数えない）
+    assert plan.seen_rows == {1}
+    assert w.stats["cells"] == 0 and w.stats["detections"] == 0
+
+
+def test_rewrite_exp_dump_refuses_a_file_without_export_head(tmp_path):
+    src = tmp_path / "x.dmp"
+    src.write_bytes(b"\x00" * 64)
+    with pytest.raises(RemedyError, match="旧 exp のダンプとして読めない"):
+        ro.rewrite_exp_dump(str(src), str(tmp_path / "out.dmp"), "dummy", None, None)
+    assert not (tmp_path / "out.dmp").exists()
+
+
 def test_run_dummy_without_cells_rejected():
     # 選んだ表が無い（plans が空）ので位置の照合は素通りし、書き換えた値が 0 件の断りに届く
     w = _rewriter(b"EXPORT:V21.00.00\nENDEXPORT\n", method="dummy")

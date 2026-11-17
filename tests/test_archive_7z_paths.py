@@ -574,7 +574,7 @@ def test_zip_utf8_retry_skips_non_zip_bytes(tmp_path, monkeypatch):
     assert [i.status for i in ctx.items] == [Status.NEEDS_PASSWORD], ctx.items
 
 
-@pytest.mark.skipif(not archive.find_7z(None), reason="本物の 7-Zip が無い")
+@pytest.mark.skipif(sys.platform != "win32" or not archive.find_7z(None), reason="Windows の本物の 7-Zip が無い")
 def test_real_7z_rejects_utf8_zipcrypto_password(tmp_path):
     """前提の確認: 本物の 7-Zip は UTF-8 のパスワードの ZipCrypto を開けない。
 

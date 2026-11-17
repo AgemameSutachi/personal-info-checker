@@ -97,7 +97,8 @@ class Connection:
     @classmethod
     def from_dict(cls, d: dict) -> "Connection":
         names = {f.name for f in fields(cls)}
-        c = cls(**{k: v for k, v in (d or {}).items() if k in names})
+        # 接続方式・サーバーが欠けていても TypeError にしない（validate が日本語の理由で断る。API へ直に送ると 500 になった）
+        c = cls(**{"kind": "", "host": "", **{k: v for k, v in (d or {}).items() if k in names}})
         c.kind = (c.kind or "").strip()
         c.host = (c.host or "").strip().strip("\\/")
         c.share = (c.share or "").strip().strip("\\/")

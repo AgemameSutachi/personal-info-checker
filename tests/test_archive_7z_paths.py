@@ -474,3 +474,126 @@ def test_py7zr_expand_limit(tmp_path):
         archive._handle_7z_python(ctx, blob, item, None, 0)
     assert "を超えるため打ち切り（zip 爆弾の疑い。" in str(e.value), str(e.value)
     assert ctx.scanned == []
+
+
+def _utf8_locked_zip_ctx(tmp_path, password: str | bytes, candidates):
+    """ZipCrypto で暗号化した本物の zip を置き、7-Zip はどのパスワードでも開けない形にする。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from zipcrypto import zipcrypto_zip
+
+    blob = zipcrypto_zip("secret.txt", "顧客 携帯 090-5555-6000\n".encode(), password)
+    ctx = _ctx(tmp_path, passwords=candidates, archive_bytes=blob)
+    out = _listing({"Path": "secret.txt", "Size": "30", "Encrypted": "+"})
+    fake = _Fake7z({NO_PW: (0, out)}, extract_errors={pw: "ERROR: Wrong password : secret.txt" for pw in candidates})
+    return ctx, fake
+
+
+def test_zip_utf8_password_opens_without_7z(tmp_path, monkeypatch):
+    """7-Zip は ZipCrypto のパスワードを Windows の既定の文字コードで当てるので、UTF-8 の日本語パスワードの zip は Python で開く。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["違う", "合言葉42"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+
+
+def test_zip_cp932_password_opens_when_7z_uses_other_codepage(tmp_path, monkeypatch):
+    """日本語でない Windows の 7-Zip は cp932 のパスワードの zip も開けないので、Python で cp932 としても試す。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42".encode("cp932"), ["違う", "合言葉42"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+
+
+def test_zip_password_not_in_cp932_still_tried_as_utf8(tmp_path, monkeypatch):
+    """cp932 に無い文字（絵文字）を含む候補も、UTF-8 としては試す（cp932 にできないことで落ちない）。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "鍵🔑42", ["鍵🔑42"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+
+
+def _utf8_locked_zip_with_plain(tmp_path, monkeypatch, ensure_space):
+    """暗号化の項目を大きな項目の道（一時ファイルへ書く）で開き、7-Zip で開けた平文の項目を同じまとまりに置く。"""
+    ctx, _ = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["違う", "合言葉42"])
+    ctx.ensure_space = ensure_space
+    monkeypatch.setattr(archive, "IN_MEMORY_LIMIT", 0)
+    out = _listing({"Path": "plain.txt", "Size": "4"}, {"Path": "secret.txt", "Size": "30", "Encrypted": "+"})
+    fake = _Fake7z(
+        {NO_PW: (0, out)},
+        extract={NO_PW: {"plain.txt": b"aaaa"}},
+        extract_errors={pw: "ERROR: Wrong password : secret.txt" for pw in [NO_PW, "違う", "合言葉42"]},
+    )
+    _run(ctx, monkeypatch, fake, kind="zip")
+    return ctx
+
+
+def test_zip_utf8_password_large_member_goes_through_temp_file(tmp_path, monkeypatch):
+    """大きな項目は一時ファイルへ書いて検査する。空きの確認は合うパスワードの1回だけ（違う候補ではしない）。"""
+    sizes: list[int] = []
+    ctx = _utf8_locked_zip_with_plain(tmp_path, monkeypatch, lambda n, what="": sizes.append(n))
+    assert sorted(ctx.scanned) == ["a.7z!plain.txt", "a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+    assert len(sizes) == 1, sizes
+
+
+def test_zip_utf8_password_space_short_marks_only_that_item(tmp_path, monkeypatch):
+    """パスワードが合っても空きが足りなければ、その項目だけ検査不能にし、同じまとまりの項目の検査は続ける。"""
+
+    def short(n, what=""):
+        raise Uncheckable("一時領域の空きが足りない")
+
+    ctx = _utf8_locked_zip_with_plain(tmp_path, monkeypatch, short)
+    assert ctx.scanned == ["a.7z!plain.txt"], ctx.scanned
+    assert [(i.path, i.status, i.reason) for i in ctx.items] == [
+        ("a.7z!secret.txt", Status.UNCHECKABLE, "一時領域の空きが足りない")
+    ], ctx.items
+
+
+def test_zip_utf8_password_wrong_stays_locked(tmp_path, monkeypatch):
+    """日本語の候補が合わなければ要パスワードのまま（英数字の候補は 7-Zip と同じなので Python では試さない）。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["abc", "違う"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == []
+    assert [i.status for i in ctx.items] == [Status.NEEDS_PASSWORD], ctx.items
+
+
+def test_zip_utf8_retry_only_for_zip(tmp_path, monkeypatch):
+    """zip でない書庫（7z など）には Python の zip の試しをしない。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["合言葉42"])
+    _run(ctx, monkeypatch, fake, kind="7z")
+    assert ctx.scanned == []
+    assert [i.status for i in ctx.items] == [Status.NEEDS_PASSWORD], ctx.items
+
+
+def test_zip_utf8_retry_skips_non_zip_bytes(tmp_path, monkeypatch):
+    """zip として開けない中身なら、Python の試しは何もせずに要パスワードのまま残す。"""
+    ctx = _ctx(tmp_path, passwords=["合言葉42"], archive_bytes=b"x" * 600)
+    out = _listing({"Path": "secret.txt", "Size": "30", "Encrypted": "+"})
+    fake = _Fake7z({NO_PW: (0, out)}, extract_errors={"合言葉42": "ERROR: Wrong password : secret.txt"})
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert [i.status for i in ctx.items] == [Status.NEEDS_PASSWORD], ctx.items
+
+
+@pytest.mark.skipif(sys.platform != "win32" or not archive.find_7z(None), reason="Windows の本物の 7-Zip が無い")
+def test_real_7z_rejects_utf8_zipcrypto_password(tmp_path):
+    """前提の確認: 本物の 7-Zip は UTF-8 のパスワードの ZipCrypto を開けない。
+
+    7-Zip は Windows の既定の文字コードで当てるので、cp932 のものが開くのは既定が 932（日本語）のときだけ。
+    """
+    import ctypes
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from zipcrypto import zipcrypto_zip
+
+    exe = archive.find_7z(None)
+    codes = {}
+    for label, raw in (("utf8", "合言葉42".encode("utf-8")), ("cp932", "合言葉42".encode("cp932"))):
+        p = tmp_path / f"{label}.zip"
+        p.write_bytes(zipcrypto_zip("a.txt", b"hello\n", raw))
+        r = archive._run_7z(exe, ["t", "-p合言葉42", "-sccUTF-8", "-scsUTF-8", "-mcp=932", str(p)])
+        codes[label] = r.returncode
+    assert codes["utf8"] != 0, codes
+    if ctypes.windll.kernel32.GetACP() == 932:
+        assert codes["cp932"] == 0, codes
+    else:
+        assert codes["cp932"] != 0, codes

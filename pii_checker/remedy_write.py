@@ -769,16 +769,6 @@ def _sheet_parts(z: zipfile.ZipFile) -> dict[str, str]:
     return out
 
 
-def _shared_strings_text(xml: str) -> list[str]:
-    """sharedStrings.xml の各項目の文字（リッチテキストは run をつなぐ）。"""
-    import html
-
-    out = []
-    for si in re.finditer(r"<si\b[^>]*?(?:/>|>.*?</si>)", xml, re.S):
-        out.append(html.unescape("".join(m.group(1) for m in re.finditer(r"<t\b[^>]*>(.*?)</t>", si.group(0), re.S))))
-    return out
-
-
 def rewrite_xlsx_dummy(src: str, dst: str, sel: Selection, maker: DummyMaker) -> dict:
     """該当セルの検出した値だけをダミーに置き換える（zip の中の XML のうち、対象のセルだけを書き換える）。
 

@@ -568,12 +568,16 @@ def handle_with_7z_exe(
                 os.remove(listfile)
             except OSError:
                 pass
+        opened_py = _zip_utf8_passwords(ctx, path, remaining & encrypted) if kind == "zip" else {}
         for e in batch:
             name = e["Path"]
             display = f"{blob.display}!{name}"
             size = int(e.get("Size") or 0)
             if name in done:
                 ctx.scan_nested(display, path=done[name], depth=depth + 1, name_hint=name)
+            elif name in opened_py:
+                data_or_path, info = opened_py[name]
+                _scan_extracted(ctx, display, data_or_path, depth + 1, name, info)
             elif name in encrypted:
                 add_failed_item(
                     ctx,
@@ -603,6 +607,42 @@ def handle_with_7z_exe(
             "アーカイブが途中で切れているか壊れている（読めた分だけ検査した。欠けた中身がある可能性）。"
             "元のファイルを取り直す（コピーし直す・送り主に再送を頼む）か、作った人に中身を確かめてもらう"
         )
+
+
+def _zip_utf8_passwords(ctx: ScanContext, path: str, names: set[str]) -> dict[str, tuple]:
+    """7-Zip で開かなかった zip の ZipCrypto の項目に、日本語などを含むパスワードを UTF-8 として試す。
+
+    7-Zip は ZipCrypto のパスワードを cp932 にしてから当てる（-mcp の指定でも変わらない）。Mac・Linux や
+    Python で作った zip は UTF-8 のパスワードで暗号化するので、正しいパスワードを打っても開かなかった。
+    英数字だけのパスワードはどちらの符号化でも同じなので、7-Zip で試した分を繰り返さない。
+    戻り値は 7-Zip の一覧の名前 → (_read_zip_member の戻り値, ZipInfo)。
+    """
+    candidates = [pw.encode("utf-8") for pw in ctx.password_candidates() if not pw.isascii()]
+    if not names or not candidates:
+        return {}
+    opened: dict[str, tuple] = {}
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return {}
+    with z:
+        by_name = {}
+        for info in z.infolist():
+            for n in (_fix_zip_name(info), info.filename):
+                by_name.setdefault(n.replace("/", "\\"), info)
+        for name in names:
+            info = by_name.get(name.replace("/", "\\"))
+            if info is None or not (info.flag_bits & 0x1) or info.compress_type not in SUPPORTED_ZIP_METHODS:
+                continue  # AES は 7-Zip が UTF-8 で試している
+            for pwd in candidates:
+                try:
+                    opened[name] = (_read_zip_member(ctx, z, info, pwd), info)
+                    break
+                except Uncheckable:
+                    raise
+                except Exception:  # noqa: BLE001  違うパスワード（検査の1バイトが偶然合うと展開か CRC で落ちる）
+                    continue
+    return opened
 
 
 def _extract_all_and_scan(ctx, exe, path, blob, item, depth, common, header_pw) -> None:

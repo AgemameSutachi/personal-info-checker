@@ -146,6 +146,7 @@ cmd\PiiChecker-cmd.exe scan \\nas01\総務 D:\共有 -o 結果.xlsx --csv
 - 不具合・要望・質問は [Issues](https://github.com/AgemameSutachi/personal-info-checker/issues) へ。**実在する個人情報や検査したファイルそのものは貼らないでください**
 - セキュリティの問題は公開の Issue にせず、[SECURITY.md](SECURITY.md) の方法で知らせてください
 - 版ごとの変更は [CHANGELOG.md](CHANGELOG.md)、配布版の組み立て・試験・中の作りは [docs/開発者向け.md](docs/開発者向け.md) にあります
+- これから手を付ける作業の順は [docs/開発者向け.md の「残り課題」](docs/開発者向け.md#残り課題) にあります
 
 ## ライセンス
 

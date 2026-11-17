@@ -77,7 +77,7 @@ def test_smb_scan_disconnects_only_what_it_connected(tmp_path, monkeypatch, scan
     assert scan_spy["roots"] == [r"\\nas01\総務"]
 
     calls.clear()
-    monkeypatch.setattr(cli, "smb_connect", lambda conn, password: calls.append(("connect", password)) and False)
+    monkeypatch.setattr(cli, "smb_connect", lambda conn, password: calls.append(("connect", password)) or False)
     assert _scan(tmp_path, "--connect", "smb", "--host", "nas01", "--share", "総務") == 0
     assert calls == [("connect", "")]  # もともとつながっていたものは切らない
 

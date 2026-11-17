@@ -682,6 +682,7 @@ def handle_access(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector
             col.positions.clear()
             col.pos_info.clear()
             col.pos_total = 0
+            col.pos_overflow = False
     if ctx.options.raw_sweep:
         _raw_sweep(path, col, raw=used is not None)
     if used:

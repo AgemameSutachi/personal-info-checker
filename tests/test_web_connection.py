@@ -57,6 +57,10 @@ def test_connection_test_and_job(tmp_path, ftp):
     with pytest.raises(HTTPException) as ei:
         test(payload={"connection": {**_conn(ftp), "host": ""}, "connection_password": "x"})
     assert "サーバー" in ei.value.detail
+    for bad in ({}, {"connection": {"kind": "ftp"}}, {"connection": {"host": "127.0.0.1"}}):
+        with pytest.raises(HTTPException) as ei:  # 欠けた接続先も 500 にせず理由を返す
+            test(payload=bad)
+        assert ei.value.status_code == 400 and ("接続方式" in ei.value.detail or "サーバー" in ei.value.detail)
     ok = test(payload={"connection": _conn(ftp), "connection_password": "secret-pw"})
     assert ok["ok"] and ok["root"] == f"ftp://127.0.0.1:{ftp}/"
 

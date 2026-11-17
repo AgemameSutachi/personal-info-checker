@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sys
+from array import array
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -142,3 +143,41 @@ def test_handle_access_unreadable_lists_attempts(tmp_path, monkeypatch):
     with pytest.raises(Uncheckable) as e:
         database.handle_access(_Ctx(tmp_path), _blob(), item, col, 0)
     assert "64bit ODBC: RuntimeError: 無い / 32bit 補助" in str(e.value)
+
+
+# ------------------------------------------------------------------ 対処のための位置集め
+
+
+def test_access_parser_records_columns_for_positions(tmp_path, monkeypatch):
+    """位置を集めるときは、表ごとの列の名前を残す（ダミー化で列を引き当てるため）。"""
+    _fake_access_parser(monkeypatch, {"名簿": {"氏名": ["架空 太郎"], "電話": [PHONE]}})
+    item, col = _collector()
+    col.collect_positions = True
+    database._read_access_parser(_Ctx(tmp_path), "dummy.mdb", col, item)
+    assert col.pos_info["tables"] == {"名簿": {"columns": ["氏名", "電話"]}}
+
+
+def test_handle_access_discards_positions_of_failed_reader(tmp_path, monkeypatch):
+    """途中まで読んで失敗した読み手の位置は捨て、次の読み手の数え直しと混ぜない。"""
+    _set_readers(monkeypatch, jackcess="Jackcess（Java）")
+    seen = {}
+
+    def odbc_half_read(*args, **kwargs):
+        col.positions[("名簿", "phone", 0)] = array("q", [1, 2, 0, 13])
+        col.pos_info["tables"] = {"名簿": {"columns": ["電話"]}}
+        col.pos_total = 1
+        col.pos_overflow = True  # 上限を超えたのも失敗した読み手の分なので、次の読み手へ持ち越さない
+        raise RuntimeError("途中で切れた")
+
+    def jackcess_read(*args, **kwargs):
+        seen["state"] = (dict(col.positions), dict(col.pos_info), col.pos_total, col.pos_overflow)
+        return "Jackcess（Java）"
+
+    monkeypatch.setattr(database, "_read_access_odbc", odbc_half_read)
+    monkeypatch.setattr(database, "_read_access_jackcess", jackcess_read)
+    item, col = _collector()
+    col.collect_positions = True
+    database.handle_access(_Ctx(tmp_path), _blob(), item, col, 0)
+    assert col.pos_layout == "access"
+    assert seen["state"] == ({}, {}, 0, False)
+    assert item.method.startswith("Jackcess（Java） で全テーブル")

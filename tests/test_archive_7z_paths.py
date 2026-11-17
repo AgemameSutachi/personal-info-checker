@@ -496,6 +496,43 @@ def test_zip_utf8_password_opens_without_7z(tmp_path, monkeypatch):
     assert ctx.items == []
 
 
+def _utf8_locked_zip_with_plain(tmp_path, monkeypatch, ensure_space):
+    """暗号化の項目を大きな項目の道（一時ファイルへ書く）で開き、7-Zip で開けた平文の項目を同じまとまりに置く。"""
+    ctx, _ = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["違う", "合言葉42"])
+    ctx.ensure_space = ensure_space
+    monkeypatch.setattr(archive, "IN_MEMORY_LIMIT", 0)
+    out = _listing({"Path": "plain.txt", "Size": "4"}, {"Path": "secret.txt", "Size": "30", "Encrypted": "+"})
+    fake = _Fake7z(
+        {NO_PW: (0, out)},
+        extract={NO_PW: {"plain.txt": b"aaaa"}},
+        extract_errors={pw: "ERROR: Wrong password : secret.txt" for pw in [NO_PW, "違う", "合言葉42"]},
+    )
+    _run(ctx, monkeypatch, fake, kind="zip")
+    return ctx
+
+
+def test_zip_utf8_password_large_member_goes_through_temp_file(tmp_path, monkeypatch):
+    """大きな項目は一時ファイルへ書いて検査する。空きの確認は合うパスワードの1回だけ（違う候補ではしない）。"""
+    sizes: list[int] = []
+    ctx = _utf8_locked_zip_with_plain(tmp_path, monkeypatch, lambda n, what="": sizes.append(n))
+    assert sorted(ctx.scanned) == ["a.7z!plain.txt", "a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+    assert len(sizes) == 1, sizes
+
+
+def test_zip_utf8_password_space_short_marks_only_that_item(tmp_path, monkeypatch):
+    """パスワードが合っても空きが足りなければ、その項目だけ検査不能にし、同じまとまりの項目の検査は続ける。"""
+
+    def short(n, what=""):
+        raise Uncheckable("一時領域の空きが足りない")
+
+    ctx = _utf8_locked_zip_with_plain(tmp_path, monkeypatch, short)
+    assert ctx.scanned == ["a.7z!plain.txt"], ctx.scanned
+    assert [(i.path, i.status, i.reason) for i in ctx.items] == [
+        ("a.7z!secret.txt", Status.UNCHECKABLE, "一時領域の空きが足りない")
+    ], ctx.items
+
+
 def test_zip_utf8_password_wrong_stays_locked(tmp_path, monkeypatch):
     """日本語の候補が合わなければ要パスワードのまま（英数字の候補は 7-Zip と同じなので Python では試さない）。"""
     ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["abc", "違う"])

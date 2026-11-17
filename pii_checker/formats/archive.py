@@ -575,6 +575,8 @@ def handle_with_7z_exe(
             size = int(e.get("Size") or 0)
             if name in done:
                 ctx.scan_nested(display, path=done[name], depth=depth + 1, name_hint=name)
+            elif name in opened_py and opened_py[name][0] is None:
+                add_failed_item(ctx, display, Status.UNCHECKABLE, opened_py[name][1], depth + 1, size=size)
             elif name in opened_py:
                 data_or_path, info = opened_py[name]
                 _scan_extracted(ctx, display, data_or_path, depth + 1, name, info)
@@ -615,7 +617,8 @@ def _zip_utf8_passwords(ctx: ScanContext, path: str, names: set[str]) -> dict[st
     7-Zip は ZipCrypto のパスワードを cp932 にしてから当てる（-mcp の指定でも変わらない）。Mac・Linux や
     Python で作った zip は UTF-8 のパスワードで暗号化するので、正しいパスワードを打っても開かなかった。
     英数字だけのパスワードはどちらの符号化でも同じなので、7-Zip で試した分を繰り返さない。
-    戻り値は 7-Zip の一覧の名前 → (_read_zip_member の戻り値, ZipInfo)。
+    戻り値は 7-Zip の一覧の名前 → (_read_zip_member の戻り値, ZipInfo)、または (None, 検査不能の理由)。
+    パスワードが合っても一時領域の空きが足りない項目は、その項目だけ検査不能にする（ほかの項目の検査を止めない）。
     """
     candidates = [pw.encode("utf-8") for pw in ctx.password_candidates() if not pw.isascii()]
     if not names or not candidates:
@@ -636,11 +639,17 @@ def _zip_utf8_passwords(ctx: ScanContext, path: str, names: set[str]) -> dict[st
                 continue  # AES は 7-Zip が UTF-8 で試している
             for pwd in candidates:
                 try:
+                    # 検査の1バイトで大半の違うパスワードを落とす（大きな項目の一時ファイルや空きの確認を候補ごとにしない）
+                    _open_zip_member(z, info, pwd).close()
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
                     opened[name] = (_read_zip_member(ctx, z, info, pwd), info)
                     break
-                except Uncheckable:
-                    raise
-                except Exception:  # noqa: BLE001  違うパスワード（検査の1バイトが偶然合うと展開か CRC で落ちる）
+                except Uncheckable as e:
+                    opened[name] = (None, str(e))
+                    break
+                except Exception:  # noqa: BLE001  検査の1バイトが偶然合った違うパスワード（展開か CRC で落ちる）
                     continue
     return opened
 

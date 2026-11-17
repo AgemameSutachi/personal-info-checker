@@ -612,15 +612,26 @@ def handle_with_7z_exe(
 
 
 def _zip_utf8_passwords(ctx: ScanContext, path: str, names: set[str]) -> dict[str, tuple]:
-    """7-Zip で開かなかった zip の ZipCrypto の項目に、日本語などを含むパスワードを UTF-8 として試す。
+    """7-Zip で開かなかった zip の ZipCrypto の項目に、日本語などを含むパスワードを UTF-8・cp932 として試す。
 
-    7-Zip は ZipCrypto のパスワードを cp932 にしてから当てる（-mcp の指定でも変わらない）。Mac・Linux や
-    Python で作った zip は UTF-8 のパスワードで暗号化するので、正しいパスワードを打っても開かなかった。
-    英数字だけのパスワードはどちらの符号化でも同じなので、7-Zip で試した分を繰り返さない。
+    7-Zip は ZipCrypto のパスワードを Windows の既定の文字コード（日本語の Windows では cp932）にしてから
+    当てる（-mcp の指定でも変わらない）。Mac・Linux や Python で作った zip は UTF-8 のパスワードで暗号化し、
+    日本語でない Windows では cp932 で作った zip も開かないので、正しいパスワードを打っても開かなかった。
+    英数字だけのパスワードはどの符号化でも同じなので、7-Zip で試した分を繰り返さない。
     戻り値は 7-Zip の一覧の名前 → (_read_zip_member の戻り値, ZipInfo)、または (None, 検査不能の理由)。
     パスワードが合っても一時領域の空きが足りない項目は、その項目だけ検査不能にする（ほかの項目の検査を止めない）。
     """
-    candidates = [pw.encode("utf-8") for pw in ctx.password_candidates() if not pw.isascii()]
+    candidates: list[bytes] = []
+    for pw in ctx.password_candidates():
+        if pw.isascii():
+            continue
+        for enc in ("utf-8", "cp932"):
+            try:
+                raw = pw.encode(enc)
+            except UnicodeEncodeError:
+                continue  # cp932 に無い文字（絵文字など）
+            if raw not in candidates:
+                candidates.append(raw)
     if not names or not candidates:
         return {}
     opened: dict[str, tuple] = {}

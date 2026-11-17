@@ -489,8 +489,24 @@ def _utf8_locked_zip_ctx(tmp_path, password: str | bytes, candidates):
 
 
 def test_zip_utf8_password_opens_without_7z(tmp_path, monkeypatch):
-    """7-Zip は ZipCrypto のパスワードを cp932 で当てるので、UTF-8 の日本語パスワードの zip は Python で開く。"""
+    """7-Zip は ZipCrypto のパスワードを Windows の既定の文字コードで当てるので、UTF-8 の日本語パスワードの zip は Python で開く。"""
     ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42", ["違う", "合言葉42"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+
+
+def test_zip_cp932_password_opens_when_7z_uses_other_codepage(tmp_path, monkeypatch):
+    """日本語でない Windows の 7-Zip は cp932 のパスワードの zip も開けないので、Python で cp932 としても試す。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "合言葉42".encode("cp932"), ["違う", "合言葉42"])
+    _run(ctx, monkeypatch, fake, kind="zip")
+    assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
+    assert ctx.items == []
+
+
+def test_zip_password_not_in_cp932_still_tried_as_utf8(tmp_path, monkeypatch):
+    """cp932 に無い文字（絵文字）を含む候補も、UTF-8 としては試す（cp932 にできないことで落ちない）。"""
+    ctx, fake = _utf8_locked_zip_ctx(tmp_path, "鍵🔑42", ["鍵🔑42"])
     _run(ctx, monkeypatch, fake, kind="zip")
     assert ctx.scanned == ["a.7z!secret.txt"], ctx.scanned
     assert ctx.items == []
@@ -560,7 +576,12 @@ def test_zip_utf8_retry_skips_non_zip_bytes(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not archive.find_7z(None), reason="本物の 7-Zip が無い")
 def test_real_7z_rejects_utf8_zipcrypto_password(tmp_path):
-    """前提の確認: 本物の 7-Zip は UTF-8 のパスワードの ZipCrypto を開けず、cp932 のものは開く。"""
+    """前提の確認: 本物の 7-Zip は UTF-8 のパスワードの ZipCrypto を開けない。
+
+    7-Zip は Windows の既定の文字コードで当てるので、cp932 のものが開くのは既定が 932（日本語）のときだけ。
+    """
+    import ctypes
+
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from zipcrypto import zipcrypto_zip
 
@@ -571,4 +592,8 @@ def test_real_7z_rejects_utf8_zipcrypto_password(tmp_path):
         p.write_bytes(zipcrypto_zip("a.txt", b"hello\n", raw))
         r = archive._run_7z(exe, ["t", "-p合言葉42", "-sccUTF-8", "-scsUTF-8", "-mcp=932", str(p)])
         codes[label] = r.returncode
-    assert codes["cp932"] == 0 and codes["utf8"] != 0, codes
+    assert codes["utf8"] != 0, codes
+    if ctypes.windll.kernel32.GetACP() == 932:
+        assert codes["cp932"] == 0, codes
+    else:
+        assert codes["cp932"] != 0, codes

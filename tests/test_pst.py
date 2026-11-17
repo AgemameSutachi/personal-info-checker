@@ -30,11 +30,14 @@ def _write_pst(path: Path, version: int, crypt: int, body: bytes) -> Path:
     head = bytearray(1024)
     head[0:4] = b"!BDN"
     head[10:12] = version.to_bytes(2, "little")
+    # 読まない側の位置には違う値を置き、位置の取り違えを判定の違いとして出す
+    decoy = 0 if crypt == 2 else 2
     if version >= UNICODE:
         head[0x201] = crypt
+        head[0x1CD] = decoy
     else:
         head[0x1CD] = crypt
-        head[0x201] = 2  # ANSI では読まない位置（ここを読むと「強い暗号化」と誤る）
+        head[0x201] = decoy
     path.write_bytes(bytes(head) + body)
     return path
 
@@ -100,3 +103,21 @@ def test_ansi_pst_strong_encryption_is_uncheckable(tmp_path):
     item = _scan(path, tmp_path)
     assert item.status == Status.UNCHECKABLE, item.reason
     assert "「強い暗号化」の PST" in item.reason
+
+
+def test_version_boundary_between_ansi_and_unicode(tmp_path):
+    # 版 22 までは ANSI、23 からは Unicode（暗号化の印の位置が変わる）
+    item = _scan(_write_pst(tmp_path / "v22.pst", 22, 1, BODY.translate(_ENCRYPT)), tmp_path)
+    assert item.kind == "Outlook データファイル（ANSI PST/OST）"
+    assert {"email", "phone"} <= _types(item), item.findings
+    item = _scan(_write_pst(tmp_path / "v23.pst", 23, 1, BODY.translate(_ENCRYPT)), tmp_path)
+    assert item.kind == "Outlook データファイル（Unicode PST/OST）"
+    assert {"email", "phone"} <= _types(item), item.findings
+
+
+def test_unknown_encryption_does_not_scan_body(tmp_path):
+    # 未対応の暗号化の印では、中身を読まずに検査不能とする（理由の文は test_reason_next_step_2 が見る）
+    item = _scan(_write_pst(tmp_path / "mail.pst", UNICODE, 0x10, BODY), tmp_path)
+    assert item.status == Status.UNCHECKABLE, item.reason
+    assert "未対応の暗号化方式（0x10" in item.reason
+    assert item.findings == []

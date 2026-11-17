@@ -514,13 +514,15 @@ def sleepy_part_task(spec, options, book):
 
 
 def test_part_timeout_makes_only_its_entries_uncheckable(tmp_path, store, small_split, monkeypatch):
-    """区切りの時間制限（試験では2秒）を超えた区切りは、その区切りの項目と最上位だけが検査不能になる。"""
+    """区切りの時間制限（試験では10秒）を超えた区切りは、その区切りの項目と最上位だけが検査不能になる。
+
+    2秒だと、網羅率の計測などで重いときに、眠らない区切りまで時間切れになって揺れた。"""
     folder = tmp_path / "data"
     z = make_zip(folder / "big.zip", nested=False)
     real = runner.JobRunner._timeout_for
 
     def short_for_parts(self, path, expanded=None):
-        return 2 if expanded is not None else real(self, path)
+        return 10 if expanded is not None else real(self, path)
 
     monkeypatch.setattr(runner.JobRunner, "_timeout_for", short_for_parts)
     monkeypatch.setattr(runner, "_scan_part_task", sleepy_part_task)
@@ -528,7 +530,7 @@ def test_part_timeout_makes_only_its_entries_uncheckable(tmp_path, store, small_
     assert store.job(job)["state"] == "done", store.job(job)
     rows = store.query("SELECT status, reason FROM items WHERE job_id=? ORDER BY seq", (job,))
     assert rows[0]["status"] == Status.UNCHECKABLE.value
-    assert "時間切れ（2秒）" in rows[0]["reason"] and "区切り 2/4（11〜20件目）" in rows[0]["reason"]
+    assert "時間切れ（10秒）" in rows[0]["reason"] and "区切り 2/4（11〜20件目）" in rows[0]["reason"]
     assert [x["status"] for x in rows[11:21]] == [Status.UNCHECKABLE.value] * 10
     assert all(x["status"] == Status.SCANNED.value for x in rows[1:11] + rows[21:])
     assert clean_temp(tmp_path) == []

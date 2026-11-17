@@ -156,7 +156,8 @@ def test_slow_save_records_detail_and_lock_wait(tmp_path, monkeypatch):
     t = threading.Thread(target=holder)
     t.start()
     held.wait(5)
-    threading.Timer(0.8, release.set).start()
+    # 保存の前の準備が遅い CI でも、ロックを待つ時間が 0.6 秒を割らないよう余裕を取る
+    threading.Timer(1.5, release.set).start()
     store.save_result(job, result)
     t.join()
     d = json.loads(detail())

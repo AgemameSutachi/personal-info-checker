@@ -65,6 +65,8 @@ METHOD_LABELS = {
     "delete_pages": "該当するページを削除",
     "delete_paragraphs": "該当する段落を削除",
     "delete_slides": "該当するスライドを削除（ノートも）",
+    # 写真（JPEG・PNG）
+    "strip_photo_meta": "写真の情報（EXIF・XMP など）を消す（画素は変えない）",
 }
 # 形式によって呼び方を変える方法（docx の行・列は表の行・列）
 LAYOUT_LABELS = {
@@ -94,6 +96,7 @@ LAYOUT_METHODS = {
     "pdf": ("redact", "delete_pages"),
     "docx": ("dummy", "delete_paragraphs", "delete_rows", "delete_columns"),
     "pptx": ("dummy", "delete_slides"),
+    "photo": ("strip_photo_meta",),  # 写真の情報は塊ごとまとめて消す（種類・確度で選んで一部だけ消すことはしない）
 }
 ORACLE_LAYOUTS = (
     "oracle_exp",
@@ -108,7 +111,10 @@ LAYOUT_ONLY_METHODS = {
     "delete_pages": ("pdf",),
     "delete_paragraphs": ("docx",),
     "delete_slides": ("pptx",),
+    "strip_photo_meta": ("photo",),
 }
+# 方法を形式の分だけに絞って出す形式（PDF に行・列は無い・写真に行・列・ダミーは無い）
+NARROW_LAYOUTS = (*OFFICE_LAYOUTS, "photo")
 XLSX_EXTS = (".xlsx", ".xlsm")
 NEW_PREFIX = "~piichk-new-"  # 書き換えた新しいファイルを、元と同じフォルダへ一時に置くときの名前の頭
 CMP_PREFIX = "~piichk-cmp-"  # Access の最適化（remedy_access）が、新しいファイルの隣に作る写しの名前の頭
@@ -906,18 +912,28 @@ def rewrite_file(
         from .remedy_access import rewrite_access_file
 
         return rewrite_access_file(src, dst, method, sel, maker)
+    if layout == "photo":
+        from .remedy_photo import rewrite_photo_file
+
+        return rewrite_photo_file(src, dst, method, sel)
     return rewrite_text_file(src, dst, layout, method, sel, maker)
 
 
-def _verify_new_file(tmp_new: str, options: ScanOptions, args: dict, dummies: list[str], book=None) -> dict:
-    """出来上がった新ファイルを検査し直して、開けること・残った検出の数を確かめる（元には触らない）。"""
+def _verify_new_file(
+    tmp_new: str, options: ScanOptions, args: dict, dummies: list[str], book=None, same_status: str | None = None
+) -> dict:
+    """出来上がった新ファイルを検査し直して、開けること・残った検出の数を確かめる（元には触らない）。
+
+    same_status は、元のファイルも同じ状態だったなら開けたとみなす状態（写真は、OCR を切った検査では元から
+    「検査不能（要目視）」になる。画素が元と同じことは remedy_photo が確かめている）。
+    """
     try:
         summary = rescan_summary(tmp_new, options, args, dummies, book)
     except Exception as e:  # noqa: BLE001
         raise RemedyError(
             f"書き換えたファイルを検査し直せませんでした（{type(e).__name__}）。元のファイルは変えていません"
         ) from None
-    if not summary["opened"]:
+    if not summary["opened"] and not (same_status is not None and summary.get("status") == same_status):
         raise RemedyError(
             "書き換えたファイルを開けなかったため、置き換えません（検査し直しで読めませんでした）。元のファイルは変えていません"
         )
@@ -959,7 +975,14 @@ def prepare_plain(args: dict) -> dict:
         notes = [*notes, *inherit_file_metadata(path, tmp_new)]
         if sha256_file(path) != orig_sha:
             raise RemedyError("書き換えている間に元のファイルが変わりました。何も変えていません")
-        remaining = _verify_new_file(tmp_new, args["options"], args, sorted(maker.produced) if maker else [], book)
+        remaining = _verify_new_file(
+            tmp_new,
+            args["options"],
+            args,
+            sorted(maker.produced) if maker else [],
+            book,
+            same_status=got["status"] if got["layout"] == "photo" else None,
+        )
         new_sha = sha256_file(tmp_new)
     except BaseException:
         _discard_new(tmp_new)
@@ -1100,6 +1123,7 @@ def rescan_summary(
     return {
         # 書庫・ファイルそのものが開けたか（中の項目の一部が読めないのは、元からそうだったかもしれないので数えない）
         "opened": top is not None and top.status.value not in (Status.UNCHECKABLE.value, Status.NEEDS_PASSWORD.value),
+        "status": top.status.value if top is not None else None,
         "total": sum(counts.values()),
         "selected": selected,
         "by_type": by_type,
@@ -1137,7 +1161,9 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     kind_reason = file_only_reason(kind)
     if kind_reason:
         return kind_reason
-    if status != Status.SCANNED.value:
+    # 写真の情報（EXIF・XMP）は、画像の中の文字を OCR で読めなかった（要目視）ときも最後まで読めている
+    photo_ok = info.get("layout") == "photo" and status == Status.UNCHECKABLE.value
+    if status != Status.SCANNED.value and not photo_ok:
         if "Oracle" in kind and "ダンプ" in kind:
             return (
                 "Oracle のダンプを、表として最後まで読み解けなかった（圧縮・暗号化・未対応の型の列・切れたダンプ・知らない形の表など）ため、"
@@ -1149,7 +1175,8 @@ def unsupported_reason(method: str, path: str, info: dict) -> str:
     if family not in LAYOUT_METHODS:
         return (
             "この形式の中身の書き換えには、まだ対応していません"
-            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・Access・SQL のダンプ・Oracle のダンプ・PDF・docx・pptx）。ファイルの削除はできます"
+            "（対応: csv・tsv・txt・xlsx・xlsm・SQLite・Access・SQL のダンプ・Oracle のダンプ・PDF・docx・pptx・"
+            "写真（JPEG・PNG）の情報）。ファイルの削除はできます"
         )
     if family == "oracle_expdp" and method in ("delete_columns", "delete_table"):
         from .remedy_oracle import EXPDP_UNSUPPORTED_REASON
@@ -1289,7 +1316,7 @@ class Analysis:
             d = counts.setdefault(pii_type, {})
             d[str(rank)] = d.get(str(rank), 0) + len(arr) // 4
         # 「対象にするシート・表」の絞り込みは、Excel と DB だけ（PDF・docx・pptx の「シート」はページ・部品・スライドの名前）
-        sheets = [] if self.info.get("layout") in OFFICE_LAYOUTS else sorted({k[0] for k in self.positions if k[0]})
+        sheets = [] if self.info.get("layout") in NARROW_LAYOUTS else sorted({k[0] for k in self.positions if k[0]})
         # 絞り込みの欄の呼び名（DB と Access の「シート」は表の名前）
         sheet_word = "表" if self.info.get("layout") in DB_LAYOUTS else "シート"
         return {"state": "done", **self.info, "counts": counts, "sheets": sheets, "sheet_word": sheet_word}
@@ -1465,8 +1492,8 @@ class RemedyService:
                     continue  # その形式にだけ出す方法（表の削除は DB・黒塗りは PDF など）
                 if m == "delete_sheet" and layout in DB_LAYOUTS + OFFICE_LAYOUTS:
                     continue  # シートは Excel の言い方（DB は表）
-                if layout in OFFICE_LAYOUTS and m not in ("delete_file", "convert_zip", *LAYOUT_METHODS[layout]):
-                    continue  # PDF に行・列は無い・pptx に表の行・列の削除は無い
+                if layout in NARROW_LAYOUTS and m not in ("delete_file", "convert_zip", *LAYOUT_METHODS[layout]):
+                    continue  # PDF に行・列は無い・pptx に表の行・列の削除は無い・写真は情報を消すだけ
                 reason = unsupported_reason(m, leaf_name, got)
                 label = (
                     ARCHIVE_DELETE_LABEL
@@ -1547,6 +1574,9 @@ class RemedyService:
         sheets = params.get("sheets")
         if sheets is not None and (not isinstance(sheets, list) or not all(isinstance(s, str) for s in sheets)):
             raise RemedyError("シートの指定が正しくありません")
+        if method == "strip_photo_meta":
+            # 写真の情報は塊ごとまとめて消すので、種類・確度・シートの選びは使わない（低の検出しか無い写真でも消せる）
+            types, confs, sheets = present_types, list(CONF_RANKS), None
         mode = params.get("dummy_mode") or "same"
         if method == "dummy" and mode not in DUMMY_MODES:
             raise RemedyError("ダミーの作り方が正しくありません")
@@ -1630,7 +1660,22 @@ class RemedyService:
             if len(sample) >= SAMPLE_ROWS:
                 break
         changes: dict = {"detections": sel.detections}
-        if layout in OFFICE_LAYOUTS:
+        if layout == "photo":
+            out["summary"] = (
+                f"写真の情報（EXIF・XMP など）を消します（検出 {sel.detections:,} 件を含む。画像の画素は変えません）"
+            )
+            out["sample_rows"] = sample
+            out["sample_label"] = "検出のある情報"
+            out["warnings"].append(
+                "撮影者・説明・作成者の連絡先・写っている人・GPS の位置に加えて、撮影日時・カメラの機種・編集ソフトの記録・"
+                "サムネイルなど、写真の情報はまとめて消えます（選んだ種類・確度にかかわらず全部）。向きと色の情報だけ残します"
+            )
+            out["warnings"].append("画像に写っている文字（OCR で読んだ検出）は変わりません")
+            out["notes"].append(
+                "JPEG の後ろに付いた別の画像（連写・深度・HDR の明るさの情報など）も、写真の情報が入るため取り除きます"
+            )
+            out["notes"].append("消したあとの画像を元の画像と画素で比べ、同じときだけ置き換えます")
+        elif layout in OFFICE_LAYOUTS:
             changes = office_preview(layout, method, sel, p, out, sample, bool(a.info.get("password_opened")))
             out["sample_rows"] = sample
             out["sample_label"] = "変わる場所の例"
@@ -1990,7 +2035,9 @@ class RemedyService:
 
 def row_label(layout: str, sheet: str, key: int, schema: dict | None = None) -> str:
     """下見に出す「変わる行」の呼び名（Excel・csv は行番号、SQLite は rowid、SQL のダンプは行番号・何組目か、
-    PDF はページと行、docx は部品と段落の番号、pptx はスライドと段落の番号）。"""
+    PDF はページと行、docx は部品と段落の番号、pptx はスライドと段落の番号、写真は EXIF・XMP）。"""
+    if layout == "photo":
+        return "EXIF" if key == 1 else "XMP"
     if layout == "pdf":
         return f"{sheet} {key} 行目"
     if layout == "docx":

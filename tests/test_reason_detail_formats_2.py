@@ -303,4 +303,5 @@ def test_ocr_unavailable_reason_is_joined_with_period(tmp_path, monkeypatch):
     assert item.status == Status.UNCHECKABLE, (item.status, item.reason)
     assert item.reason == (
         "OCR が使えないため画像の中の文字を検査できない（要目視）。日本語の OCR 認識器を入れてください。"
+        "（文字のありそうな度合い: 低）"  # 白無地なので低
     ), item.reason

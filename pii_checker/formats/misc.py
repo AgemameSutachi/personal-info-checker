@@ -1022,6 +1022,55 @@ ENCRYPTED_DATA_HINT = (
 )
 
 
+_TEXT_HINT_PX = 640  # 判定は灰色で、長い辺をこの画素まで縮めてから行う（12MP の JPEG で約 65ms）
+
+
+def text_hint(data: bytes) -> float | None:
+    """画像に文字がありそうな度合い（0〜1・大きいほど文字が多そう）を、OCR を使わずに軽く見積もる。
+
+    くっきりした縁の画素の割合に、背景（最も多い明るさの近く）が占める割合の強さを掛ける。
+    文書・画面の写しは白地に細い線が多く、写真はなだらかで背景が一色でないので小さくなる。
+    要目視の画像を見る順に使うだけで、要目視から外すことはしない。開けない・計れないときは None。
+    """
+    import io
+
+    from PIL import Image, ImageFilter
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.draft("L", (_TEXT_HINT_PX, _TEXT_HINT_PX))  # JPEG は縮めて読む（それ以外の形式では何もしない）
+            g = im.convert("L")  # 複数のページ・コマを持つ画像は最初の1枚で見る
+        g.thumbnail((_TEXT_HINT_PX, _TEXT_HINT_PX))
+        w, h = g.size
+        if w < 3 or h < 3:
+            return None
+        # 縁の検出は画像の外周を縁と数えるので、外周の1画素を除く
+        edges = g.filter(ImageFilter.FIND_EDGES).crop((1, 1, w - 1, h - 1))
+        strong = sum(edges.histogram()[96:]) / ((w - 2) * (h - 2))
+        hist = g.histogram()
+        peak = max(range(256), key=hist.__getitem__)
+        background = sum(hist[max(0, peak - 12) : peak + 13]) / (w * h)
+        return round(strong * max(0.0, (background - 0.4) / 0.6), 4)
+    except Exception:  # 度合いは並べ替えの手がかりにすぎないので、計れなければ付けない
+        return None
+
+
+def text_hint_label(hint: float | None) -> str:
+    """理由の文に添える「文字のありそうな度合い」の一言。計れなかったときは空。"""
+    if hint is None:
+        return ""
+    from ..models import TEXT_HINT_HIGH, TEXT_HINT_MID
+
+    level = "高" if hint >= TEXT_HINT_HIGH else "中" if hint >= TEXT_HINT_MID else "低"
+    return f"（文字のありそうな度合い: {level}）"
+
+
+def _ocr_skipped(item: ItemResult, data: bytes, reason: str) -> Uncheckable:
+    """OCR を使わずに要目視にするときの例外を作る。見る順の手がかりに、文字のありそうな度合いを付ける。"""
+    item.text_hint = text_hint(data)
+    return Uncheckable(reason + text_hint_label(item.text_hint))
+
+
 def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector, depth: int) -> None:
     from PIL import Image
 
@@ -1064,9 +1113,13 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
             )
         return
     if not ctx.options.ocr:
-        raise Uncheckable(f"OCR を無効にして実行したため画像の中の文字を検査していない（要目視。{OCR_OFF_HINT}）")
+        raise _ocr_skipped(
+            item, data, f"OCR を無効にして実行したため画像の中の文字を検査していない（要目視。{OCR_OFF_HINT}）"
+        )
     if not ocr.is_available():
-        raise Uncheckable(f"OCR が使えないため画像の中の文字を検査できない（要目視）。{ocr.unavailable_reason()}")
+        raise _ocr_skipped(
+            item, data, f"OCR が使えないため画像の中の文字を検査できない（要目視）。{ocr.unavailable_reason()}"
+        )
     try:
         text = ocr.ocr_image_bytes(data)
     except ValueError as e:  # 頭は読めたが中身が途中で切れている等（そのままだと「読み取り中にエラー」になる）

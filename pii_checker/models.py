@@ -82,6 +82,12 @@ class Finding:
     raw_context: str = ""
 
 
+# 文字のありそうな度合い（ItemResult.text_hint）の境目。合成の見本で、文書 0.10・画面の写し 0.07・名刺 0.02・
+# 紙を撮った写真 0.015・数文字だけ 0.008・写真や雑音や無地 0 だった。中以上を要対応の先頭へ出す
+TEXT_HINT_HIGH = 0.04
+TEXT_HINT_MID = 0.01
+
+
 @dataclass
 class ItemResult:
     """検査対象1件の結果。アーカイブ内のファイルは「外側!内側」のパスで1件になる。"""
@@ -113,6 +119,9 @@ class ItemResult:
     pos_overflow: bool = False  # 位置の数が上限を超えて、途中までしか集めていない
     # 位置の集め直しのときだけ、形式ごとの処理が足す構造の情報（Oracle ダンプの表ごとの列名など。値は含めない・保存しない）
     pos_info: dict = field(default_factory=dict)
+    # OCR を使わずに要目視にした画像の、文字のありそうな度合い（0〜1・formats.misc.text_hint）。要対応の並べ替えに使う。
+    # 計っていない項目は None
+    text_hint: float | None = None
 
 
 @dataclass

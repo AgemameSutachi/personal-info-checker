@@ -25,7 +25,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from . import __version__, folderacl, jobdiff, reportflags
 from .detectors import PII_TYPES
-from .models import STATUS_LABELS, Confidence, Status
+from .models import STATUS_LABELS, TEXT_HINT_MID, Confidence, Status
 from .store import Store
 from .userrules import rule_names
 from .verdict import decide
@@ -392,10 +392,12 @@ def write_xlsx(store: Store, job_id: str, out_path: str) -> str:
     # 2. 要対応
     ws = _sheet(wb, "要対応", [16, 80, 26, 70, 11], wrap_cols=(4,))
     _row(ws, ["区分", "パス", "形式", "理由・対処", "大きさ(KB)"], bold=True)
-    order = {"needs_password": 0, "uncheckable": 1, "pending": 2, "partial": 3}
+    # OCR を使わずに要目視にした画像のうち、文字のありそうな度合いが中以上のものを、高い順に先頭へ出す
+    # （低いもの・計っていない項目は従来どおりパスの順）
     for r in store.iter_query(
-        "SELECT status, path, kind, reason, size FROM items WHERE job_id=? AND status IN ('needs_password','uncheckable','pending','partial') ORDER BY path",
-        (job_id,),
+        "SELECT status, path, kind, reason, size FROM items WHERE job_id=? AND status IN ('needs_password','uncheckable','pending','partial')"
+        " ORDER BY CASE WHEN text_hint >= ? THEN text_hint END DESC, path",
+        (job_id, TEXT_HINT_MID),
     ):
         _row(
             ws,

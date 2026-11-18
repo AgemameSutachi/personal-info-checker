@@ -327,6 +327,8 @@ class Store:
             self._conn.execute("ALTER TABLE items ADD COLUMN distinct_counts TEXT")
         if "rule_counts" not in cols:  # 利用者の規則の名前→件数（古い版の DB では空＝規則ごとに分けていない）
             self._conn.execute("ALTER TABLE items ADD COLUMN rule_counts TEXT DEFAULT '{}'")
+        if "text_hint" not in cols:  # 要目視の画像の文字のありそうな度合い（古い版の DB では NULL＝計っていない）
+            self._conn.execute("ALTER TABLE items ADD COLUMN text_hint REAL")
         fcols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)")}
         for name, decl in FILE_EXTRA_COLUMNS.items():
             if name not in fcols:
@@ -764,11 +766,12 @@ class Store:
                         it.allowed,
                         js(it.distinct_counts or {}),
                         js(it.rule_counts or {}),
+                        it.text_hint,
                     )
                     c.execute(
                         "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime,"
-                        " depth, password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        " depth, password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts,"
+                        " text_hint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         row if clean is None else tuple(map(clean, row)),
                     )
                     rows = [
@@ -864,9 +867,9 @@ class Store:
             c.execute("DELETE FROM findings WHERE job_id=? AND top_path=?", (job_id, top))
             c.execute(
                 "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts) SELECT ?, top_path,"
-                " seq, path, kind, status, reason, method, size, mtime, depth, password_kind, counts, notes, conf_counts,"
-                " allowed, distinct_counts, rule_counts FROM items WHERE job_id=? AND top_path=?",
+                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts, text_hint) SELECT ?,"
+                " top_path, seq, path, kind, status, reason, method, size, mtime, depth, password_kind, counts, notes,"
+                " conf_counts, allowed, distinct_counts, rule_counts, text_hint FROM items WHERE job_id=? AND top_path=?",
                 (job_id, src["job_id"], top),
             )
             # 印は写さずに決め直す（印の決め方は検査器の版に含めないので、前回の後で変わっていることがある）
@@ -1011,10 +1014,11 @@ class Store:
             args += [src["job_id"], src_top]
             c.execute(
                 "INSERT INTO items(job_id, top_path, seq, path, kind, status, reason, method, size, mtime, depth,"
-                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts) SELECT ?, ?, seq,"
-                " CASE WHEN substr(path, 1, ?) = ? THEN ? || substr(path, ? + 1) ELSE path END, kind, status,"
+                " password_kind, counts, notes, conf_counts, allowed, distinct_counts, rule_counts, text_hint) SELECT ?,"
+                " ?, seq, CASE WHEN substr(path, 1, ?) = ? THEN ? || substr(path, ? + 1) ELSE path END, kind, status,"
                 f" {reason}, method, size, CASE WHEN depth = 0 THEN ? ELSE mtime END, depth, password_kind, counts,"
-                f" {notes}, conf_counts, allowed, distinct_counts, rule_counts FROM items WHERE job_id=? AND top_path=?",
+                f" {notes}, conf_counts, allowed, distinct_counts, rule_counts, text_hint FROM items"
+                " WHERE job_id=? AND top_path=?",
                 args,
             )
             # 実ファイル自身の項目の補足のうち、最終アクセス日時のものは写す先のファイルの事実に付け替える

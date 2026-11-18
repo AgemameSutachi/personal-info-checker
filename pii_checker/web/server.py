@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__, folderacl, jobdiff, reportflags
 from ..detectors import PII_TYPES
-from ..models import STATUS_LABELS, Confidence, PasswordBook, ScanOptions, Status
+from ..models import STATUS_LABELS, TEXT_HINT_MID, Confidence, PasswordBook, ScanOptions, Status
 from ..runner import DEFAULT_TIMEOUT, RunnerRegistry
 from ..remediate import ARCHIVE_DELETE_LABEL, METHOD_LABELS, RemedyService
 from ..remedy_write import RemedyError
@@ -663,28 +663,31 @@ def create_app(
         if status != "folder":
             marks = ",".join("?" * len(item_statuses))
             parts.append(
-                "SELECT 'item' AS src, status, path, kind, reason, top_path, size FROM items WHERE job_id=? "
+                "SELECT 'item' AS src, status, path, kind, reason, top_path, size, text_hint FROM items WHERE job_id=? "
                 f"AND status IN ({marks}) AND path LIKE ?"
             )
             args += [job_id, *item_statuses, like]
         if status in ("", "folder"):
             parts.append(
-                "SELECT 'folder' AS src, kind AS status, path, '' AS kind, reason, path AS top_path, NULL AS size"
-                " FROM folder_errors WHERE job_id=? AND path LIKE ?"
+                "SELECT 'folder' AS src, kind AS status, path, '' AS kind, reason, path AS top_path, NULL AS size,"
+                " NULL AS text_hint FROM folder_errors WHERE job_id=? AND path LIKE ?"
             )
             args += [job_id, like]
         if status in ("", "pending"):
             parts.append(
                 "SELECT 'file' AS src, 'pending' AS status, top_path AS path, '' AS kind, 'まだ検査していない' AS reason,"
-                " top_path, size FROM files"
+                " top_path, size, NULL AS text_hint FROM files"
                 " WHERE job_id=? AND state='pending' AND top_path LIKE ?"
             )
             args += [job_id, like]
-        # 複合の SELECT の ORDER BY には式を書けないので、外側で包んで並べる
+        # 複合の SELECT の ORDER BY には式を書けないので、外側で包んで並べる。
+        # 同じ区分の中では、OCR を使わずに要目視にした画像のうち文字のありそうな度合いが中以上のものを高い順に先へ
         sql = (
             "SELECT * FROM (" + " UNION ALL ".join(parts) + ") ORDER BY CASE status WHEN 'needs_password' THEN 0"
-            " WHEN 'uncheckable' THEN 1 WHEN 'error' THEN 2 WHEN 'link' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END, path"
+            " WHEN 'uncheckable' THEN 1 WHEN 'error' THEN 2 WHEN 'link' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END,"
+            " CASE WHEN text_hint >= ? THEN text_hint END DESC, path"
         )
+        args.append(TEXT_HINT_MID)
         total, rows = _page(sql, tuple(args), offset, limit)
         label = {**STATUS_JA, "error": "読めなかったフォルダ", "link": "リンク"}
         return {

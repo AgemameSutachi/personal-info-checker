@@ -161,6 +161,35 @@ def test_strip_progressive_jpeg_and_trailer():
     assert pixels(new) == pixels(data)
 
 
+def _app(marker: int, body: bytes) -> bytes:
+    return bytes([0xFF, marker]) + (len(body) + 2).to_bytes(2, "big") + body
+
+
+def test_strip_jpeg_removes_thumbnails_in_app0():
+    """JFXX（縮小版の画像）と縮小版を持つ JFIF は消し、縮小版の無い最初の JFIF だけ残す。"""
+    data = photo_jpeg()
+    assert data[2:4] == b"\xff\xe1"  # 検体は XMP が先頭。JFIF は後ろにある
+    jfif_with_thumb = b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x01\x01" + b"SECRETTHUMB"
+    jfxx = b"JFXX\x00\x10" + b"SECRETNAME-thumb"
+    sos = data.index(b"\xff\xda")
+    mixed = data[:sos] + _app(0xE0, jfif_with_thumb) + _app(0xE0, jfxx) + data[sos:]
+    new, stats = remedy_photo.strip_jpeg(mixed)
+    assert b"SECRET" not in new
+    assert [m for m, _ in jpeg_markers(new)].count(0xE0) == 1  # 元の 0×0 の JFIF だけ
+    assert pixels(new) == pixels(mixed)
+
+
+def test_strip_progressive_jpeg_removes_segments_between_scans():
+    """走査の間に置かれた APPn・コメントも消す（画素は変わらない）。"""
+    data = photo_jpeg(progressive=True)
+    second = data.index(b"\xff\xda", data.index(b"\xff\xda") + 2)
+    between = _app(0xE1, b"Exif\x00\x00SECRET-between") + _app(0xFE, b"SECRET-comment")
+    mixed = data[:second] + between + data[second:]
+    new, _ = remedy_photo.strip_jpeg(mixed)
+    assert b"SECRET" not in new
+    assert pixels(new) == pixels(data)
+
+
 @pytest.mark.parametrize(
     "broken",
     [

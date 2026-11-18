@@ -62,10 +62,15 @@ def minimal_exif_tiff(orientation: int) -> bytes:
     )
 
 
-def _jpeg_keep_segment(marker: int, body: bytes) -> bool:
-    """JPEG の区切り（長さを持つもの）を残すか。画像を解くのに要るもの・色の情報だけを残す。"""
-    if marker == 0xE0:  # APP0（JFIF・JFXX。色の決まりと、本体と同じ画像の縮小版）
-        return True
+def _jpeg_keep_segment(marker: int, body: bytes, jfif_kept: bool = False) -> bool:
+    """JPEG の区切り（長さを持つもの）を残すか。画像を解くのに要るもの・色の情報だけを残す。
+
+    APP0 は、縮小版の画像を持たない（0×0 の）最初の JFIF だけ残す。JFXX（縮小版の画像）・縮小版を持つ JFIF・
+    2つ目からの JFIF・ほかの APP0 は消す（縮小版は別の画像で、顔などが写りうるため）。
+    jfif_kept は、すでに JFIF を1つ残したか。
+    """
+    if marker == 0xE0:
+        return not jfif_kept and body.startswith(b"JFIF\x00") and len(body) >= 14 and body[12] == 0 and body[13] == 0
     if marker == 0xE2:  # APP2 は ICC（色）だけ残す。MPF（別の画像の目録）・FlashPix は消す
         return body.startswith(b"ICC_PROFILE\x00")
     if marker == 0xEE:  # APP14 は Adobe（色の変換の決まり）だけ残す
@@ -95,6 +100,7 @@ def strip_jpeg(data: bytes, orientation: int = 1) -> tuple[bytes, dict]:
     out = bytearray(b"\xff\xd8")
     removed = 0
     exif_at = None  # 向きだけの EXIF を差し込む位置（先頭の APP0 の後ろ）
+    jfif_kept = False
     pos = 2
     while True:
         if pos + 2 > len(data) or data[pos] != 0xFF:
@@ -114,16 +120,24 @@ def strip_jpeg(data: bytes, orientation: int = 1) -> tuple[bytes, dict]:
         size = _segment_length(data, pos)
         if marker != 0xE0 and exif_at is None:
             exif_at = len(out)
-        if marker == 0xDA:  # 画像のデータの始まり。ここから終わりの印までを写す
-            end = _jpeg_image_end(data, pos)
-            out += data[pos:end]
+        if marker == 0xDA:  # 画像のデータの始まり。ここから終わりの印までを、間に入った情報の塊を除いて写す
+            end, drops = _jpeg_image_end(data, pos)
+            start = pos
+            for d_start, d_end in drops:
+                out += data[start:d_start]
+                start = d_end
+            out += data[start:end]
+            removed += len(drops)
             trailer = len(data) - end
             break
-        if _jpeg_keep_segment(marker, data[pos + 4 : pos + size]):
+        if _jpeg_keep_segment(marker, data[pos + 4 : pos + size], jfif_kept):
             out += data[pos : pos + size]
+            jfif_kept = jfif_kept or marker == 0xE0
         else:
             removed += 1
         pos += size
+    if exif_at is None:
+        exif_at = 2
     if orientation != 1:
         tiff = b"Exif\x00\x00" + minimal_exif_tiff(orientation)
         seg = b"\xff\xe1" + struct.pack(">H", len(tiff) + 2) + tiff
@@ -131,13 +145,14 @@ def strip_jpeg(data: bytes, orientation: int = 1) -> tuple[bytes, dict]:
     return bytes(out), {"meta_blocks": removed, "trailer_bytes": trailer}
 
 
-def _jpeg_image_end(data: bytes, pos: int) -> int:
-    """最初の SOS（pos）から、画像の終わりの印（EOI）の直後までの位置。
+def _jpeg_image_end(data: bytes, pos: int) -> tuple[int, list[tuple[int, int]]]:
+    """最初の SOS（pos）から、画像の終わりの印（EOI）の直後までの位置と、間に入った消す区切りの範囲の並び。
 
     圧縮したデータの中の 0xFF は 0x00 かリスタートの印が続く。プログレッシブの JPEG では、走査の間に表（DHT）や
     次の SOS が入るので、長さを持つ区切りは長さで飛ばす（その中の 0xFFD9 を終わりと読み違えない）。
-    間に入ったコメント・APPn は、ほかの所と同じく消さずに写す（決まりの上では置けるが、まず見ない）。
+    間に入ったコメント・APPn（決まりの上では置けるが、まず見ない）は、ほかの所と同じく消す範囲として返す。
     """
+    drops: list[tuple[int, int]] = []
     pos += _segment_length(data, pos)
     while True:
         ff = data.find(b"\xff", pos)
@@ -150,8 +165,11 @@ def _jpeg_image_end(data: bytes, pos: int) -> int:
             pos = ff + 1 if nxt == 0xFF else ff + 2
             continue
         if nxt == 0xD9:
-            return ff + 2
-        pos = ff + _segment_length(data, ff)
+            return ff + 2, drops
+        size = _segment_length(data, ff)
+        if (0xE0 <= nxt <= 0xEF or nxt == 0xFE) and not _jpeg_keep_segment(nxt, data[ff + 4 : ff + size], True):
+            drops.append((ff, ff + size))
+        pos = ff + size
 
 
 def strip_png(data: bytes, orientation: int = 1) -> tuple[bytes, dict]:
@@ -237,7 +255,7 @@ def rewrite_photo_file(src: str, dst: str, method: str, sel: Selection) -> dict:
     orientation = _orientation(data)
     if data.startswith(b"\xff\xd8"):
         new, stats = strip_jpeg(data, orientation)
-        others = "連写・深度・HDR の明るさなどの別の画像"
+        others = "動画（モーションフォト）・連写・深度・HDR の明るさなどの別のデータ"
     elif data.startswith(PNG_SIG):
         new, stats = strip_png(data, orientation)
         others = "道具が付けたデータ"

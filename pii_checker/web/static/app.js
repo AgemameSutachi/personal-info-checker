@@ -1246,7 +1246,10 @@ const RM_SHORT = {
   delete_file: "ファイルを削除", delete_rows: "行を削除", delete_columns: "列を削除", dummy: "ダミー化",
   delete_sheet: "シートを削除", delete_table: "表を削除", remove_entry: "圧縮ファイルから取り除く", convert_zip: "zip に作り直す",
   redact: "黒塗り", delete_pages: "ページを削除", delete_paragraphs: "段落を削除", delete_slides: "スライドを削除",
+  strip_photo_meta: "写真の情報を消す",
 };
+// 種類・確度で選ばない方法（ファイルごと・中のファイルごと・写真の情報をまとめて消す）
+const RM_NO_FILTER = ["delete_file", "remove_entry", "strip_photo_meta"];
 function shortMethodName(x) {
   if (x.method === "delete_file" && x.item_path) return "圧縮ファイルごと削除";
   return RM_SHORT[x.method] || x.method_label;
@@ -1276,6 +1279,7 @@ function changedText(c) {
   if (c.pages_removed) parts.push(`ページ ${fmtNum(c.pages_removed)} を削除`);
   if (c.paragraphs) parts.push(`段落 ${fmtNum(c.paragraphs)} を削除`);
   if (c.slides) parts.push(`スライド ${fmtNum(c.slides)} を削除`);
+  if (c.meta_blocks) parts.push(`写真の情報 ${fmtNum(c.meta_blocks)} か所を削除`);
   if (c.cleaned) parts.push(`文書情報・注釈・属性値などに残った値 ${fmtNum(c.cleaned)} か所も取り除き`);
   if (c.outside_table) parts.push(`表の外の検出は未変更 ${fmtNum(c.outside_table)}`);
   if (c.skipped_formula) parts.push(`数式は未変更 ${fmtNum(c.skipped_formula)}`);
@@ -1372,7 +1376,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
   const checks = (name) => [...area.querySelectorAll(`input[name="${name}"]:checked`)].map((x) => x.value);
   area.querySelectorAll('input[name="rm-method"]').forEach((r) => r.addEventListener("change", () => {
     const m = chosen();
-    $("#rm-filters").classList.toggle("hidden", m === "delete_file" || m === "remove_entry");
+    $("#rm-filters").classList.toggle("hidden", RM_NO_FILTER.includes(m));
     $("#rm-dummy-set").classList.toggle("hidden", m !== "dummy");
     $("#rm-preview").disabled = false;
     $("#rm-preview-hint").classList.add("hidden");
@@ -1387,7 +1391,7 @@ function renderRemedyForm(topPath, a, btn, itemPath = "") {
     const body = { top_path: topPath, method };
     if (itemPath) body.item_path = itemPath;
     if (needConvert && method !== "delete_file") body.convert_zip = true;
-    if (method !== "delete_file" && method !== "remove_entry") {
+    if (!RM_NO_FILTER.includes(method)) {
       body.types = checks("rm-type");
       body.confidences = checks("rm-conf");
       if (a.sheets.length) body.sheets = checks("rm-sheet");

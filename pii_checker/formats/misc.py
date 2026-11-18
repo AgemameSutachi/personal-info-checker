@@ -633,9 +633,13 @@ _EXIF_IFD = 0x8769
 _GPS_IFD = 0x8825
 GPS_NOTE = (
     f"{GPS_NOTE_MARK}。自宅などの場所が分かることがあるので、外へ出すときは"
-    "位置情報を消す（この道具では消せない。Windows ならファイルを右クリック →「プロパティ」→「詳細」→"
+    "位置情報を消す（JPEG・PNG で個人情報の検出があれば、対処の「写真の情報を消す」で一緒に消せる。"
+    "それ以外は、Windows ならファイルを右クリック →「プロパティ」→「詳細」→"
     "「プロパティや個人情報を削除」で消せる。個人情報の検出には数えていない）"
 )
+# 写真の情報を対処で消せる形式（PIL の format の名前。MPO は連写などの別の画像を後ろに持つ JPEG）
+PHOTO_FORMATS = ("JPEG", "MPO", "PNG")
+PHOTO_SHEET = "写真の情報"  # 対処の位置の「シート」の名前
 _EXIF_SCAN_HEAD = 4 * 1024 * 1024  # HEIC の中の EXIF を探す範囲（先頭から）
 
 
@@ -1038,10 +1042,19 @@ def handle_image(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collector,
             except Exception:  # 壊れた EXIF は読まない（画像の文字の検査は続ける）
                 exif = None
             pil_xmp = _pil_xmp(im)
+            photo = im.format in PHOTO_FORMATS
     except Exception as e:
         raise Uncheckable(f"画像を開けなかった（壊れているか未対応の形式）。{IMAGE_BROKEN_HELP}（詳細: {e}）")
+    if photo:
+        # 対処（remedy_photo）で写真の情報を消せるよう、EXIF・XMP の検出の位置を集める（画像の中の文字の OCR は集めない）
+        col.pos_layout = "photo"
+        col.pos_sheet = PHOTO_SHEET
+        col.cell_pos = (1, 0)
     exif_fields = scan_exif(exif, item, col)  # 写真の情報は、OCR を使わない・小さな画像でも読む
+    if photo:
+        col.cell_pos = (2, 0)
     xmp_count = scan_xmp(data, item, col, pil_xmp)
+    col.cell_pos = None
     if max(w, h) < ctx.options.min_image_px:
         item.method = f"{w}×{h}px の小さな画像（文字を読み取れる大きさでないため検査不要）"
         if exif_fields or xmp_count:

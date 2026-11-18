@@ -1971,6 +1971,12 @@ _RE_CELL_GAP = re.compile(r"(?: {2,}|[\t　][ \t　]*| [\t　][ \t　]*)")
 _HEADER_ROW_MAX = 200
 # 見出し行とデータの行の間にはさんでよい空行の数
 _HEADER_ROW_BLANKS = 2
+# 見出し行の値の数（語の一部の「上位5日除」「1束あたり」の数字は除く。2026-11-19・手元の文書の株の報告と設計の文書）。
+# 年・月・歳などの続く数（「2024年4月入社」「3年目」「30歳」「201号室」「1000円」）は帳票の値なので数える
+# （「日」は「上位5日除」があるので入れない）
+_RE_VALUE_NUMBER = re.compile(r"\d+(?:[年月歳才代円号階]|(?![\d" + NAME_CHARS[1:-1] + r"A-Za-z]))")
+# これ以上のセルの見出し行は、次の行のセルが多くても（データの行の左の語が空白2つで割れる）表とみなす
+_WIDE_HEADER_CELLS = 5
 NAME_IN_HEADER_ROW_NOTE = "（固定幅の表の見出し行の形のため 低）"
 # 「氏名の見出し語＋名前」の「=」の形がコードの代入・引数かを見るための値（2026-11-07・株のコードの日本語の変数）。
 # 人の名前の後ろにも来る「(」「（」「・」「/」「空白＋英字」は入れない（`氏名="山田太郎（営業部）"`・`氏名=山田太郎(営業部)`）
@@ -2029,11 +2035,14 @@ def _name_label_in_header_row(text: str, h: Hit) -> str:
     「名前      年率      超過」「氏名      住所      電話」では、見出し語の後の空白の並びの先の語
     （次の列の見出し）を名前に読んでいた（2026-11-07 の株のデータの報告の文で見つけた形）。見るのは、
     見出し語と値の間が空白2つ以上・タブ・全角空白（表の列の区切り）で、その行が3つ以上のセルに分かれ、
-    数字を1つも含まない（見出し行には値が無い）・_HEADER_ROW_MAX 文字までの行だけ。
+    値の数を含まない（見出し行には値が無い。語の一部の「上位5日除」「1束あたり」の数字は数えない）・
+    _HEADER_ROW_MAX 文字までの行だけ。
     - "drop": 値の最初の語そのものが個人情報の見出しの語（header_category が当たる「住所」「電話」）
     - "low": 次の空でない行が同じ数のセルに分かれ、値の列から右のセルに数字があり、最初のセルが見出しの語でない
       （表のデータの行「ベンチ      5.2%    0.0%」）。帳票の「氏名    山田太郎    営業部」の次の行が
-      「入社日    2024/01/01    正社員」のように同じ形になることがあるので、落とさずに 低 にする
+      「入社日    2024/01/01    正社員」のように同じ形になることがあるので、落とさずに 低 にする。
+      見出し行が _WIDE_HEADER_CELLS 以上のセルなら、次の行のセルが同数以上で、値の列から右の半分以上に
+      数字があるときも 低（帳票の行はそこまで広くならない）
     - "": 上のどれでもない。次の行が「電話    03-1234-5678    内線12」のように見出しの語で始まる帳票・
       次の行の無い1行だけの見出しは、今までどおり 中
     """
@@ -2047,7 +2056,7 @@ def _name_label_in_header_row(text: str, h: Hit) -> str:
         return ""
     line_start, line_end = bounds
     line = text[line_start:line_end]
-    if any(c.isdigit() for c in line):
+    if _RE_VALUE_NUMBER.search(line):
         return ""
     cells = _fixed_width_cells(line)
     if len(cells) < 3:
@@ -2064,10 +2073,17 @@ def _name_label_in_header_row(text: str, h: Hit) -> str:
             return ""
         nxt = _fixed_width_cells(text[pos : nxt_bounds[1]])
         if nxt:
+            if header_category(nxt[0]) is not None:
+                return ""
+            right = nxt[column:]
+            if len(nxt) == len(cells) and any(c.isdigit() for cell in right for c in cell):
+                return "low"
+            # 広い見出し行の次の行で、セルが同数以上・値の列から右の半分以上に数字がある（データの行の
+            # 左の語「H1-2 営業CF÷総資産|素     抜き」が空白で割れてセルが増える株の報告の表）
             if (
-                len(nxt) == len(cells)
-                and any(c.isdigit() for cell in nxt[column:] for c in cell)
-                and header_category(nxt[0]) is None
+                len(cells) >= _WIDE_HEADER_CELLS
+                and len(nxt) >= len(cells)
+                and 2 * sum(any(c.isdigit() for c in cell) for cell in right) >= len(right)
             ):
                 return "low"
             return ""

@@ -1405,9 +1405,10 @@ def handle_unknown(ctx: ScanContext, blob: Blob, item: ItemResult, col: Collecto
             f"形式不明で、中身が圧縮または暗号化されている（エントロピー {e:.2f}/8）ため文字を取り出せない"
         )
     with blob.open() as f:
-        for s in iter_strings_chunked(f.read):
+        # BOM の無い UTF-16BE の日本語も拾う（重いので、ほかの生データ走査では読まない）
+        for s in iter_strings_chunked(f.read, big_endian=True):
             col.add_text(s, "生データ", method="生データ走査")
-    item.method = f"生データ走査（UTF-16/cp932/UTF-8 の文字列を抽出・エントロピー {e:.2f}）"
+    item.method = f"生データ走査（UTF-16LE/BE・cp932・UTF-8 の文字列を抽出・エントロピー {e:.2f}）"
     raise PartialScan(
         "形式が分からないため、文字として読める部分だけを検査した（独自形式の中の数値や圧縮された部分は読めない）"
     )

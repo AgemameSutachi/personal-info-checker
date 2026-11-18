@@ -141,11 +141,54 @@ def entropy(sample: bytes) -> float:
     return -sum(c / n * math.log2(c / n) for c in counts.values())
 
 
-def iter_strings(data: bytes, min_len: int = 4) -> Iterator[str]:
+_RE_BE_JA = re.compile(r"[ぁ-ヺ一-鿿]")
+# ビッグエンディアンの読みで拾う並びの条件（_be_plausible）
+BE_MIN_REAL_CHARS = 2
+BE_MIN_REAL_RATIO = 0.2
+BE_MIN_DISTINCT = 2
+
+
+def _from_ascii_pair(c: str) -> bool:
+    """印字できる ASCII の2バイトをビッグエンディアンで読んだ形で作れる文字か（"AB" → U+4142 の類）。"""
+    v = ord(c)
+    return 0x20 <= v >> 8 <= 0x7E and 0x20 <= v & 0xFF <= 0x7E
+
+
+def _is_level1(c: str) -> bool:
+    """かなか、JIS 第1水準の漢字（cp932 の 0x889F〜0x9872）か。"""
+    if "ぁ" <= c <= "ヺ":
+        return True
+    try:
+        b = c.encode("cp932")
+    except UnicodeEncodeError:
+        return False
+    return len(b) == 2 and 0x889F <= int.from_bytes(b, "big") <= 0x9872
+
+
+def _be_plausible(s: str) -> bool:
+    """ビッグエンディアンの読みで拾った並びが、日本語の文として本物らしいか。
+
+    バイナリを2バイトずつ読むと、乱れた漢字の並びがいくらでも出る（実ファイル 4,000 件で、条件が緩いと
+    「名前」の誤検出が 146 件）。次のすべてを満たす並びだけ拾う（同じ 4,000 件で誤検出 0 件）。
+    - かな漢字のうち、ASCII の2バイトから作れない字が BE_MIN_REAL_CHARS 字以上・BE_MIN_REAL_RATIO 以上
+    - かな漢字が全部、かなか JIS 第1水準の漢字（第2水準の字を含む並びは拾えない）
+    - かな漢字の異なる字が BE_MIN_DISTINCT 字以上（同じ字の繰り返しを除く）
+    ASCII だけの並びはここで拾わない（ビッグエンディアンの ASCII は、UTF-16LE を1バイトずらした読みで拾える）。
+    """
+    ja = _RE_BE_JA.findall(s)
+    real = sum(1 for c in ja if not _from_ascii_pair(c))
+    if real < BE_MIN_REAL_CHARS or real < len(ja) * BE_MIN_REAL_RATIO:
+        return False
+    return len(set(ja)) >= BE_MIN_DISTINCT and all(_is_level1(c) for c in ja)
+
+
+def iter_strings(data: bytes, min_len: int = 4, big_endian: bool = False) -> Iterator[str]:
     """バイナリから人が読める文字列を拾い出す（UTF-16LE 両位相・cp932・UTF-8）。
 
     Access・Excel97・Word97・一太郎などは本文を UTF-16LE か cp932 で持つため、
     構造が読めない形式や削除済み領域の残留もこれで拾える。
+    big_endian=True なら UTF-16BE の両位相も読み、日本語の文として本物らしい並び（_be_plausible）だけ足す
+    （約 14MB/秒と重いので、形式不明のファイルの読み方だけで使う）。
     """
     if not data:
         return
@@ -166,9 +209,20 @@ def iter_strings(data: bytes, min_len: int = 4) -> Iterator[str]:
                 continue
             seen.add(s)
             yield s
+    if not big_endian:
+        return
+    for text in (data.decode("utf-16-be", errors="replace"), data[1:].decode("utf-16-be", errors="replace")):
+        for m in RE_GOOD_RUN.finditer(text):
+            s = m.group(0).strip()
+            if len(s) < min_len or s in seen or not _be_plausible(s):
+                continue
+            seen.add(s)
+            yield s
 
 
-def iter_strings_chunked(read, chunk_size: int = 8 * 1024 * 1024, overlap: int = 4096) -> Iterator[str]:
+def iter_strings_chunked(
+    read, chunk_size: int = 8 * 1024 * 1024, overlap: int = 4096, big_endian: bool = False
+) -> Iterator[str]:
     """大きなファイルを少しずつ読みながら iter_strings する。read(n) はファイルの read。"""
     tail = b""
     seen: set[str] = set()
@@ -177,7 +231,7 @@ def iter_strings_chunked(read, chunk_size: int = 8 * 1024 * 1024, overlap: int =
         if not chunk:
             break
         buf = tail + chunk
-        for s in iter_strings(buf):
+        for s in iter_strings(buf, big_endian=big_endian):
             if s not in seen:
                 seen.add(s)
                 yield s
